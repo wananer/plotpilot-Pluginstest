@@ -1,12 +1,30 @@
 # PlotPilot Plugins Platform
 
-可独立分发的 PlotPilot 插件平台最小闭环。
+可独立分发的 PlotPilot 插件平台最小闭环，用于把 **插件发现、前端 runtime、宿主接入补丁、契约测试** 从具体业务插件中分离出来，形成一个可复用的平台骨架。
 
-包含：
-- `platform/scripts/install_plugin_platform.py`：把插件平台最小接入点补丁打到一份新的 PlotPilot 仓库
-- `platform/plugins/loader.py`：后端插件发现 / manifest / static mount / API & daemon 初始化
-- `platform/frontend/public/plugin-loader.js`：前端 runtime / manifest 拉取 / 插件脚本注入 / host 事件分发
-- `tests/`：最小回归测试（仅依赖当前仓库内容，可直接在仓库根目录执行 `pytest`）
+## 仓库包含内容
+
+- `platform/scripts/install_plugin_platform.py`
+  - 把插件平台最小接入点补丁打到一份新的 PlotPilot 宿主仓库
+- `platform/plugins/loader.py`
+  - 后端插件发现 / manifest 解析 / API & daemon 初始化 / manifest list 路由
+- `platform/frontend/public/plugin-loader.js`
+  - 前端 runtime / manifest 拉取 / 插件脚本注入 / host 事件分发
+- `tests/`
+  - 最小回归测试（仅依赖当前仓库内容，可直接在仓库根目录执行 `pytest`）
+- `docs/HOST_TOUCHPOINTS.md`
+  - 宿主最小接入点说明
+- `PURITY_REPORT.md`
+  - 当前仓库纯净度审计结论
+
+## 适用场景
+
+适合你要做这些事时使用：
+
+- 给 PlotPilot 建立统一插件接口/加载器
+- 把宿主里的自定义能力逐步迁入 `plugins/`
+- 让后续自定义开发走统一插件入口，而不是继续散落在宿主代码里
+- 为外部业务插件仓库提供稳定的宿主接入协议
 
 ## 安装到 PlotPilot 宿主仓库
 
@@ -21,13 +39,32 @@ python3 platform/scripts/install_plugin_platform.py /path/to/PlotPilot
 - `frontend/vite.config.ts`：补 `/plugins` 代理
 - 复制 `plugin-loader.js` 与 `plugins/loader.py`
 
-## 运行测试
+## 快速验证
 
 ```bash
 pytest
 ```
 
-## 当前定位
+当前仓库验证目标：
+- fresh clone 后无需依赖外部 PlotPilot 主仓库文件
+- 仓库根目录可直接运行测试
+- 不依赖外部业务插件源码
+
+## 仓库边界
 
 这是**插件平台骨架仓库**，不是业务插件全集。
-业务插件（如 bionic_memory）后续可作为独立插件仓库继续拆分。
+
+- 允许：平台 loader / runtime / installer / 平台测试 / 平台文档
+- 不建议混入：`bionic_memory`、`rolecard`、`autopilot`、`rewrite`、`novel` 等具体业务实现
+
+业务插件（如 `bionic_memory`）应继续作为**独立插件仓库**演进，而不是回灌到平台仓库主体。
+
+## 相关文档
+
+- `PURITY_REPORT.md`
+- `CONTRIBUTING.md`
+- `docs/HOST_TOUCHPOINTS.md`
+
+## License
+
+MIT
