@@ -52,6 +52,7 @@ from interfaces.api.dependencies import (
 )
 from interfaces.api.middleware.logging_config import setup_logging
 
+from plugins.loader import init_daemon_plugins
 (DATA_DIR / "logs").mkdir(parents=True, exist_ok=True)
 _log_level = getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO)
 _default_log = str(AITEXT_ROOT / "logs" / "aitext.log")
@@ -162,6 +163,8 @@ if __name__ == "__main__":
     logger.info("=" * 80)
 
     daemon = build_daemon()
+
+    init_daemon_plugins()
     try:
         daemon.run_forever()
     except KeyboardInterrupt:

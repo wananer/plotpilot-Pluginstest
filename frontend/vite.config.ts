@@ -28,6 +28,11 @@ export default defineConfig({
         // 不要重写路径
         rewrite: (path) => path,
       },
+      '/plugins': {
+        target: 'http://127.0.0.1:8005',
+        changeOrigin: true,
+        rewrite: (path) => path,
+      },
     },
   },
 })

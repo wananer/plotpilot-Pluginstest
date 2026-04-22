@@ -1,5 +1,41 @@
 # PlotPilot（墨枢）
 
+## Plugin Platform Installer
+
+这个仓库当前额外提供 **最小插件平台安装器**，用于把 `plugins/` 插件宿主接入层一键安装到一个干净的 PlotPilot upstream 工作树里。
+
+适用场景：
+- 你想尽量保持宿主代码贴近 upstream
+- 你要把自定义功能逐步迁入 `plugins/`
+- 你需要一套可重复执行、可审查、可测试的最小接入脚本
+
+一键安装：
+
+```bash
+python scripts/install_plugin_platform.py
+```
+
+脚本会在**当前工作目录**下安装/更新以下最小接入点：
+- `plugins/loader.py`
+- `frontend/public/plugin-loader.js`
+- `frontend/index.html`
+- `frontend/vite.config.ts`
+- `interfaces/main.py`
+- `scripts/start_daemon.py`
+
+验证：
+
+```bash
+pytest tests/unit/scripts/test_install_plugin_platform.py -q
+```
+
+预期结果：
+- 首次执行输出 `Installed/updated plugin platform:`
+- 重复执行输出 `Plugin platform already installed; no changes made.`
+- 测试通过，证明安装器具备幂等性
+
+---
+
 <p align="center">
   <img src="docs/plotpilot-readme.256.png" alt="PlotPilot 墨枢" width="480" />
 </p>

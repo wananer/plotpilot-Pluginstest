@@ -83,6 +83,7 @@ from interfaces.api.stats.services.stats_service import StatsService
 from interfaces.api.stats.repositories.sqlite_stats_repository_adapter import SqliteStatsRepositoryAdapter
 from infrastructure.persistence.database.connection import get_database
 
+from plugins.loader import create_plugin_manifest_router, init_api_plugins
 # 产品发布版本（与前端 / 安装包一致）
 APP_RELEASE_VERSION = "1.0.2"
 # 构建标识（与安装包/发布说明一致，便于对账）
@@ -109,6 +110,8 @@ app = FastAPI(
     description="PlotPilot（墨枢）AI 小说创作平台 API",
     redirect_slashes=True,  # 自动将 /api/v1/novels 重定向到 /api/v1/novels/
 )
+
+app.include_router(create_plugin_manifest_router(), prefix="/api/v1")
 
 # ── 前端静态文件托管 ──
 _FRONTEND_DIR = Path(__file__).resolve().parents[1] / "frontend" / "dist"
@@ -155,6 +158,8 @@ async def startup_event():
     logger.info("📦 Loading modules and routes...")
     logger.info("✅ FastAPI application started successfully")
     logger.info(f"📊 Registered {len(app.routes)} routes")
+
+    init_api_plugins(app)
 
     # 重启时将所有运行中的小说设置为停止状态
     _stop_all_running_novels()
