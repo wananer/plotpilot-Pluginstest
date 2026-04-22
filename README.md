@@ -6,7 +6,7 @@
 - `platform/scripts/install_plugin_platform.py`：把插件平台最小接入点补丁打到一份新的 PlotPilot 仓库
 - `platform/plugins/loader.py`：后端插件发现 / manifest / static mount / API & daemon 初始化
 - `platform/frontend/public/plugin-loader.js`：前端 runtime / manifest 拉取 / 插件脚本注入 / host 事件分发
-- `tests/`：最小回归测试
+- `tests/`：最小回归测试（仅依赖当前仓库内容，可直接在仓库根目录执行 `pytest`）
 
 ## 安装到 PlotPilot 宿主仓库
 
@@ -20,6 +20,12 @@ python3 platform/scripts/install_plugin_platform.py /path/to/PlotPilot
 - `frontend/index.html`：注入 `/plugin-loader.js`
 - `frontend/vite.config.ts`：补 `/plugins` 代理
 - 复制 `plugin-loader.js` 与 `plugins/loader.py`
+
+## 运行测试
+
+```bash
+pytest
+```
 
 ## 当前定位
 

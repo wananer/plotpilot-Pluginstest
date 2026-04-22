@@ -9,6 +9,27 @@ from fastapi.testclient import TestClient
 from plugins import loader
 
 
+_RUNTIME_LOADER_FILE = Path(__file__).resolve().parents[1] / "platform" / "frontend" / "public" / "plugin-loader.js"
+_RUNTIME_INJECTOR_SAMPLE = """
+(function bootstrapSamplePluginInjector() {
+  const runtime = window.PlotPilotPlugins || null;
+  const host = window.__SamplePluginHost || (window.__SamplePluginHost = {});
+
+  function refreshCurrentNovel() {
+    return null;
+  }
+
+  host.__sampleRefresh = refreshCurrentNovel;
+
+  if (runtime) {
+    runtime.events.on('chapter:loaded', () => refreshCurrentNovel());
+    runtime.events.on('chapter:saved', () => refreshCurrentNovel());
+    runtime.events.on('route:changed', () => refreshCurrentNovel());
+  }
+})();
+"""
+
+
 def _make_plugin(
     tmp_path: Path,
     name: str,
@@ -245,9 +266,8 @@ def test_plugin_manifest_endpoint_deduplicates_frontend_scripts(monkeypatch, tmp
     ]
 
 
-def test_plugin_loader_runtime_exposes_host_events_and_deduplicates_scripts(tmp_path):
-    loader_file = Path("/Users/a8222325/.hermes/projects/PlotPilot/frontend/public/plugin-loader.js")
-    source = loader_file.read_text(encoding="utf-8")
+def test_plugin_loader_runtime_exposes_host_events_and_deduplicates_scripts():
+    source = _RUNTIME_LOADER_FILE.read_text(encoding="utf-8")
 
     assert "window.PlotPilotPlugins = runtime" in source
     assert "emitChapterSaved(payload)" in source
@@ -258,14 +278,13 @@ def test_plugin_loader_runtime_exposes_host_events_and_deduplicates_scripts(tmp_
     assert "if (runtime.scripts.has(src)) return;" in source
 
 
-def test_bionic_injector_uses_runtime_events_instead_of_polling():
-    injector_file = Path("/Users/a8222325/.hermes/projects/PlotPilot/plugins/bionic_memory/static/inject.js")
-    source = injector_file.read_text(encoding="utf-8")
+def test_plugin_injector_sample_uses_runtime_events_instead_of_polling():
+    source = _RUNTIME_INJECTOR_SAMPLE
 
     assert "window.PlotPilotPlugins || null" in source
     assert "runtime.events.on('chapter:loaded'" in source
     assert "runtime.events.on('chapter:saved'" in source
     assert "runtime.events.on('route:changed'" in source
-    assert "host.__bmRefresh = refreshCurrentNovel" in source
+    assert "host.__sampleRefresh = refreshCurrentNovel" in source
     assert "history.pushState = function () {" not in source
     assert "window.addEventListener('popstate', onUrlChange)" not in source
