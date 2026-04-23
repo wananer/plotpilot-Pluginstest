@@ -288,3 +288,29 @@ def test_plugin_injector_sample_uses_runtime_events_instead_of_polling():
     assert "host.__sampleRefresh = refreshCurrentNovel" in source
     assert "history.pushState = function () {" not in source
     assert "window.addEventListener('popstate', onUrlChange)" not in source
+
+
+def test_example_plugin_manifest_and_runtime_script_exist():
+    plugin_dir = Path(__file__).resolve().parents[1] / "plugins" / "example_plugin"
+    manifest_path = plugin_dir / "plugin.json"
+    init_path = plugin_dir / "__init__.py"
+    inject_path = plugin_dir / "static" / "inject.js"
+
+    assert plugin_dir.exists()
+    assert manifest_path.exists()
+    assert init_path.exists()
+    assert inject_path.exists()
+
+    manifest = manifest_path.read_text(encoding="utf-8")
+    init_source = init_path.read_text(encoding="utf-8")
+    inject_source = inject_path.read_text(encoding="utf-8")
+
+    assert '"name": "example_plugin"' in manifest
+    assert '"scripts": [' in manifest
+    assert 'def init_api(app):' in init_source
+    assert 'def init_daemon():' in init_source
+    assert "window.PlotPilotPlugins" in inject_source
+    assert "runtime.plugins.register" in inject_source
+    assert "runtime.events.on('chapter:loaded'" in inject_source
+    assert "runtime.events.on('chapter:saved'" in inject_source
+    assert "runtime.events.on('route:changed'" in inject_source

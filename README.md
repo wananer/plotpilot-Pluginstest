@@ -10,10 +10,14 @@
   - 后端插件发现 / manifest 解析 / API & daemon 初始化 / manifest list 路由
 - `platform/frontend/public/plugin-loader.js`
   - 前端 runtime / manifest 拉取 / 插件脚本注入 / host 事件分发
+- `plugins/example_plugin/`
+  - 一个最小可运行示例插件，演示 `plugin.json` + `__init__.py` + `static/inject.js`
 - `tests/`
   - 最小回归测试（仅依赖当前仓库内容，可直接在仓库根目录执行 `pytest`）
 - `docs/HOST_TOUCHPOINTS.md`
   - 宿主最小接入点说明
+- `docs/PLUGIN_DOCS_INDEX.md`
+  - 插件平台文档总入口
 - `PURITY_REPORT.md`
   - 当前仓库纯净度审计结论
 
@@ -50,6 +54,17 @@ pytest
 - 仓库根目录可直接运行测试
 - 不依赖外部业务插件源码
 
+## 示例插件
+
+仓库自带一个最小示例插件：`plugins/example_plugin/`
+
+包含：
+- `__init__.py`：演示 `init_api(app)` / `init_daemon()`
+- `plugin.json`：演示最小 manifest 写法
+- `static/inject.js`：演示如何接入 `window.PlotPilotPlugins` runtime、注册插件、监听宿主事件
+
+如果你要新写插件，最简单的起点就是直接复制这个目录，再改成自己的名字。
+
 ## 仓库边界
 
 这是**插件平台骨架仓库**，不是业务插件全集。
@@ -61,9 +76,13 @@ pytest
 
 ## 相关文档
 
+- `docs/PLUGIN_DOCS_INDEX.md`
+- `docs/PLUGIN_DEVELOPMENT_GUIDE.md`
+- `docs/PLUGIN_MANIFEST_SPEC.md`
+- `docs/PLUGIN_RUNTIME_API.md`
+- `docs/HOST_TOUCHPOINTS.md`
 - `PURITY_REPORT.md`
 - `CONTRIBUTING.md`
-- `docs/HOST_TOUCHPOINTS.md`
 
 ## License
 

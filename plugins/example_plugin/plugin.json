@@ -1,0 +1,11 @@
+{
+  "name": "example_plugin",
+  "display_name": "Example Plugin",
+  "version": "0.1.0",
+  "enabled": true,
+  "frontend": {
+    "scripts": [
+      "static/inject.js"
+    ]
+  }
+}
