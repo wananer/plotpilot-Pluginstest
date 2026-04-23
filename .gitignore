@@ -23,3 +23,6 @@ venv/
 # Local temp files
 *.log
 *.tmp
+
+# Frontend dependencies
+frontend/node_modules/

@@ -1,0 +1,12 @@
+{
+  "name": "plotpilot-plugin-platform-frontend",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test:config": "node --test tests/vite.config.test.mjs"
+  },
+  "devDependencies": {
+    "vite": "^5.4.19",
+    "@vitejs/plugin-vue": "^5.2.4"
+  }
+}
