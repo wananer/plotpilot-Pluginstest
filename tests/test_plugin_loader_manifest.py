@@ -63,11 +63,13 @@ def test_collect_frontend_scripts_prefers_manifest_entries(monkeypatch, tmp_path
 
     monkeypatch.setattr(loader, "_PLUGINS_ROOT", tmp_path)
 
-    assert loader.collect_frontend_scripts() == [
+    scripts = loader.collect_frontend_scripts()
+
+    assert scripts[:2] == [
         "/plugins/alpha/static/a.js",
         "/plugins/shared/b.js",
-        "/plugins/beta/static/inject.js",
     ]
+    assert scripts[2].startswith("/plugins/beta/static/inject.js?v=")
 
 
 def test_collect_frontend_scripts_skips_disabled_manifest(monkeypatch, tmp_path):
@@ -206,7 +208,7 @@ def test_plugin_manifest_endpoint_lists_enabled_plugins_and_frontend_assets(monk
         "/plugins/alpha/static/b.js",
     ]
     assert body["items"][1]["display_name"] == "gamma"
-    assert body["items"][1]["frontend_scripts"] == ["/plugins/gamma/static/inject.js"]
+    assert body["items"][1]["frontend_scripts"][0].startswith("/plugins/gamma/static/inject.js?v=")
     assert body["runtime"] == {
         "manifest_endpoint": "/api/v1/plugins/manifest",
         "plugins_endpoint": "/api/v1/plugins",

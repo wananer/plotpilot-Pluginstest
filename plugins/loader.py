@@ -133,6 +133,21 @@ def _resolve_frontend_script(plugin_name: str, script: str) -> str:
     return f"/plugins/{plugin_name}/{script.lstrip('/')}"
 
 
+def _append_frontend_asset_version(plugin_dir: Path, asset_url: str) -> str:
+    plugin_prefix = f"/plugins/{plugin_dir.name}/"
+    if not asset_url.startswith(plugin_prefix):
+        return asset_url
+
+    path_part = asset_url.split("?", 1)[0]
+    relative_path = path_part[len(plugin_prefix):]
+    asset_path = plugin_dir / relative_path
+    if not asset_path.exists() or not asset_path.is_file():
+        return asset_url
+
+    separator = "&" if "?" in asset_url else "?"
+    return f"{asset_url}{separator}v={asset_path.stat().st_mtime_ns}"
+
+
 def _collect_frontend_scripts_for_plugin(plugin_dir: Path, manifest: Dict[str, Any]) -> List[str]:
     frontend = manifest.get("frontend") if isinstance(manifest, dict) else None
     manifest_scripts = frontend.get("scripts", []) if isinstance(frontend, dict) else []
@@ -140,12 +155,12 @@ def _collect_frontend_scripts_for_plugin(plugin_dir: Path, manifest: Dict[str, A
         scripts: List[str] = []
         for script in manifest_scripts:
             if isinstance(script, str) and script.strip():
-                scripts.append(_resolve_frontend_script(plugin_dir.name, script.strip()))
+                scripts.append(_append_frontend_asset_version(plugin_dir, _resolve_frontend_script(plugin_dir.name, script.strip())))
         return scripts
 
     script_path = plugin_dir / "static" / "inject.js"
     if script_path.exists():
-        return [f"/plugins/{plugin_dir.name}/static/inject.js"]
+        return [_append_frontend_asset_version(plugin_dir, f"/plugins/{plugin_dir.name}/static/inject.js")]
     return []
 
 
@@ -156,12 +171,12 @@ def _collect_frontend_styles_for_plugin(plugin_dir: Path, manifest: Dict[str, An
         styles: List[str] = []
         for style in manifest_styles:
             if isinstance(style, str) and style.strip():
-                styles.append(_resolve_frontend_script(plugin_dir.name, style.strip()))
+                styles.append(_append_frontend_asset_version(plugin_dir, _resolve_frontend_script(plugin_dir.name, style.strip())))
         return styles
 
     style_path = plugin_dir / "static" / "style.css"
     if style_path.exists():
-        return [f"/plugins/{plugin_dir.name}/static/style.css"]
+        return [_append_frontend_asset_version(plugin_dir, f"/plugins/{plugin_dir.name}/static/style.css")]
     return []
 
 

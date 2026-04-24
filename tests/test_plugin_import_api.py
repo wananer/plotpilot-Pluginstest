@@ -63,7 +63,7 @@ def test_plugin_upload_import_appears_in_plugin_list(tmp_path, monkeypatch):
     assert payload["total"] == 1
     assert payload["items"][0]["name"] == "sample-plugin"
     assert payload["items"][0]["display_name"] == "Sample Plugin"
-    assert payload["frontend_scripts"] == ["/plugins/sample-plugin/static/inject.js"]
+    assert payload["frontend_scripts"][0].startswith("/plugins/sample-plugin/static/inject.js?v=")
 
 
 def test_disabled_plugin_is_filtered_from_plugin_list(tmp_path, monkeypatch):
@@ -155,7 +155,7 @@ def test_plugin_manifest_exposes_styles_and_capabilities(tmp_path, monkeypatch):
     assert response.status_code == 200
     payload = response.json()
 
-    assert payload["frontend_styles"] == ["/plugins/stateful_plugin/static/style.css"]
+    assert payload["frontend_styles"][0].startswith("/plugins/stateful_plugin/static/style.css?v=")
     assert payload["items"][0]["capabilities"] == {"context_injection": True}
     assert payload["items"][0]["permissions"] == ["read_novel", "write_plugin_storage"]
     assert payload["items"][0]["hooks"] == ["before_context_build", "after_commit"]
