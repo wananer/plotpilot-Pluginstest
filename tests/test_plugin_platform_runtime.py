@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+from plugins.platform.context_bridge import dispatch_hook_sync, render_context_blocks
 from plugins.platform.hook_dispatcher import clear_hooks, dispatch_hook, list_hooks, register_hook
 from plugins.platform.job_registry import PluginJobRecord, PluginJobRegistry
 from plugins.platform.plugin_storage import PluginStorage
@@ -118,3 +119,26 @@ def test_init_api_plugins_mounts_platform_status_router(tmp_path, monkeypatch):
     payload = response.json()
     assert payload["ok"] is True
     assert payload["features"]["host_facade"] is True
+
+
+
+def test_context_bridge_renders_before_context_blocks():
+    clear_hooks()
+
+    def handler(payload):
+        assert payload["chapter_number"] == 3
+        return {
+            "ok": True,
+            "context_blocks": [
+                {"title": "动态角色状态", "content": "林澈最近在黑塔，持有黑色钥匙。", "priority": 88}
+            ],
+        }
+
+    register_hook("evolution_world_assistant", "before_context_build", handler)
+
+    results = dispatch_hook_sync("before_context_build", {"novel_id": "novel-1", "chapter_number": 3})
+    rendered = render_context_blocks(results)
+
+    assert "【动态角色状态】" in rendered
+    assert "黑色钥匙" in rendered
+    clear_hooks()
