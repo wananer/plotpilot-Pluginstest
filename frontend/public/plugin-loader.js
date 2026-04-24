@@ -22,11 +22,12 @@
 
     const listeners = new Map();
     const loadedScripts = new Set();
+    const loadedStyles = new Set();
     const loadedPlugins = new Map();
     const pluginSettings = new Map();
 
     const runtime = {
-      version: '0.2.0',
+      version: '0.5.0',
       endpoints: {
         manifest: MANIFEST_ENDPOINT,
         plugins: PLUGINS_ENDPOINT,
@@ -81,7 +82,29 @@
           const nextPlugin = { ...existing, ...plugin, name: plugin.name };
           loadedPlugins.set(plugin.name, nextPlugin);
           runtime.events.emit(existing.name ? 'plugin:updated' : 'plugin:registered', nextPlugin);
+          queueMicrotask(() => runtime.plugins.init(plugin.name));
           return nextPlugin;
+        },
+        async init(name) {
+          const plugin = loadedPlugins.get(name);
+          if (!plugin || plugin.__plotpilotInitialized || typeof plugin.init !== 'function') return plugin || null;
+          plugin.__plotpilotInitialized = true;
+          try {
+            await plugin.init(runtime);
+            runtime.events.emit('plugin:initialized', plugin);
+          } catch (error) {
+            plugin.__plotpilotInitialized = false;
+            console.warn('[PlotPilot] plugin init failed:', name, error);
+          }
+          return plugin;
+        },
+        async dispose(name) {
+          const plugin = loadedPlugins.get(name);
+          if (!plugin || !plugin.__plotpilotInitialized || typeof plugin.dispose !== 'function') return plugin || null;
+          await plugin.dispose(runtime);
+          plugin.__plotpilotInitialized = false;
+          runtime.events.emit('plugin:disposed', plugin);
+          return plugin;
         },
         list() {
           return Array.from(loadedPlugins.values());
@@ -91,15 +114,14 @@
         },
       },
       scripts: {
-        has(src) {
-          return loadedScripts.has(src);
-        },
-        mark(src) {
-          loadedScripts.add(src);
-        },
-        list() {
-          return Array.from(loadedScripts.values());
-        },
+        has(src) { return loadedScripts.has(src); },
+        mark(src) { loadedScripts.add(src); },
+        list() { return Array.from(loadedScripts.values()); },
+      },
+      styles: {
+        has(href) { return loadedStyles.has(href); },
+        mark(href) { loadedStyles.add(href); },
+        list() { return Array.from(loadedStyles.values()); },
       },
       state: {
         manifest: null,
@@ -196,6 +218,17 @@
     document.body.appendChild(script);
   }
 
+  function loadStyle(runtime, href) {
+    if (!href || typeof href !== 'string') return;
+    if (runtime.styles.has(href)) return;
+    const link = document.createElement('link');
+    link.rel = 'stylesheet';
+    link.href = href;
+    link.dataset.pluginStyle = href;
+    link.addEventListener('load', () => runtime.styles.mark(href));
+    document.head.appendChild(link);
+  }
+
   function registerManifestPlugins(runtime, items) {
     for (const item of items || []) {
       if (!item || !item.name) continue;
@@ -205,6 +238,10 @@
         version: item.version || null,
         enabled: item.enabled !== false,
         frontend_scripts: Array.isArray(item.frontend_scripts) ? item.frontend_scripts : [],
+        frontend_styles: Array.isArray(item.frontend_styles) ? item.frontend_styles : [],
+        capabilities: item.capabilities || {},
+        permissions: Array.isArray(item.permissions) ? item.permissions : [],
+        hooks: Array.isArray(item.hooks) ? item.hooks : [],
         manifest: item.manifest || {},
       });
     }
@@ -249,6 +286,9 @@
       const manifest = await runtime.fetchJson(MANIFEST_ENDPOINT);
       runtime.state.manifest = manifest;
       registerManifestPlugins(runtime, manifest && manifest.items);
+      for (const href of dedupeScripts(manifest && manifest.frontend_styles)) {
+        loadStyle(runtime, href);
+      }
       const scripts = dedupeScripts(manifest && manifest.frontend_scripts);
       for (const src of scripts) {
         loadScript(runtime, src);

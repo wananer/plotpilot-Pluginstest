@@ -7,7 +7,7 @@ novel/chapter readers, LLM calls, and event emitters as the platform matures.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import Any, Optional, Union, Tuple
 
 from .hook_dispatcher import dispatch_hook
 from .plugin_storage import PluginStorage
@@ -21,12 +21,12 @@ class PlotPilotPluginHost:
     def __init__(
         self,
         *,
-        storage: PluginStorage | None = None,
-        novel_reader: Reader | AsyncReader | None = None,
-        chapter_reader: Reader | AsyncReader | None = None,
-        chapter_lister: Reader | AsyncReader | None = None,
-        llm_caller: Reader | AsyncReader | None = None,
-        event_emitter: Reader | AsyncReader | None = None,
+        storage: Optional[PluginStorage] = None,
+        novel_reader: Optional[Union[Reader, AsyncReader]] = None,
+        chapter_reader: Optional[Union[Reader, AsyncReader]] = None,
+        chapter_lister: Optional[Union[Reader, AsyncReader]] = None,
+        llm_caller: Optional[Union[Reader, AsyncReader]] = None,
+        event_emitter: Optional[Union[Reader, AsyncReader]] = None,
     ) -> None:
         self.storage = storage or PluginStorage()
         self._novel_reader = novel_reader
@@ -55,18 +55,18 @@ class PlotPilotPluginHost:
             raise RuntimeError("llm_caller is not configured")
         return await _maybe_await(self._llm_caller(request))
 
-    async def emit_event(self, name: str, payload: dict[str, Any] | None = None) -> Any:
+    async def emit_event(self, name: str, payload: Optional[dict[str, Any]] = None) -> Any:
         if self._event_emitter is None:
             return None
         return await _maybe_await(self._event_emitter(name, payload or {}))
 
-    async def dispatch_hook(self, hook_name: str, payload: PluginHookPayload | None = None) -> list[PluginHookResult]:
+    async def dispatch_hook(self, hook_name: str, payload: Optional[PluginHookPayload] = None) -> list[PluginHookResult]:
         return await dispatch_hook(hook_name, payload or {})
 
-    def read_plugin_state(self, plugin_name: str, scope: list[str] | tuple[str, ...], default: Any = None) -> Any:
+    def read_plugin_state(self, plugin_name: str, scope: Union[list[str], Tuple[str, ...]], default: Any = None) -> Any:
         return self.storage.read_json(plugin_name, scope, default=default)
 
-    def write_plugin_state(self, plugin_name: str, scope: list[str] | tuple[str, ...], value: Any) -> Any:
+    def write_plugin_state(self, plugin_name: str, scope: Union[list[str], Tuple[str, ...]], value: Any) -> Any:
         return self.storage.write_json(plugin_name, scope, value)
 
 

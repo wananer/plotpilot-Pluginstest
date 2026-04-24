@@ -33,7 +33,7 @@ def _discover_plugin_dirs() -> List[Path]:
     if not _PLUGINS_ROOT.exists():
         return []
     return sorted(
-        [p for p in _PLUGINS_ROOT.iterdir() if p.is_dir() and (p / "__init__.py").exists()],
+        [p for p in _PLUGINS_ROOT.iterdir() if p.is_dir() and p.name != "platform" and (p / "__init__.py").exists()],
         key=lambda p: p.name,
     )
 
