@@ -76,3 +76,45 @@ def test_job_registry_appends_jsonl_and_builds_dedup_key(tmp_path):
     payload = json.loads(lines[0])
     assert payload["dedup_key"] == "dynamic_rolecard:after_commit:novel-1:3:abc:auto"
     assert payload["status"] == "pending"
+
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from plugins.loader import init_api_plugins
+from plugins.platform.host_facade import PlotPilotPluginHost
+
+
+@pytest.mark.asyncio
+async def test_host_facade_uses_adapters_and_dispatches_hooks(tmp_path):
+    clear_hooks()
+    storage = PluginStorage(root=tmp_path)
+    host = PlotPilotPluginHost(
+        storage=storage,
+        novel_reader=lambda novel_id: {"id": novel_id},
+        chapter_reader=lambda novel_id, chapter_number: {"novel_id": novel_id, "number": chapter_number},
+    )
+
+    register_hook("sample", "before_context_build", lambda payload: {"ok": True, "data": {"seen": payload["novel_id"]}})
+
+    assert await host.get_novel("n1") == {"id": "n1"}
+    assert await host.get_chapter("n1", 2) == {"novel_id": "n1", "number": 2}
+    assert (await host.dispatch_hook("before_context_build", {"novel_id": "n1"}))[0]["data"] == {"seen": "n1"}
+
+    host.write_plugin_state("sample", ["novels", "n1", "state.json"], {"ok": True})
+    assert host.read_plugin_state("sample", ["novels", "n1", "state.json"]) == {"ok": True}
+    clear_hooks()
+
+
+def test_init_api_plugins_mounts_platform_status_router(tmp_path, monkeypatch):
+    import plugins.loader as plugin_loader
+
+    monkeypatch.setattr(plugin_loader, "_PLUGINS_ROOT", tmp_path / "plugins")
+    app = FastAPI()
+    init_api_plugins(app)
+    client = TestClient(app)
+
+    response = client.get("/api/v1/plugins/platform/status")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["features"]["host_facade"] is True

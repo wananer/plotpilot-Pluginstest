@@ -210,6 +210,20 @@ def _include_plugin_router(app, plugin_name: str) -> None:
         logger.warning("⚠️ Plugin %s router include failed: %s", plugin_name, exc)
 
 
+def _include_platform_router(app) -> None:
+    platform_route_prefix = "/api/v1/plugins/platform"
+    if any(getattr(route, "path", "").startswith(platform_route_prefix) for route in app.routes):
+        return
+
+    try:
+        from plugins.platform.routes import router as platform_router
+
+        app.include_router(platform_router)
+        logger.info("✅ Plugin platform router included")
+    except Exception as exc:
+        logger.warning("⚠️ Plugin platform router include failed: %s", exc)
+
+
 def _mount_plugin_static(app, plugin_name: str) -> None:
     static_mount = f"/plugins/{plugin_name}/static"
     if any(
@@ -282,6 +296,8 @@ def load_plugins() -> List[Dict[str, Any]]:
 
 def init_api_plugins(app) -> List[str]:
     initialized: List[str] = []
+    _include_platform_router(app)
+
     loaded_state = getattr(app.state, "loaded_plugins", None)
     if not isinstance(loaded_state, set):
         loaded_state = set()
