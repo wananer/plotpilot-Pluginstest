@@ -12,16 +12,21 @@ import importlib
 import importlib.util
 import json
 import logging
+import shutil
+import subprocess
+import tempfile
+import zipfile
 from pathlib import Path
 from typing import Any, Dict, List
 
-from fastapi import APIRouter
+from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.staticfiles import StaticFiles
 
 logger = logging.getLogger(__name__)
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 _PLUGINS_ROOT = _PROJECT_ROOT / "plugins"
+_PLUGIN_NAME_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")
 
 
 def _discover_plugin_dirs() -> List[Path]:
@@ -69,6 +74,59 @@ def _is_enabled(manifest: Dict[str, Any]) -> bool:
     return manifest.get("enabled", True) is not False
 
 
+def _normalize_plugin_name(raw: str) -> str:
+    name = (raw or "").strip().replace(" ", "-")
+    safe = "".join(ch for ch in name if ch in _PLUGIN_NAME_CHARS)
+    return safe.strip("-_")
+
+
+def _validate_manifest_contract(manifest: Dict[str, Any], plugin_dir_name: str) -> Dict[str, Any]:
+    if not isinstance(manifest, dict):
+        raise HTTPException(status_code=400, detail="plugin.json 必须是 JSON object")
+
+    raw_name = manifest.get("name")
+    plugin_name = _normalize_plugin_name(str(raw_name)) if isinstance(raw_name, str) else plugin_dir_name
+    plugin_name = _normalize_plugin_name(plugin_name)
+    if not plugin_name:
+        raise HTTPException(status_code=400, detail="插件名称无效")
+
+    frontend = manifest.get("frontend")
+    if frontend is not None and not isinstance(frontend, dict):
+        raise HTTPException(status_code=400, detail="manifest.frontend 必须是 object")
+    if isinstance(frontend, dict):
+        scripts = frontend.get("scripts", [])
+        styles = frontend.get("styles", [])
+        if scripts is not None and not isinstance(scripts, list):
+            raise HTTPException(status_code=400, detail="manifest.frontend.scripts 必须是数组")
+        if styles is not None and not isinstance(styles, list):
+            raise HTTPException(status_code=400, detail="manifest.frontend.styles 必须是数组")
+        for item in list(scripts or []) + list(styles or []):
+            if not isinstance(item, str) or not item.strip():
+                raise HTTPException(status_code=400, detail="manifest.frontend 资源路径必须是非空字符串")
+
+    for key in ("capabilities", "permissions", "hooks"):
+        value = manifest.get(key)
+        if value is not None and not isinstance(value, (dict, list)):
+            raise HTTPException(status_code=400, detail=f"manifest.{key} 必须是 object 或数组")
+
+    return {"plugin_name": plugin_name, "manifest": manifest}
+
+
+def _safe_extract_zip(zip_file: zipfile.ZipFile, destination: Path) -> None:
+    destination = destination.resolve()
+    for member in zip_file.infolist():
+        member_name = member.filename
+        if not member_name or member_name.startswith(("/", "\\")):
+            raise HTTPException(status_code=400, detail="zip 包含非法绝对路径")
+        target = (destination / member_name).resolve()
+        if destination != target and destination not in target.parents:
+            raise HTTPException(status_code=400, detail="zip 包含非法路径穿越")
+        mode = member.external_attr >> 16
+        if mode & 0o170000 == 0o120000:
+            raise HTTPException(status_code=400, detail="zip 包含不支持的符号链接")
+    zip_file.extractall(destination)
+
+
 def _resolve_frontend_script(plugin_name: str, script: str) -> str:
     if script.startswith("/"):
         return script
@@ -91,18 +149,39 @@ def _collect_frontend_scripts_for_plugin(plugin_dir: Path, manifest: Dict[str, A
     return []
 
 
+def _collect_frontend_styles_for_plugin(plugin_dir: Path, manifest: Dict[str, Any]) -> List[str]:
+    frontend = manifest.get("frontend") if isinstance(manifest, dict) else None
+    manifest_styles = frontend.get("styles", []) if isinstance(frontend, dict) else []
+    if isinstance(manifest_styles, list) and manifest_styles:
+        styles: List[str] = []
+        for style in manifest_styles:
+            if isinstance(style, str) and style.strip():
+                styles.append(_resolve_frontend_script(plugin_dir.name, style.strip()))
+        return styles
+
+    style_path = plugin_dir / "static" / "style.css"
+    if style_path.exists():
+        return [f"/plugins/{plugin_dir.name}/static/style.css"]
+    return []
+
+
 def _build_plugin_manifest_record(plugin_dir: Path) -> Dict[str, Any] | None:
     manifest = _load_manifest(plugin_dir)
     if not _is_enabled(manifest):
         return None
 
     frontend_scripts = _collect_frontend_scripts_for_plugin(plugin_dir, manifest)
+    frontend_styles = _collect_frontend_styles_for_plugin(plugin_dir, manifest)
     return {
         "name": plugin_dir.name,
         "display_name": manifest.get("display_name") or manifest.get("name") or plugin_dir.name,
         "version": manifest.get("version"),
         "enabled": True,
         "frontend_scripts": frontend_scripts,
+        "frontend_styles": frontend_styles,
+        "capabilities": manifest.get("capabilities") or {},
+        "permissions": manifest.get("permissions") or [],
+        "hooks": manifest.get("hooks") or [],
         "manifest": manifest,
     }
 
@@ -171,6 +250,17 @@ def collect_manifest_frontend_scripts(items: List[Dict[str, Any]]) -> List[str]:
             if script not in seen:
                 seen.add(script)
                 deduped.append(script)
+    return deduped
+
+
+def collect_manifest_frontend_styles(items: List[Dict[str, Any]]) -> List[str]:
+    deduped: List[str] = []
+    seen: set[str] = set()
+    for item in items:
+        for style in item.get("frontend_styles", []):
+            if style not in seen:
+                seen.add(style)
+                deduped.append(style)
     return deduped
 
 
@@ -244,14 +334,42 @@ def init_daemon_plugins() -> List[str]:
 def create_plugin_manifest_router() -> APIRouter:
     router = APIRouter(prefix="/plugins", tags=["plugins"])
 
+    def _validate_plugin_dir(plugin_dir: Path) -> Dict[str, Any]:
+        if not plugin_dir.exists() or not plugin_dir.is_dir():
+            raise HTTPException(status_code=400, detail="插件目录不存在")
+        if not (plugin_dir / "__init__.py").exists():
+            raise HTTPException(status_code=400, detail="插件缺少 __init__.py")
+
+        manifest = _load_manifest(plugin_dir)
+        return _validate_manifest_contract(manifest, plugin_dir.name)
+
+    def _install_plugin_from_dir(source_dir: Path) -> Dict[str, Any]:
+        info = _validate_plugin_dir(source_dir)
+        plugin_name = info["plugin_name"]
+        target_dir = _PLUGINS_ROOT / plugin_name
+
+        if target_dir.exists():
+            raise HTTPException(status_code=409, detail=f"插件已存在：{plugin_name}")
+
+        _PLUGINS_ROOT.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(source_dir, target_dir)
+
+        return {
+            "plugin_name": plugin_name,
+            "target_dir": str(target_dir),
+            "manifest": info["manifest"],
+        }
+
     @router.get("")
     async def list_plugins():
         items = list_plugin_manifests()
         frontend_scripts = collect_manifest_frontend_scripts(items)
+        frontend_styles = collect_manifest_frontend_styles(items)
         return {
             "items": items,
             "total": len(items),
             "frontend_scripts": frontend_scripts,
+            "frontend_styles": frontend_styles,
             "runtime": {
                 "manifest_endpoint": "/api/v1/plugins/manifest",
                 "plugins_endpoint": "/api/v1/plugins",
@@ -259,14 +377,101 @@ def create_plugin_manifest_router() -> APIRouter:
             },
         }
 
+    @router.post("/import/github")
+    async def import_plugin_from_github(payload: Dict[str, Any]):
+        github_url = str(payload.get("github_url") or "").strip()
+        if not github_url:
+            raise HTTPException(status_code=400, detail="github_url 不能为空")
+        if not (github_url.startswith("https://github.com/") or github_url.startswith("git@github.com:")):
+            raise HTTPException(status_code=400, detail="仅支持 GitHub 仓库地址")
+
+        with tempfile.TemporaryDirectory(prefix="plotpilot-plugin-gh-") as temp_dir:
+            temp_path = Path(temp_dir)
+            clone_dir = temp_path / "repo"
+            try:
+                subprocess.run(
+                    ["git", "clone", "--depth", "1", github_url, str(clone_dir)],
+                    check=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=120,
+                )
+            except subprocess.CalledProcessError as exc:
+                raise HTTPException(status_code=400, detail=f"GitHub 拉取失败：{exc.stderr.strip() or exc.stdout.strip()}")
+            except subprocess.TimeoutExpired:
+                raise HTTPException(status_code=504, detail="GitHub 拉取超时")
+
+            plugin_source = clone_dir
+            if not (clone_dir / "__init__.py").exists():
+                candidates = [p for p in clone_dir.iterdir() if p.is_dir() and (p / "__init__.py").exists()]
+                if len(candidates) == 1:
+                    plugin_source = candidates[0]
+                else:
+                    raise HTTPException(status_code=400, detail="仓库根目录不是可安装插件，且未识别到唯一插件子目录")
+
+            installed = _install_plugin_from_dir(plugin_source)
+            return {
+                "ok": True,
+                "source": "github",
+                **installed,
+                "message": "插件已导入，请刷新插件列表；如插件包含前端脚本，建议刷新页面。",
+            }
+
+    @router.post("/import/upload")
+    async def import_plugin_from_upload(file: UploadFile = File(...)):
+        filename = file.filename or "plugin.zip"
+        if not filename.lower().endswith(".zip"):
+            raise HTTPException(status_code=400, detail="目前仅支持上传 zip 插件包")
+
+        with tempfile.TemporaryDirectory(prefix="plotpilot-plugin-upload-") as temp_dir:
+            temp_path = Path(temp_dir)
+            zip_path = temp_path / filename
+            zip_path.write_bytes(await file.read())
+
+            extract_dir = temp_path / "extracted"
+            try:
+                with zipfile.ZipFile(zip_path, "r") as zf:
+                    _safe_extract_zip(zf, extract_dir)
+            except zipfile.BadZipFile:
+                raise HTTPException(status_code=400, detail="上传文件不是有效的 zip 包")
+
+            candidates = []
+            if (extract_dir / "__init__.py").exists():
+                candidates.append(extract_dir)
+            candidates.extend([p for p in extract_dir.rglob("*") if p.is_dir() and (p / "__init__.py").exists()])
+
+            unique_candidates: List[Path] = []
+            seen: set[str] = set()
+            for candidate in candidates:
+                key = str(candidate.resolve())
+                if key not in seen:
+                    seen.add(key)
+                    unique_candidates.append(candidate)
+
+            if not unique_candidates:
+                raise HTTPException(status_code=400, detail="压缩包内未找到可安装插件目录（缺少 __init__.py）")
+            if len(unique_candidates) > 1:
+                raise HTTPException(status_code=400, detail="压缩包内识别到多个插件目录，请一次只导入一个插件")
+
+            installed = _install_plugin_from_dir(unique_candidates[0])
+            return {
+                "ok": True,
+                "source": "upload",
+                **installed,
+                "message": "插件包已导入，请刷新插件列表；如插件包含前端脚本，建议刷新页面。",
+            }
+
     @router.get("/manifest")
     async def get_plugin_manifest():
         items = list_plugin_manifests()
         frontend_scripts = collect_manifest_frontend_scripts(items)
+        frontend_styles = collect_manifest_frontend_styles(items)
         return {
             "items": items,
             "total": len(items),
             "frontend_scripts": frontend_scripts,
+            "frontend_styles": frontend_styles,
             "runtime": {
                 "manifest_endpoint": "/api/v1/plugins/manifest",
                 "plugins_endpoint": "/api/v1/plugins",
@@ -285,3 +490,13 @@ def collect_frontend_scripts() -> List[str]:
             continue
         scripts.extend(_collect_frontend_scripts_for_plugin(plugin_dir, manifest))
     return scripts
+
+
+def collect_frontend_styles() -> List[str]:
+    styles: List[str] = []
+    for plugin_dir in _discover_plugin_dirs():
+        manifest = _load_manifest(plugin_dir)
+        if not _is_enabled(manifest):
+            continue
+        styles.extend(_collect_frontend_styles_for_plugin(plugin_dir, manifest))
+    return styles
