@@ -83,6 +83,7 @@ from fastapi.testclient import TestClient
 
 from plugins.loader import init_api_plugins
 from plugins.platform.host_facade import PlotPilotPluginHost
+from plugins.platform.host_integration import build_generation_context_patch, notify_chapter_committed
 
 
 @pytest.mark.asyncio
@@ -141,4 +142,43 @@ def test_context_bridge_renders_before_context_blocks():
 
     assert "【动态角色状态】" in rendered
     assert "黑色钥匙" in rendered
+    clear_hooks()
+
+
+
+def test_host_integration_builds_generation_context_patch():
+    clear_hooks()
+
+    register_hook(
+        "evolution_world_assistant",
+        "before_context_build",
+        lambda payload: {
+            "ok": True,
+            "context_blocks": [{"title": "Evolution World State", "content": "林澈持有黑色钥匙。"}],
+        },
+    )
+
+    context = build_generation_context_patch("novel-1", 3, "林澈进入黑塔")
+
+    assert "Evolution World State" in context
+    assert "黑色钥匙" in context
+    clear_hooks()
+
+
+@pytest.mark.asyncio
+async def test_host_integration_notifies_chapter_committed():
+    clear_hooks()
+    seen = {}
+
+    async def handler(payload):
+        seen.update(payload)
+        return {"ok": True, "data": {"updated": True}}
+
+    register_hook("evolution_world_assistant", "after_commit", handler)
+
+    results = await notify_chapter_committed("novel-1", 2, "《林澈》进入黑塔。")
+
+    assert results[0]["data"] == {"updated": True}
+    assert seen["source"] == "chapter_aftermath_pipeline"
+    assert seen["payload"]["content"] == "《林澈》进入黑塔。"
     clear_hooks()
