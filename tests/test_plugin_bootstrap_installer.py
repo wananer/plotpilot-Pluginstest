@@ -19,7 +19,7 @@ def test_install_plugin_platform_patches_fresh_clone_files(tmp_path):
     )
     (repo / "scripts" / "start_daemon.py").write_text(
         "import sys\n"
-        "from application.paths import AITEXT_ROOT\n",
+        "print('daemon host')\n",
         encoding="utf-8",
     )
     (repo / "frontend" / "index.html").write_text(
@@ -65,7 +65,7 @@ def test_install_plugin_platform_is_idempotent(tmp_path):
         encoding="utf-8",
     )
     (repo / "scripts" / "start_daemon.py").write_text(
-        "import sys\nfrom application.paths import AITEXT_ROOT\n",
+        "import sys\nprint('daemon host')\n",
         encoding="utf-8",
     )
     (repo / "frontend" / "index.html").write_text(
