@@ -27,6 +27,53 @@ class EvolutionWorldRepository:
     def delete_fact_snapshot(self, novel_id: str, chapter_number: int) -> bool:
         return self._delete_scope(["novels", novel_id, "facts", f"chapter_{chapter_number}.json"])
 
+    def save_chapter_summary(self, novel_id: str, chapter_number: int, summary: dict[str, Any]) -> None:
+        self.storage.write_json(
+            PLUGIN_NAME,
+            ["novels", novel_id, "summaries", "chapters", f"chapter_{chapter_number}.json"],
+            summary,
+        )
+
+    def delete_chapter_summary(self, novel_id: str, chapter_number: int) -> bool:
+        return self._delete_scope(["novels", novel_id, "summaries", "chapters", f"chapter_{chapter_number}.json"])
+
+    def list_chapter_summaries(self, novel_id: str, before_chapter: Optional[int] = None, limit: int = 10) -> list[dict[str, Any]]:
+        rows = self.storage.list_json(
+            PLUGIN_NAME,
+            ["novels", novel_id, "summaries", "chapters"],
+            limit=limit if limit > 0 else None,
+            reverse=limit > 0,
+            before_chapter=before_chapter,
+        )
+        items = [item for item in rows if isinstance(item, dict)]
+        items.sort(key=lambda item: int(item.get("chapter_number") or 0))
+        return items
+
+    def save_volume_summary(self, novel_id: str, volume_index: int, summary: dict[str, Any]) -> None:
+        self.storage.write_json(
+            PLUGIN_NAME,
+            ["novels", novel_id, "summaries", "volumes", f"volume_{volume_index}.json"],
+            summary,
+        )
+
+    def list_volume_summaries(self, novel_id: str, before_chapter: Optional[int] = None, limit: int = 3) -> list[dict[str, Any]]:
+        rows = self.storage.list_json(
+            PLUGIN_NAME,
+            ["novels", novel_id, "summaries", "volumes"],
+            limit=limit if limit > 0 else None,
+            reverse=limit > 0,
+        )
+        items = []
+        for item in rows:
+            if not isinstance(item, dict):
+                continue
+            end = _int_or_none(item.get("chapter_end"))
+            if before_chapter and end and end >= before_chapter:
+                continue
+            items.append(item)
+        items.sort(key=lambda item: int(item.get("chapter_end") or 0))
+        return items
+
     def get_fact_snapshot(self, novel_id: str, chapter_number: int) -> dict[str, Any] | None:
         data = self.storage.read_json(
             PLUGIN_NAME,
