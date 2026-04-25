@@ -3,6 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "test": "node --test tests/*.test.mjs",
+    "test:loader": "node --test tests/plugin-loader.test.mjs",
     "test:config": "node --test tests/vite.config.test.mjs"
   },
   "devDependencies": {

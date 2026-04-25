@@ -127,6 +127,11 @@
         manifest: null,
         pluginsPayload: null,
         startedAt: new Date().toISOString(),
+        currentView: null,
+        currentNovelId: null,
+        currentChapter: null,
+        lastWorkbenchOpened: null,
+        lastEvents: {},
         currentRoute: {
           path: window.location.pathname,
           query: window.location.search,
@@ -145,13 +150,56 @@
         },
       },
       host: {
+        getContext() {
+          return runtime.context.getContext();
+        },
+        getView() {
+          return runtime.state.currentView;
+        },
+        getCurrentChapter() {
+          return runtime.state.currentChapter ? { ...runtime.state.currentChapter } : null;
+        },
+        getLastEvent(eventName) {
+          return runtime.state.lastEvents[eventName] || null;
+        },
+        getAvailableEvents() {
+          return Object.keys(runtime.state.lastEvents);
+        },
+        emitWorkbenchOpened(payload) {
+          runtime.state.lastWorkbenchOpened = rememberHostEvent('workbench:opened', payload);
+        },
+        emitNovelSelected(payload) {
+          runtime.state.currentNovelId = payload?.novelId || payload?.novel_id || runtime.state.currentNovelId;
+          rememberHostEvent('novel:selected', payload);
+        },
+        emitNovelChanged(payload) {
+          runtime.state.currentNovelId = payload?.novelId || payload?.novel_id || runtime.state.currentNovelId;
+          rememberHostEvent('novel:changed', payload);
+        },
         emitChapterSaved(payload) {
-          runtime.hooks.emit('chapter:saved', payload);
-          runtime.events.emit('chapter:saved', payload);
+          rememberHostEvent('chapter:saved', payload, { hookName: 'chapter:saved' });
         },
         emitChapterLoaded(payload) {
-          runtime.hooks.emit('chapter:loaded', payload);
-          runtime.events.emit('chapter:loaded', payload);
+          updateCurrentChapter(payload);
+          rememberHostEvent('chapter:loaded', payload, { hookName: 'chapter:loaded' });
+        },
+        emitChapterCommitted(payload) {
+          updateCurrentChapter(payload);
+          rememberHostEvent('chapter:committed', payload, { hookName: 'chapter:committed' });
+        },
+        emitGenerationCompleted(payload) {
+          updateCurrentChapter(payload);
+          rememberHostEvent('generation:completed', payload, { hookName: 'generation:completed' });
+        },
+        emitRewriteCompleted(payload) {
+          updateCurrentChapter(payload);
+          rememberHostEvent('rewrite:completed', payload, { hookName: 'rewrite:completed' });
+        },
+        emitManualRerunRequested(payload) {
+          rememberHostEvent('manual:rerun_requested', payload);
+        },
+        emitTimelineRebuildRequested(payload) {
+          rememberHostEvent('timeline:rebuild_requested', payload);
         },
         emitRouteChanged(payload) {
           runtime.state.currentRoute = {
@@ -159,25 +207,55 @@
             query: payload?.query || window.location.search,
             hash: payload?.hash || window.location.hash,
           };
-          runtime.hooks.emit('route:changed', runtime.state.currentRoute);
-          runtime.events.emit('route:changed', runtime.state.currentRoute);
+          rememberHostEvent('route:changed', runtime.state.currentRoute, { hookName: 'route:changed' });
         },
       },
       context: {
+        getContext() {
+          return {
+            route: runtime.context.getRoute(),
+            novelId: runtime.context.getNovelId(),
+            chapterNumber: runtime.context.getChapterNumber(),
+            view: runtime.host.getView(),
+            currentChapter: runtime.host.getCurrentChapter(),
+            lastWorkbenchOpened: runtime.state.lastWorkbenchOpened,
+          };
+        },
         getRoute() {
           return { ...runtime.state.currentRoute };
         },
         getNovelId() {
+          if (runtime.state.currentNovelId) return runtime.state.currentNovelId;
           const match = window.location.pathname.match(/\/book\/([^/]+)/);
           if (match) return decodeURIComponent(match[1]);
           const params = new URLSearchParams(window.location.search);
           return params.get('novel') || null;
         },
         getChapterNumber() {
+          if (runtime.state.currentChapter?.chapterNumber) return runtime.state.currentChapter.chapterNumber;
           const params = new URLSearchParams(window.location.search);
           const value = Number(params.get('chapter'));
           return Number.isFinite(value) && value > 0 ? value : null;
         },
+      },
+      refreshManifest: async () => {
+        const manifest = await runtime.fetchJson(MANIFEST_ENDPOINT);
+        runtime.state.manifest = manifest;
+        registerManifestPlugins(runtime, manifest && manifest.items);
+        for (const href of dedupeScripts(manifest && manifest.frontend_styles)) {
+          loadStyle(runtime, href);
+        }
+        for (const src of dedupeScripts(manifest && manifest.frontend_scripts)) {
+          loadScript(runtime, src);
+        }
+        runtime.events.emit('manifest:loaded', manifest);
+        return manifest;
+      },
+      reloadPlugins: async () => {
+        const pluginsPayload = await runtime.fetchJson(PLUGINS_ENDPOINT);
+        runtime.state.pluginsPayload = pluginsPayload;
+        runtime.events.emit('plugins:loaded', pluginsPayload);
+        return pluginsPayload;
       },
       async fetchJson(url) {
         const response = await fetch(url, {
@@ -192,6 +270,34 @@
     };
 
     window.PlotPilotPlugins = runtime;
+
+    function updateCurrentChapter(payload) {
+      if (!payload) return;
+      runtime.state.currentView = payload.view || runtime.state.currentView;
+      runtime.state.currentNovelId = payload.novelId || payload.novel_id || runtime.state.currentNovelId;
+      const chapterNumber = Number(payload.chapterNumber || payload.chapter_number);
+      runtime.state.currentChapter = {
+        novelId: payload.novelId || payload.novel_id || runtime.state.currentNovelId || null,
+        chapterId: payload.chapterId || payload.chapter_id || null,
+        chapterNumber: Number.isFinite(chapterNumber) && chapterNumber > 0 ? chapterNumber : null,
+        title: payload.title || '',
+        view: payload.view || runtime.state.currentView || null,
+      };
+    }
+
+    function rememberHostEvent(eventName, payload, options = {}) {
+      const eventPayload = {
+        ...(payload || {}),
+        eventName,
+        at: new Date().toISOString(),
+      };
+      runtime.state.currentView = eventPayload.view || runtime.state.currentView;
+      runtime.state.lastEvents[eventName] = eventPayload;
+      if (options.hookName) runtime.hooks.emit(options.hookName, eventPayload);
+      runtime.events.emit(eventName, eventPayload);
+      return eventPayload;
+    }
+
     return runtime;
   }
 
@@ -283,26 +389,14 @@
     });
 
     try {
-      const manifest = await runtime.fetchJson(MANIFEST_ENDPOINT);
-      runtime.state.manifest = manifest;
-      registerManifestPlugins(runtime, manifest && manifest.items);
-      for (const href of dedupeScripts(manifest && manifest.frontend_styles)) {
-        loadStyle(runtime, href);
-      }
-      const scripts = dedupeScripts(manifest && manifest.frontend_scripts);
-      for (const src of scripts) {
-        loadScript(runtime, src);
-      }
-      runtime.events.emit('manifest:loaded', manifest);
+      await runtime.refreshManifest();
     } catch (error) {
       console.warn('[PlotPilot] plugin manifest load skipped:', error);
       runtime.events.emit('manifest:error', { error: String(error) });
     }
 
     try {
-      const pluginsPayload = await runtime.fetchJson(PLUGINS_ENDPOINT);
-      runtime.state.pluginsPayload = pluginsPayload;
-      runtime.events.emit('plugins:loaded', pluginsPayload);
+      await runtime.reloadPlugins();
     } catch (error) {
       runtime.events.emit('plugins:error', { error: String(error) });
     }

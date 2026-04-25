@@ -12,6 +12,8 @@
   - 前端 runtime / manifest 拉取 / 插件脚本注入 / host 事件分发
 - `plugins/example_plugin/`
   - 一个最小可运行示例插件，演示 `plugin.json` + `__init__.py` + `static/inject.js`
+- `plugins/world_evolution_core/`
+  - Evolution World Assistant 的 PlotPilot 插件包，用于验证平台可以承载真实业务插件：章节事实提取、人物卡、上下文注入、回滚/重建与审稿 hook
 - `tests/`
   - 最小回归测试（仅依赖当前仓库内容，可直接在仓库根目录执行 `pytest`）
 - `docs/HOST_TOUCHPOINTS.md`
@@ -52,7 +54,7 @@ pytest
 当前仓库验证目标：
 - fresh clone 后无需依赖外部 PlotPilot 主仓库文件
 - 仓库根目录可直接运行测试
-- 不依赖外部业务插件源码
+- `world_evolution_core` 能作为真实插件被 manifest、静态资源、hook 与前端 runtime 发现
 
 ## 示例插件
 
@@ -65,9 +67,21 @@ pytest
 
 如果你要新写插件，最简单的起点就是直接复制这个目录，再改成自己的名字。
 
+## Evolution World Assistant
+
+仓库同时搭载 `plugins/world_evolution_core/`，对应独立插件仓库：
+
+- [wananer/pp-Evolution-World-Assistant](https://github.com/wananer/pp-Evolution-World-Assistant)
+
+该插件用于真实承载测试，覆盖：
+- `before_context_build` / `after_commit` / `manual_rebuild` / `rollback` / `review_chapter`
+- `/api/v1/plugins/evolution-world/...` 后端接口
+- `/plugins/world_evolution_core/static/inject.js` 与 `style.css` 前端资源
+- 外貌、属性、世界观字段与性格调色盘人物卡
+
 ## 仓库边界
 
-这是**插件平台骨架仓库**，不是业务插件全集。
+这是**插件平台骨架仓库**，不是业务插件全集；`world_evolution_core` 是当前阶段为了验证真实承载链路而保留的集成插件。
 
 - 允许：平台 loader / runtime / installer / 平台测试 / 平台文档
 - 不建议混入：`bionic_memory`、`rolecard`、`autopilot`、`rewrite`、`novel` 等具体业务实现

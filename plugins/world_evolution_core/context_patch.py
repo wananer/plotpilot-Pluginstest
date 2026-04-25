@@ -1,0 +1,348 @@
+"""Budget-friendly context patch builder for Evolution World."""
+from __future__ import annotations
+
+from typing import Any, Optional
+
+PLUGIN_NAME = "world_evolution_core"
+
+
+def build_context_patch(
+    novel_id: str,
+    chapter_number: Optional[int],
+    characters: list[dict[str, Any]],
+    facts: list[dict[str, Any]],
+    *,
+    outline: str = "",
+    max_characters: int = 8,
+    max_facts: int = 5,
+) -> dict[str, Any]:
+    recent_facts = facts[-max_facts:]
+    selection = _select_characters(characters, max_characters, outline=outline, recent_facts=recent_facts)
+    focus_characters = selection["focus"]
+    background_characters = selection["background"]
+    offstage_characters = selection["offstage"]
+    blocks = []
+
+    if focus_characters:
+        blocks.append(
+            {
+                "id": "evolution_usage_protocol",
+                "title": "Evolution 使用方式",
+                "kind": "usage_protocol",
+                "priority": 78,
+                "token_budget": 120,
+                "content": _render_usage_protocol(),
+                "items": [],
+            }
+        )
+        blocks.append(
+            {
+                "id": "focus_characters",
+                "title": "本章焦点角色",
+                "kind": "focus_character_state",
+                "priority": 76,
+                "token_budget": 360,
+                "content": _render_focus_characters(focus_characters),
+                "items": focus_characters,
+            }
+        )
+
+    if background_characters:
+        blocks.append(
+            {
+                "id": "background_constraints",
+                "title": "背景约束角色",
+                "kind": "background_character_constraint",
+                "priority": 66,
+                "token_budget": 260,
+                "content": _render_background_constraints(background_characters),
+                "items": background_characters,
+            }
+        )
+
+    if recent_facts:
+        blocks.append(
+            {
+                "id": "recent_facts",
+                "title": "近期章节事实",
+                "kind": "chapter_facts",
+                "priority": 62,
+                "token_budget": 520,
+                "content": _render_facts(recent_facts),
+                "items": recent_facts,
+            }
+        )
+
+    risks = _build_risks(focus_characters, recent_facts, offstage_characters)
+    if risks:
+        blocks.append(
+            {
+                "id": "continuity_risks",
+                "title": "连续性风险提醒",
+                "kind": "continuity_risk",
+                "priority": 54,
+                "token_budget": 260,
+                "content": "\n".join(f"- {item}" for item in risks),
+                "items": risks,
+            }
+        )
+
+    return {
+        "plugin_name": PLUGIN_NAME,
+        "novel_id": novel_id,
+        "chapter_number": chapter_number,
+        "schema_version": 1,
+        "merge_strategy": "append_by_priority",
+        "blocks": blocks,
+        "estimated_token_budget": sum(int(block.get("token_budget") or 0) for block in blocks),
+    }
+
+
+def render_patch_summary(patch: dict[str, Any]) -> str:
+    lines: list[str] = []
+    for block in patch.get("blocks") or []:
+        content = str(block.get("content") or "").strip()
+        if not content:
+            continue
+        lines.append(f"【{block.get('title') or block.get('id')}】")
+        lines.append(content)
+    return "\n".join(lines)
+
+
+def _select_characters(
+    characters: list[dict[str, Any]],
+    limit: int,
+    *,
+    outline: str = "",
+    recent_facts: Optional[list[dict[str, Any]]] = None,
+) -> dict[str, list[dict[str, Any]]]:
+    scored = []
+    outline_text = str(outline or "")
+    latest_chapter = max([int(fact.get("chapter_number") or 0) for fact in (recent_facts or [])] or [0])
+    fact_text = "\n".join(str(fact.get("summary") or "") for fact in (recent_facts or []))
+
+    for card in characters:
+        name = str(card.get("name") or "")
+        aliases = [str(alias) for alias in (card.get("aliases") or []) if alias]
+        terms = [name, *aliases]
+        last_seen = int(card.get("last_seen_chapter") or 0)
+        score = 0
+        reasons: list[str] = []
+        if any(term and term in outline_text for term in terms):
+            score += 100
+            reasons.append("本章大纲明确提及")
+        latest_event = (card.get("recent_events") or [])[-1] if card.get("recent_events") else {}
+        latest_summary = str(latest_event.get("summary") or "")
+        locations = " ".join(str(item) for item in latest_event.get("locations") or [])
+        if outline_text and latest_summary and any(token and token in outline_text for token in _extract_context_terms(latest_summary + " " + locations)):
+            score += 35
+            reasons.append("与本章地点/物件相关")
+        if latest_chapter and last_seen == latest_chapter:
+            score += 12
+            reasons.append("上一有效事实中刚出现")
+        elif latest_chapter and last_seen >= latest_chapter - 1:
+            score += 6
+        if name and name in fact_text:
+            score += 4
+        enriched = {**card, "injection_relevance": {"score": score, "reasons": reasons or ["近期背景"]}}
+        scored.append((score, -last_seen, str(card.get("first_seen_chapter") or ""), name, enriched))
+
+    scored.sort(key=lambda item: (-item[0], item[1], item[2], item[3]))
+    has_outline = bool(outline_text.strip())
+    if has_outline:
+        focus = [item[-1] for item in scored if item[0] >= 80][:limit]
+        background = [item[-1] for item in scored if 35 <= item[0] < 80][:4]
+        offstage = [item[-1] for item in scored if item[0] < 35 and _is_recent(item[-1], latest_chapter)][:4]
+        return {"focus": focus, "background": background, "offstage": offstage}
+    return {"focus": [item[-1] for item in scored[:limit]], "background": [], "offstage": []}
+
+
+def _is_recent(card: dict[str, Any], latest_chapter: int) -> bool:
+    if not latest_chapter:
+        return False
+    return int(card.get("last_seen_chapter") or 0) >= latest_chapter - 2
+
+
+def _extract_context_terms(text: str) -> list[str]:
+    terms: list[str] = []
+    for marker in ["黑塔", "雾城", "星港", "城门", "钥匙", "罗盘", "白鸦", "旧案", "密门"]:
+        if marker in text:
+            terms.append(marker)
+    return terms
+
+
+def _render_usage_protocol() -> str:
+    return (
+        "以下内容是角色连续性参考，不是本章任务清单；不要逐条复述，也不要为使用这些信息强行安排情节。"
+        "硬边界用于避免逻辑越界；软倾向只影响选择风格；可变状态可在本章新证据刺激下自然更新。"
+    )
+
+
+def _render_focus_characters(characters: list[dict[str, Any]]) -> str:
+    lines = []
+    for card in characters:
+        latest = (card.get("recent_events") or [])[-1] if card.get("recent_events") else {}
+        summary = _clean_display_text(latest.get("summary") or "暂无近期动态")
+        reasons = "、".join((card.get("injection_relevance") or {}).get("reasons") or [])
+        reason_suffix = f"；相关性：{reasons}" if reasons else ""
+        life_parts = _render_life_parts(card)
+        life_suffix = f"；{life_parts}" if life_parts else ""
+        lines.append(
+            f"- {card.get('name')}：状态 {card.get('status') or 'active'}；首次第{card.get('first_seen_chapter')}章，最近第{card.get('last_seen_chapter')}章；{summary}{life_suffix}{reason_suffix}"
+        )
+    return "\n".join(lines)
+
+
+
+def _render_life_parts(card: dict[str, Any]) -> str:
+    parts: list[str] = []
+    cognitive = card.get("cognitive_state") or {}
+    known = _join_limited(cognitive.get("known_facts"), 2)
+    unknowns = _join_limited(cognitive.get("unknowns"), 2)
+    misbeliefs = _join_limited(cognitive.get("misbeliefs"), 1)
+    hard: list[str] = []
+    soft: list[str] = []
+    mutable: list[str] = []
+    if known:
+        hard.append(f"已知={known}")
+    if unknowns:
+        hard.append(f"未知={unknowns}")
+    if misbeliefs:
+        mutable.append(f"误判={misbeliefs}")
+    emotional = (card.get("emotional_arc") or [])[-1:]
+    if emotional:
+        item = emotional[0]
+        emotion = item.get("emotion") or ""
+        change = item.get("inner_change") or ""
+        if emotion or change:
+            mutable.append(f"心路={_clean_display_text(emotion)}{'，' if emotion and change else ''}{_clean_display_text(change)}")
+    growth = card.get("growth_arc") or {}
+    if growth.get("stage") and growth.get("stage") != "未定":
+        mutable.append(f"成长阶段={_clean_display_text(growth.get('stage'))}")
+    latest_growth = (growth.get("changes") or [])[-1:]
+    if latest_growth:
+        mutable.append(f"成长变化={_clean_display_text(latest_growth[0].get('summary'))}")
+    limits = _join_limited(card.get("capability_limits"), 2)
+    if limits:
+        hard.append(f"能力边界={limits}")
+    biases = _join_limited(card.get("decision_biases"), 2)
+    if biases:
+        soft.append(f"决策倾向={biases}")
+    if hard:
+        parts.append("硬边界（不可无过渡违反）：" + "；".join(hard))
+    if soft:
+        parts.append("软倾向（可被情境改变）：" + "；".join(soft))
+    if mutable:
+        parts.append("可变状态（允许随新证据更新）：" + "；".join(mutable))
+    appearance = _render_appearance_brief(card.get("appearance"))
+    if appearance:
+        parts.append("外貌/出场识别：" + appearance)
+    attributes = _render_record_brief(card.get("attributes"), 3)
+    world_fields = _render_record_brief((card.get("world_profile") or {}).get("fields"), 3)
+    if attributes or world_fields:
+        parts.append("属性/世界观字段：" + "；".join(item for item in [attributes, world_fields] if item))
+    palette = _render_palette_brief(card.get("personality_palette"))
+    if palette:
+        parts.append("性格调色盘：" + palette)
+    return "；".join(part for part in parts if part)
+
+
+def _join_limited(values: Any, limit: int) -> str:
+    if not isinstance(values, list):
+        return ""
+    return "、".join(_clean_display_text(str(item)) for item in values[-limit:] if str(item).strip())
+
+
+def _render_appearance_brief(value: Any) -> str:
+    if not isinstance(value, dict):
+        return ""
+    items = []
+    summary = _clean_display_text(value.get("summary") or "")
+    if summary and "待从正文补充" not in summary:
+        items.append(summary)
+    outfit = _clean_display_text(value.get("current_outfit") or "")
+    if outfit:
+        items.append(f"当前装束={outfit}")
+    features = _join_limited(value.get("features"), 2)
+    if features:
+        items.append(f"特征={features}")
+    return "；".join(items[:3])
+
+
+def _render_record_brief(records: Any, limit: int) -> str:
+    if not isinstance(records, list):
+        return ""
+    parts = []
+    for item in records[:limit]:
+        if not isinstance(item, dict):
+            continue
+        name = _clean_display_text(item.get("name") or "")
+        value = _clean_display_text(item.get("value") or "")
+        if name and value:
+            parts.append(f"{name}={value}")
+    return "、".join(parts)
+
+
+def _render_palette_brief(value: Any) -> str:
+    if not isinstance(value, dict):
+        return ""
+    parts = []
+    base = _clean_display_text(value.get("base") or "")
+    if base:
+        parts.append(f"底色={base}")
+    main = _join_limited(value.get("main_tones"), 3)
+    if main:
+        parts.append(f"主色调={main}")
+    accents = _join_limited(value.get("accents"), 2)
+    if accents:
+        parts.append(f"点缀={accents}")
+    derivatives = value.get("derivatives") if isinstance(value.get("derivatives"), list) else []
+    if derivatives:
+        descriptions = []
+        for item in derivatives[:2]:
+            if isinstance(item, dict) and item.get("description"):
+                prefix = _clean_display_text(item.get("tone") or item.get("title") or "衍生")
+                descriptions.append(f"{prefix}:{_clean_display_text(item.get('description'))}")
+        if descriptions:
+            parts.append("行为衍生=" + " / ".join(descriptions))
+    return "；".join(parts)
+
+def _render_background_constraints(characters: list[dict[str, Any]]) -> str:
+    lines = []
+    for card in characters:
+        latest = (card.get("recent_events") or [])[-1] if card.get("recent_events") else {}
+        summary = _clean_display_text(latest.get("summary") or "暂无近期动态")
+        reasons = "、".join((card.get("injection_relevance") or {}).get("reasons") or [])
+        lines.append(f"- {card.get('name')}：与本章有背景关联（{reasons or '地点/物件相关'}），只作为连续性约束；不要因此强制安排出场。近期状态：{summary}")
+    return "\n".join(lines)
+
+
+def _clean_display_text(value: str) -> str:
+    text = str(value or "")
+    return text.replace("《", "").replace("》", "")
+
+
+def _render_facts(facts: list[dict[str, Any]]) -> str:
+    lines = []
+    for fact in facts:
+        locations = "、".join(fact.get("locations") or [])
+        location_suffix = f" 地点：{locations}" if locations else ""
+        lines.append(f"- 第{fact.get('chapter_number')}章：{_clean_display_text(fact.get('summary') or '')}{location_suffix}")
+    return "\n".join(lines)
+
+
+def _build_risks(characters: list[dict[str, Any]], facts: list[dict[str, Any]], background_characters: Optional[list[dict[str, Any]]] = None) -> list[str]:
+    risks: list[str] = []
+    if characters:
+        stale = [card for card in characters if int(card.get("last_seen_chapter") or 0) < int((facts[-1] or {}).get("chapter_number") or 0) - 5] if facts else []
+        if stale:
+            names = "、".join(str(card.get("name")) for card in stale[:4])
+            risks.append(f"这些角色较久未更新，重新登场前建议交代状态：{names}")
+    if background_characters:
+        names = "、".join(str(card.get("name")) for card in background_characters[:4])
+        risks.append(f"以下近期角色未被本章大纲明确召回，保持离场/远端状态；除非剧情需要，不要强行安排出场：{names}")
+    if facts:
+        latest = facts[-1]
+        if not latest.get("locations"):
+            risks.append("最近章节缺少明确地点，下一章生成前建议确认场景位置。")
+    return risks[:4]

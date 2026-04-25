@@ -93,7 +93,7 @@ def test_context_bridge_renders_before_context_blocks():
             ],
         }
 
-    register_hook("evolution_world_assistant", "before_context_build", handler)
+    register_hook("world_evolution_core", "before_context_build", handler)
 
     results = dispatch_hook_sync("before_context_build", {"novel_id": "novel-1", "chapter_number": 3})
     rendered = render_context_blocks(results)
@@ -108,7 +108,7 @@ def test_host_integration_builds_generation_context_patch():
     clear_hooks()
 
     register_hook(
-        "evolution_world_assistant",
+        "world_evolution_core",
         "before_context_build",
         lambda payload: {
             "ok": True,
@@ -132,7 +132,7 @@ async def test_host_integration_notifies_chapter_committed():
         seen.update(payload)
         return {"ok": True, "data": {"updated": True}}
 
-    register_hook("evolution_world_assistant", "after_commit", handler)
+    register_hook("world_evolution_core", "after_commit", handler)
 
     results = await notify_chapter_committed("novel-1", 2, "《林澈》进入黑塔。")
 
@@ -165,7 +165,7 @@ async def test_host_integration_reviews_chapter_with_plugins():
             },
         }
 
-    register_hook("evolution_world_assistant", "review_chapter", handler)
+    register_hook("world_evolution_core", "review_chapter", handler)
 
     results = await review_chapter_with_plugins("novel-1", 4, "林澈知道钥匙会消耗记忆。")
 
