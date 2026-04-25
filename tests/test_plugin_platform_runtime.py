@@ -1,7 +1,10 @@
 from pathlib import Path
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
+import plugins.loader as plugin_loader
 from plugins.platform.context_bridge import dispatch_hook_sync, render_context_blocks
 from plugins.platform.hook_dispatcher import clear_hooks, dispatch_hook, list_hooks, register_hook
 from plugins.platform.host_database import ReadOnlyHostDatabase
@@ -93,6 +96,49 @@ def test_plugin_storage_default_root_is_dedicated_plugin_platform_area():
     assert storage.root.name == "plugin_platform"
 
 
+def test_disabled_plugin_routes_and_static_are_blocked(tmp_path, monkeypatch):
+    plugins_root = tmp_path / "plugins"
+    plugin_dir = plugins_root / "guard_plugin"
+    (plugin_dir / "static").mkdir(parents=True)
+    (plugin_dir / "__init__.py").write_text(
+        "\n".join(
+            [
+                "def init_api(app):",
+                "    @app.get('/api/v1/plugins/guard_plugin/ping')",
+                "    def ping():",
+                "        return {'ok': True}",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (plugin_dir / "plugin.json").write_text(
+        '{"name":"guard_plugin","enabled":true,"frontend":{"scripts":["static/inject.js"]}}',
+        encoding="utf-8",
+    )
+    (plugin_dir / "static" / "inject.js").write_text("console.log('guard');\n", encoding="utf-8")
+
+    monkeypatch.setattr(plugin_loader, "_PLUGINS_ROOT", plugins_root)
+    monkeypatch.setattr(plugin_loader, "_PLUGIN_CONTROL_PATH", tmp_path / "data" / "plugin_controls.json")
+
+    app = FastAPI()
+    assert plugin_loader.init_api_plugins(app) == ["guard_plugin"]
+    client = TestClient(app)
+
+    assert client.get("/api/v1/plugins/guard_plugin/ping").status_code == 200
+    assert client.get("/plugins/guard_plugin/static/inject.js").status_code == 200
+
+    plugin_loader.set_plugin_enabled("guard_plugin", False)
+
+    api_response = client.get("/api/v1/plugins/guard_plugin/ping")
+    static_response = client.get("/plugins/guard_plugin/static/inject.js")
+
+    assert api_response.status_code == 403
+    assert api_response.json()["plugin_name"] == "guard_plugin"
+    assert static_response.status_code == 403
+    assert static_response.json()["plugin_name"] == "guard_plugin"
+
+
 def test_readonly_host_database_allows_reads_and_blocks_writes(tmp_path):
     import sqlite3
 
@@ -128,16 +174,36 @@ def test_plugin_host_exposes_readonly_host_database_and_writable_plugin_area(tmp
     conn.close()
 
     host = PlotPilotPluginHost(
+        plugin_name="world_evolution_core",
         storage=PluginStorage(root=tmp_path / "plugin_platform"),
         host_database=ReadOnlyHostDatabase(db_path),
     )
 
-    assert host.read_host_row("SELECT content FROM chapters WHERE novel_id = ?", ("novel-1",)) == {"content": "第一章"}
     with pytest.raises(PermissionError):
-        host.read_host_rows("DELETE FROM chapters")
+        host.read_host_row("SELECT content FROM chapters WHERE novel_id = ?", ("novel-1",))
 
-    host.write_plugin_state("world_evolution_core", ["novels", "novel-1", "state.json"], {"ok": True})
+    assert host.read_host_table_row("chapters", columns=["content"], novel_id="novel-1") == {"content": "第一章"}
+    assert host.read_host_table("chapters", columns=["content"], limit=1000) == [{"content": "第一章"}]
+
+    with pytest.raises(ValueError):
+        host.read_host_table("chapters; DROP TABLE chapters", columns=["content"])
+    with pytest.raises(ValueError):
+        host.read_host_table("chapters", columns=["content FROM chapters; DROP TABLE chapters"])
+
+    host.write_own_plugin_state(["novels", "novel-1", "state.json"], {"ok": True})
+    assert host.read_own_plugin_state(["novels", "novel-1", "state.json"]) == {"ok": True}
     assert host.read_plugin_state("world_evolution_core", ["novels", "novel-1", "state.json"]) == {"ok": True}
+    with pytest.raises(PermissionError):
+        host.write_plugin_state("other_plugin", ["state.json"], {"ok": False})
+
+    raw_host = PlotPilotPluginHost(
+        storage=PluginStorage(root=tmp_path / "plugin_platform"),
+        host_database=ReadOnlyHostDatabase(db_path),
+        allow_raw_host_sql=True,
+    )
+    assert raw_host.read_host_row("SELECT content FROM chapters WHERE novel_id = ?", ("novel-1",)) == {"content": "第一章"}
+    with pytest.raises(PermissionError):
+        raw_host.read_host_rows("DELETE FROM chapters")
 
 
 @pytest.mark.asyncio

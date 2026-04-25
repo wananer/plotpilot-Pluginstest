@@ -22,9 +22,11 @@ def _make_zip_bytes(files: dict[str, str]) -> bytes:
     return buffer.getvalue()
 
 
-def _make_client() -> TestClient:
+def _make_client(*, client: tuple[str, int] | None = None) -> TestClient:
     app = FastAPI()
     app.include_router(plugin_loader.create_plugin_manifest_router(), prefix="/api/v1")
+    if client is not None:
+        return TestClient(app, client=client)
     return TestClient(app)
 
 
@@ -157,6 +159,62 @@ def test_plugin_enabled_endpoint_toggles_single_plugin(tmp_path, monkeypatch):
     ]
 
 
+def test_plugin_admin_endpoint_rejects_remote_client_without_token(tmp_path, monkeypatch):
+    plugins_root = tmp_path / "plugins"
+    plugin_dir = plugins_root / "toggle_plugin"
+    plugin_dir.mkdir(parents=True)
+    (plugin_dir / "__init__.py").write_text("def init_api(app):\n    return None\n", encoding="utf-8")
+    (plugin_dir / "plugin.json").write_text(json.dumps({"name": "toggle_plugin"}), encoding="utf-8")
+
+    monkeypatch.setattr(plugin_loader, "_PLUGINS_ROOT", plugins_root)
+    monkeypatch.setattr(plugin_loader, "_PLUGIN_CONTROL_PATH", tmp_path / "data" / "plugin_controls.json")
+    monkeypatch.delenv("PLOTPILOT_PLUGIN_ADMIN_TOKEN", raising=False)
+    client = _make_client(client=("203.0.113.10", 50000))
+
+    response = client.put("/api/v1/plugins/toggle_plugin/enabled", json={"enabled": False})
+
+    assert response.status_code == 403
+    assert "仅允许本机访问" in response.json()["detail"]
+
+
+def test_plugin_admin_endpoint_accepts_configured_token(tmp_path, monkeypatch):
+    plugins_root = tmp_path / "plugins"
+    plugin_dir = plugins_root / "toggle_plugin"
+    plugin_dir.mkdir(parents=True)
+    (plugin_dir / "__init__.py").write_text("def init_api(app):\n    return None\n", encoding="utf-8")
+    (plugin_dir / "plugin.json").write_text(json.dumps({"name": "toggle_plugin"}), encoding="utf-8")
+
+    monkeypatch.setattr(plugin_loader, "_PLUGINS_ROOT", plugins_root)
+    monkeypatch.setattr(plugin_loader, "_PLUGIN_CONTROL_PATH", tmp_path / "data" / "plugin_controls.json")
+    monkeypatch.setenv("PLOTPILOT_PLUGIN_ADMIN_TOKEN", "secret-token")
+    client = _make_client()
+
+    denied = client.put("/api/v1/plugins/toggle_plugin/enabled", json={"enabled": False})
+    allowed = client.put(
+        "/api/v1/plugins/toggle_plugin/enabled",
+        json={"enabled": False},
+        headers={"x-plugin-admin-token": "secret-token"},
+    )
+
+    assert denied.status_code == 403
+    assert allowed.status_code == 200
+    assert allowed.json()["enabled"] is False
+
+
+def test_github_import_respects_allowlist(tmp_path, monkeypatch):
+    monkeypatch.setattr(plugin_loader, "_PLUGINS_ROOT", tmp_path / "plugins")
+    monkeypatch.setenv("PLOTPILOT_PLUGIN_GITHUB_ALLOWLIST", "https://github.com/wananer/")
+    client = _make_client()
+
+    response = client.post(
+        "/api/v1/plugins/import/github",
+        json={"github_url": "https://github.com/attacker/plugin"},
+    )
+
+    assert response.status_code == 403
+    assert "允许列表" in response.json()["detail"]
+
+
 def test_plugin_upload_rejects_zip_path_traversal(tmp_path, monkeypatch):
     monkeypatch.setattr(plugin_loader, "_PLUGINS_ROOT", tmp_path / "plugins")
     client = _make_client()
@@ -175,6 +233,60 @@ def test_plugin_upload_rejects_zip_path_traversal(tmp_path, monkeypatch):
 
     assert response.status_code == 400
     assert not (tmp_path / "escape.txt").exists()
+
+
+def test_plugin_upload_rejects_frontend_asset_outside_static(tmp_path, monkeypatch):
+    monkeypatch.setattr(plugin_loader, "_PLUGINS_ROOT", tmp_path / "plugins")
+    client = _make_client()
+
+    plugin_zip = _make_zip_bytes(
+        {
+            "bad_plugin/__init__.py": "def init_api(app):\n    return None\n",
+            "bad_plugin/plugin.json": json.dumps(
+                {
+                    "name": "bad_plugin",
+                    "frontend": {"scripts": ["../escape.js"]},
+                }
+            ),
+            "bad_plugin/escape.js": "console.log('escape');\n",
+        }
+    )
+
+    response = client.post(
+        "/api/v1/plugins/import/upload",
+        files={"file": ("bad_plugin.zip", plugin_zip, "application/zip")},
+    )
+
+    assert response.status_code == 400
+    assert "manifest.frontend" in response.json()["detail"]
+    assert not (tmp_path / "plugins" / "bad_plugin").exists()
+
+
+def test_plugin_upload_rejects_frontend_asset_not_under_static(tmp_path, monkeypatch):
+    monkeypatch.setattr(plugin_loader, "_PLUGINS_ROOT", tmp_path / "plugins")
+    client = _make_client()
+
+    plugin_zip = _make_zip_bytes(
+        {
+            "bad_plugin/__init__.py": "def init_api(app):\n    return None\n",
+            "bad_plugin/plugin.json": json.dumps(
+                {
+                    "name": "bad_plugin",
+                    "frontend": {"styles": ["assets/style.css"]},
+                }
+            ),
+            "bad_plugin/assets/style.css": ".x{}\n",
+        }
+    )
+
+    response = client.post(
+        "/api/v1/plugins/import/upload",
+        files={"file": ("bad_plugin.zip", plugin_zip, "application/zip")},
+    )
+
+    assert response.status_code == 400
+    assert "static" in response.json()["detail"]
+    assert not (tmp_path / "plugins" / "bad_plugin").exists()
 
 
 def test_plugin_manifest_exposes_styles_and_capabilities(tmp_path, monkeypatch):

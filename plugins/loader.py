@@ -10,16 +10,20 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
+import hmac
 import json
 import logging
+import os
 import shutil
 import subprocess
 import tempfile
+import threading
 import zipfile
 from pathlib import Path
 from typing import Any, Dict, List
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, File, HTTPException, Request, UploadFile
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 logger = logging.getLogger(__name__)
@@ -28,6 +32,8 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 _PLUGINS_ROOT = _PROJECT_ROOT / "plugins"
 _PLUGIN_CONTROL_PATH = _PROJECT_ROOT / "data" / "plugin_platform" / "plugin_controls.json"
 _PLUGIN_NAME_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")
+_PLUGIN_CONTROL_LOCK = threading.RLock()
+_LOCAL_ADMIN_HOSTS = {"127.0.0.1", "::1", "localhost", "testclient"}
 
 
 def _discover_plugin_dirs() -> List[Path]:
@@ -87,10 +93,11 @@ def _load_plugin_controls() -> Dict[str, Any]:
 
 
 def _write_plugin_controls(controls: Dict[str, Any]) -> None:
-    _PLUGIN_CONTROL_PATH.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = _PLUGIN_CONTROL_PATH.with_suffix(".tmp")
-    temp_path.write_text(json.dumps(controls, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
-    temp_path.replace(_PLUGIN_CONTROL_PATH)
+    with _PLUGIN_CONTROL_LOCK:
+        _PLUGIN_CONTROL_PATH.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = _PLUGIN_CONTROL_PATH.with_suffix(".tmp")
+        temp_path.write_text(json.dumps(controls, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+        temp_path.replace(_PLUGIN_CONTROL_PATH)
 
 
 def _configured_plugin_enabled(plugin_name: str) -> bool | None:
@@ -105,10 +112,13 @@ def set_plugin_enabled(plugin_name: str, enabled: bool) -> Dict[str, Any]:
     normalized = _normalize_plugin_name(plugin_name)
     if not normalized:
         raise HTTPException(status_code=400, detail="插件名称无效")
-    controls = _load_plugin_controls()
-    controls[normalized] = {"enabled": bool(enabled)}
-    _write_plugin_controls(controls)
-    return controls[normalized]
+    with _PLUGIN_CONTROL_LOCK:
+        controls = _load_plugin_controls()
+        controls[normalized] = {
+            "enabled": bool(enabled),
+        }
+        _write_plugin_controls(controls)
+        return controls[normalized]
 
 
 def _effective_plugin_enabled(plugin_name: str, manifest: Dict[str, Any]) -> bool:
@@ -157,6 +167,7 @@ def _validate_manifest_contract(manifest: Dict[str, Any], plugin_dir_name: str) 
         for item in list(scripts or []) + list(styles or []):
             if not isinstance(item, str) or not item.strip():
                 raise HTTPException(status_code=400, detail="manifest.frontend 资源路径必须是非空字符串")
+            _validate_frontend_asset_path(item)
 
     for key in ("capabilities", "permissions", "hooks"):
         value = manifest.get(key)
@@ -164,6 +175,18 @@ def _validate_manifest_contract(manifest: Dict[str, Any], plugin_dir_name: str) 
             raise HTTPException(status_code=400, detail=f"manifest.{key} 必须是 object 或数组")
 
     return {"plugin_name": plugin_name, "manifest": manifest}
+
+
+def _validate_frontend_asset_path(asset_path: str) -> None:
+    raw = str(asset_path or "").strip()
+    if raw.startswith(("/", "\\", "http://", "https://", "//")):
+        raise HTTPException(status_code=400, detail="manifest.frontend 资源路径必须是插件 static/ 下的相对路径")
+    normalized = raw.replace("\\", "/")
+    path = Path(normalized)
+    if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
+        raise HTTPException(status_code=400, detail="manifest.frontend 资源路径包含非法片段")
+    if not normalized.startswith("static/"):
+        raise HTTPException(status_code=400, detail="manifest.frontend 资源路径只能位于 static/ 目录")
 
 
 def _safe_extract_zip(zip_file: zipfile.ZipFile, destination: Path) -> None:
@@ -181,10 +204,22 @@ def _safe_extract_zip(zip_file: zipfile.ZipFile, destination: Path) -> None:
     zip_file.extractall(destination)
 
 
-def _resolve_frontend_script(plugin_name: str, script: str) -> str:
-    if script.startswith("/"):
-        return script
-    return f"/plugins/{plugin_name}/{script.lstrip('/')}"
+def _resolve_frontend_asset(plugin_dir: Path, asset: str) -> str | None:
+    try:
+        _validate_frontend_asset_path(asset)
+    except HTTPException as exc:
+        logger.warning("⚠️ Plugin %s frontend asset ignored: %s", plugin_dir.name, exc.detail)
+        return None
+    normalized = asset.strip().replace("\\", "/")
+    asset_path = (plugin_dir / normalized).resolve()
+    static_root = (plugin_dir / "static").resolve()
+    if static_root != asset_path and static_root not in asset_path.parents:
+        logger.warning("⚠️ Plugin %s frontend asset escaped static/: %s", plugin_dir.name, asset)
+        return None
+    if not asset_path.exists() or not asset_path.is_file():
+        logger.warning("⚠️ Plugin %s frontend asset missing: %s", plugin_dir.name, asset)
+        return None
+    return f"/plugins/{plugin_dir.name}/{normalized}"
 
 
 def _append_frontend_asset_version(plugin_dir: Path, asset_url: str) -> str:
@@ -209,7 +244,9 @@ def _collect_frontend_scripts_for_plugin(plugin_dir: Path, manifest: Dict[str, A
         scripts: List[str] = []
         for script in manifest_scripts:
             if isinstance(script, str) and script.strip():
-                scripts.append(_append_frontend_asset_version(plugin_dir, _resolve_frontend_script(plugin_dir.name, script.strip())))
+                resolved = _resolve_frontend_asset(plugin_dir, script.strip())
+                if resolved:
+                    scripts.append(_append_frontend_asset_version(plugin_dir, resolved))
         return scripts
 
     script_path = plugin_dir / "static" / "inject.js"
@@ -225,7 +262,9 @@ def _collect_frontend_styles_for_plugin(plugin_dir: Path, manifest: Dict[str, An
         styles: List[str] = []
         for style in manifest_styles:
             if isinstance(style, str) and style.strip():
-                styles.append(_append_frontend_asset_version(plugin_dir, _resolve_frontend_script(plugin_dir.name, style.strip())))
+                resolved = _resolve_frontend_asset(plugin_dir, style.strip())
+                if resolved:
+                    styles.append(_append_frontend_asset_version(plugin_dir, resolved))
         return styles
 
     style_path = plugin_dir / "static" / "style.css"
@@ -294,6 +333,37 @@ def _include_platform_router(app) -> None:
         logger.info("✅ Plugin platform router included")
     except Exception as exc:
         logger.warning("⚠️ Plugin platform router include failed: %s", exc)
+
+
+def _plugin_name_from_runtime_path(path: str) -> str | None:
+    parts = [part for part in path.split("/") if part]
+    if len(parts) >= 4 and parts[:3] == ["api", "v1", "plugins"]:
+        plugin_name = _normalize_plugin_name(parts[3])
+        if not plugin_name or plugin_name in {"platform", "manifest", "import"}:
+            return None
+        if len(parts) == 5 and parts[4] == "enabled":
+            return None
+        return plugin_name
+    if len(parts) >= 3 and parts[0] == "plugins":
+        plugin_name = _normalize_plugin_name(parts[1])
+        return plugin_name or None
+    return None
+
+
+def _install_plugin_disabled_route_guard(app) -> None:
+    if getattr(app.state, "plugin_disabled_route_guard_installed", False):
+        return
+    app.state.plugin_disabled_route_guard_installed = True
+
+    @app.middleware("http")
+    async def block_disabled_plugin_routes(request, call_next):
+        plugin_name = _plugin_name_from_runtime_path(request.url.path)
+        if plugin_name and not is_plugin_enabled(plugin_name):
+            return JSONResponse(
+                status_code=403,
+                content={"detail": f"Plugin disabled: {plugin_name}", "plugin_name": plugin_name},
+            )
+        return await call_next(request)
 
 
 def _mount_plugin_static(app, plugin_name: str) -> None:
@@ -369,6 +439,7 @@ def load_plugins() -> List[Dict[str, Any]]:
 def init_api_plugins(app) -> List[str]:
     initialized: List[str] = []
     _include_platform_router(app)
+    _install_plugin_disabled_route_guard(app)
 
     loaded_state = getattr(app.state, "loaded_plugins", None)
     if not isinstance(loaded_state, set):
@@ -448,6 +519,36 @@ def create_plugin_manifest_router() -> APIRouter:
             "manifest": info["manifest"],
         }
 
+    def _is_local_admin_request(request: Request) -> bool:
+        host = request.client.host if request.client else ""
+        if host in _LOCAL_ADMIN_HOSTS:
+            return True
+        forwarded_for = request.headers.get("x-forwarded-for", "").split(",", 1)[0].strip()
+        return forwarded_for in _LOCAL_ADMIN_HOSTS
+
+    def _require_plugin_admin(request: Request) -> None:
+        token = os.getenv("PLOTPILOT_PLUGIN_ADMIN_TOKEN", "").strip()
+        if token:
+            provided = request.headers.get("x-plugin-admin-token", "").strip()
+            auth = request.headers.get("authorization", "").strip()
+            if auth.lower().startswith("bearer "):
+                provided = provided or auth[7:].strip()
+            if hmac.compare_digest(provided, token):
+                return
+            raise HTTPException(status_code=403, detail="插件平台管理接口需要有效 admin token")
+        if _is_local_admin_request(request):
+            return
+        raise HTTPException(status_code=403, detail="插件平台管理接口仅允许本机访问，或配置 PLOTPILOT_PLUGIN_ADMIN_TOKEN")
+
+    def _assert_github_url_allowed(github_url: str) -> None:
+        allowlist = [
+            item.strip()
+            for item in os.getenv("PLOTPILOT_PLUGIN_GITHUB_ALLOWLIST", "").split(",")
+            if item.strip()
+        ]
+        if allowlist and not any(github_url.startswith(prefix) for prefix in allowlist):
+            raise HTTPException(status_code=403, detail="GitHub 插件仓库不在允许列表中")
+
     @router.get("")
     async def list_plugins():
         items = list_plugin_manifests()
@@ -466,7 +567,8 @@ def create_plugin_manifest_router() -> APIRouter:
         }
 
     @router.put("/{plugin_name}/enabled")
-    async def update_plugin_enabled(plugin_name: str, payload: Dict[str, Any]):
+    async def update_plugin_enabled(plugin_name: str, payload: Dict[str, Any], request: Request):
+        _require_plugin_admin(request)
         normalized = _normalize_plugin_name(plugin_name)
         if not normalized:
             raise HTTPException(status_code=400, detail="插件名称无效")
@@ -488,12 +590,14 @@ def create_plugin_manifest_router() -> APIRouter:
         }
 
     @router.post("/import/github")
-    async def import_plugin_from_github(payload: Dict[str, Any]):
+    async def import_plugin_from_github(payload: Dict[str, Any], request: Request):
+        _require_plugin_admin(request)
         github_url = str(payload.get("github_url") or "").strip()
         if not github_url:
             raise HTTPException(status_code=400, detail="github_url 不能为空")
         if not (github_url.startswith("https://github.com/") or github_url.startswith("git@github.com:")):
             raise HTTPException(status_code=400, detail="仅支持 GitHub 仓库地址")
+        _assert_github_url_allowed(github_url)
 
         with tempfile.TemporaryDirectory(prefix="plotpilot-plugin-gh-") as temp_dir:
             temp_path = Path(temp_dir)
@@ -529,7 +633,8 @@ def create_plugin_manifest_router() -> APIRouter:
             }
 
     @router.post("/import/upload")
-    async def import_plugin_from_upload(file: UploadFile = File(...)):
+    async def import_plugin_from_upload(request: Request, file: UploadFile = File(...)):
+        _require_plugin_admin(request)
         filename = file.filename or "plugin.zip"
         if not filename.lower().endswith(".zip"):
             raise HTTPException(status_code=400, detail="目前仅支持上传 zip 插件包")

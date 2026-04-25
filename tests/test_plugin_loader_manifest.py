@@ -51,12 +51,24 @@ def _make_plugin(
     return plugin_dir
 
 
+def _write_static_asset(plugin_dir: Path, relative_path: str, content: str = "console.log('plugin');") -> None:
+    asset_path = plugin_dir / relative_path
+    asset_path.parent.mkdir(parents=True, exist_ok=True)
+    asset_path.write_text(content, encoding="utf-8")
+
+
+def _strip_asset_versions(urls: list[str]) -> list[str]:
+    return [url.split("?", 1)[0] for url in urls]
+
+
 def test_collect_frontend_scripts_prefers_manifest_entries(monkeypatch, tmp_path):
-    _make_plugin(
+    alpha_dir = _make_plugin(
         tmp_path,
         "alpha",
-        manifest='{"frontend": {"scripts": ["static/a.js", "/plugins/shared/b.js"]}}',
+        manifest='{"frontend": {"scripts": ["static/a.js", "static/b.js"]}}',
     )
+    _write_static_asset(alpha_dir, "static/a.js")
+    _write_static_asset(alpha_dir, "static/b.js")
     _make_plugin(tmp_path, "beta")
     (tmp_path / "beta" / "static").mkdir(parents=True, exist_ok=True)
     (tmp_path / "beta" / "static" / "inject.js").write_text("console.log('beta');", encoding="utf-8")
@@ -65,9 +77,9 @@ def test_collect_frontend_scripts_prefers_manifest_entries(monkeypatch, tmp_path
 
     scripts = loader.collect_frontend_scripts()
 
-    assert scripts[:2] == [
+    assert _strip_asset_versions(scripts[:2]) == [
         "/plugins/alpha/static/a.js",
-        "/plugins/shared/b.js",
+        "/plugins/alpha/static/b.js",
     ]
     assert scripts[2].startswith("/plugins/beta/static/inject.js?v=")
 
@@ -177,11 +189,13 @@ def test_init_api_plugins_auto_includes_routes_and_static(monkeypatch, tmp_path)
 
 
 def test_plugin_manifest_endpoint_lists_enabled_plugins_and_frontend_assets(monkeypatch, tmp_path):
-    _make_plugin(
+    alpha_dir = _make_plugin(
         tmp_path,
         "alpha",
         manifest='{"display_name": "Alpha Plugin", "version": "1.0.0", "frontend": {"scripts": ["static/a.js", "static/b.js"]}}',
     )
+    _write_static_asset(alpha_dir, "static/a.js")
+    _write_static_asset(alpha_dir, "static/b.js")
     _make_plugin(
         tmp_path,
         "beta",
@@ -204,7 +218,7 @@ def test_plugin_manifest_endpoint_lists_enabled_plugins_and_frontend_assets(monk
     assert [item["name"] for item in body["items"]] == ["alpha", "beta", "gamma"]
     assert body["items"][0]["display_name"] == "Alpha Plugin"
     assert body["items"][0]["version"] == "1.0.0"
-    assert body["items"][0]["frontend_scripts"] == [
+    assert _strip_asset_versions(body["items"][0]["frontend_scripts"]) == [
         "/plugins/alpha/static/a.js",
         "/plugins/alpha/static/b.js",
     ]
@@ -220,11 +234,12 @@ def test_plugin_manifest_endpoint_lists_enabled_plugins_and_frontend_assets(monk
 
 
 def test_plugins_endpoint_returns_runtime_metadata(monkeypatch, tmp_path):
-    _make_plugin(
+    alpha_dir = _make_plugin(
         tmp_path,
         "alpha",
         manifest='{"display_name": "Alpha Plugin", "version": "1.0.0", "frontend": {"scripts": ["static/a.js"]}}',
     )
+    _write_static_asset(alpha_dir, "static/a.js")
 
     monkeypatch.setattr(loader, "_PLUGINS_ROOT", tmp_path)
     app = FastAPI()
@@ -236,7 +251,7 @@ def test_plugins_endpoint_returns_runtime_metadata(monkeypatch, tmp_path):
     body = response.json()
     assert body["total"] == 1
     assert body["items"][0]["name"] == "alpha"
-    assert body["frontend_scripts"] == ["/plugins/alpha/static/a.js"]
+    assert _strip_asset_versions(body["frontend_scripts"]) == ["/plugins/alpha/static/a.js"]
     assert body["runtime"] == {
         "manifest_endpoint": "/api/v1/plugins/manifest",
         "plugins_endpoint": "/api/v1/plugins",
@@ -245,16 +260,18 @@ def test_plugins_endpoint_returns_runtime_metadata(monkeypatch, tmp_path):
 
 
 def test_plugin_manifest_endpoint_deduplicates_frontend_scripts(monkeypatch, tmp_path):
-    _make_plugin(
+    alpha_dir = _make_plugin(
         tmp_path,
         "alpha",
-        manifest='{"frontend": {"scripts": ["static/shared.js", "static/shared.js", "/plugins/shared/lib.js"]}}',
+        manifest='{"frontend": {"scripts": ["static/shared.js", "static/shared.js"]}}',
     )
-    _make_plugin(
+    _write_static_asset(alpha_dir, "static/shared.js")
+    beta_dir = _make_plugin(
         tmp_path,
         "beta",
-        manifest='{"frontend": {"scripts": ["/plugins/shared/lib.js", "static/extra.js"]}}',
+        manifest='{"frontend": {"scripts": ["static/extra.js"]}}',
     )
+    _write_static_asset(beta_dir, "static/extra.js")
 
     monkeypatch.setattr(loader, "_PLUGINS_ROOT", tmp_path)
     app = FastAPI()
@@ -264,9 +281,8 @@ def test_plugin_manifest_endpoint_deduplicates_frontend_scripts(monkeypatch, tmp
 
     assert response.status_code == 200
     body = response.json()
-    assert body["frontend_scripts"] == [
+    assert _strip_asset_versions(body["frontend_scripts"]) == [
         "/plugins/alpha/static/shared.js",
-        "/plugins/shared/lib.js",
         "/plugins/beta/static/extra.js",
     ]
 
