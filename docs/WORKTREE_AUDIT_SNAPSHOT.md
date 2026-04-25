@@ -1,6 +1,6 @@
 # Worktree Audit Snapshot
 
-> 审计对象：`/tmp/plotpilot-Pluginstest-sync`
+> 审计对象：plugin platform 独立同步工作区
 > 分支：`main`
 > 远端：`origin = https://github.com/wananer/plotpilot-Pluginstest.git`
 

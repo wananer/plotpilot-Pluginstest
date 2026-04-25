@@ -29,7 +29,7 @@
 
 以下内容如果再次进入这个仓库，应视为“平台纯净度退化”：
 
-- 任何外部宿主绝对路径依赖，如 `/Users/.../PlotPilot/...`
+- 任何外部宿主绝对路径依赖，例如用户主目录中的 PlotPilot 工作区路径
 - 对外部业务插件源码或用户本机路径的测试硬依赖
 - `bionic_memory` / `rolecard` / `autopilot` / `rewrite` / `novel` 等业务功能实现直接进入平台主体
 - 需要依赖用户本机已有 PlotPilot 主仓库或业务插件仓库，仓库自身无法自测的测试设计
@@ -59,7 +59,7 @@ pytest
 ### 4. 验证结果
 - Python 全量测试：`28 passed`
 - 前端 runtime/config 测试：`4 passed`
-- 外部硬编码残留搜索：未发现 `/Users/.../PlotPilot/...`、`.hermes`、`aitext.db`、`bootstrapBionicMemoryPlugin`、`__BMHost`、`__bmRefresh` 等残留
+- 外部硬编码残留搜索：未发现用户主目录工作区路径、临时同步目录、本机项目目录标记、运行数据库、旧业务插件 host 标记等残留
 - 跟踪文件清单：未发现 `__pycache__`、`.pytest_cache`、`node_modules`、数据库、dist 构建产物或本地日志被 git 跟踪
 
 ## 当前允许存在的文档级示例
