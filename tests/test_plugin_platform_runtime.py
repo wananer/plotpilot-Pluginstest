@@ -1,4 +1,3 @@
-import json
 from pathlib import Path
 
 import pytest
@@ -46,10 +45,27 @@ def test_plugin_storage_scopes_state_under_plugin_root(tmp_path):
     path = storage.write_json("sample_state_plugin", ["novels", "novel-1", "state.json"], {"ok": True})
 
     assert path == tmp_path / "sample_state_plugin" / "novels" / "novel-1" / "state.json"
+    assert not path.exists()
+    assert (tmp_path / "plugin_platform.db").exists()
     assert storage.read_json("sample_state_plugin", ["novels", "novel-1", "state.json"]) == {"ok": True}
+    assert storage.read_json("sample_state_plugin", ["novels", "novel-2", "state.json"], default=None) is None
 
     with pytest.raises(ValueError):
         storage.write_json("sample_state_plugin", ["..", "escape.json"], {})
+
+
+def test_plugin_storage_lists_and_logs_by_novel_namespace(tmp_path):
+    storage = PluginStorage(root=tmp_path)
+
+    storage.write_json("world_evolution_core", ["novels", "novel-a", "facts", "chapter_1.json"], {"novel_id": "novel-a", "chapter_number": 1})
+    storage.write_json("world_evolution_core", ["novels", "novel-a", "facts", "chapter_2.json"], {"novel_id": "novel-a", "chapter_number": 2})
+    storage.write_json("world_evolution_core", ["novels", "novel-b", "facts", "chapter_1.json"], {"novel_id": "novel-b", "chapter_number": 1})
+    storage.append_jsonl("world_evolution_core", ["novels", "novel-a", "runs.jsonl"], {"novel_id": "novel-a", "run": 1})
+    storage.append_jsonl("world_evolution_core", ["novels", "novel-b", "runs.jsonl"], {"novel_id": "novel-b", "run": 1})
+
+    assert [item["chapter_number"] for item in storage.list_json("world_evolution_core", ["novels", "novel-a", "facts"])] == [1, 2]
+    assert storage.list_json("world_evolution_core", ["novels", "novel-b", "facts"]) == [{"chapter_number": 1, "novel_id": "novel-b"}]
+    assert storage.read_jsonl("world_evolution_core", ["novels", "novel-a", "runs.jsonl"]) == [{"novel_id": "novel-a", "run": 1}]
 
 
 def test_plugin_storage_default_root_is_dedicated_plugin_platform_area():
@@ -127,10 +143,10 @@ def test_job_registry_appends_jsonl_and_builds_dedup_key(tmp_path):
 
     registry.append(record)
 
-    jobs_path = tmp_path / "sample_state_plugin" / "jobs.jsonl"
-    lines = jobs_path.read_text(encoding="utf-8").splitlines()
-    assert len(lines) == 1
-    payload = json.loads(lines[0])
+    assert not (tmp_path / "sample_state_plugin" / "jobs.jsonl").exists()
+    jobs = storage.read_jsonl("sample_state_plugin", ["jobs.jsonl"])
+    assert len(jobs) == 1
+    payload = jobs[0]
     assert payload["dedup_key"] == "sample_state_plugin:after_commit:novel-1:3:abc:auto"
     assert payload["status"] == "pending"
 
