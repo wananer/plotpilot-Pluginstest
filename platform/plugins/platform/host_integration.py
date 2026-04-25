@@ -63,3 +63,27 @@ async def notify_chapter_committed(
     except Exception as exc:
         logger.warning("Plugin after_commit failed novel=%s ch=%s: %s", novel_id, chapter_number, exc)
         return [{"plugin_name": "plugin_platform", "hook_name": "after_commit", "ok": False, "error": str(exc)}]
+
+
+async def review_chapter_with_plugins(
+    novel_id: str,
+    chapter_number: int,
+    content: str,
+    *,
+    source: str = "chapter_review_service",
+) -> list[dict[str, Any]]:
+    """Ask plugins to contribute chapter review issues/suggestions."""
+    try:
+        return await dispatch_hook(
+            "review_chapter",
+            {
+                "novel_id": novel_id,
+                "chapter_number": chapter_number,
+                "trigger_type": source,
+                "source": source,
+                "payload": {"content": content},
+            },
+        )
+    except Exception as exc:
+        logger.warning("Plugin review_chapter failed novel=%s ch=%s: %s", novel_id, chapter_number, exc)
+        return [{"plugin_name": "plugin_platform", "hook_name": "review_chapter", "ok": False, "error": str(exc)}]

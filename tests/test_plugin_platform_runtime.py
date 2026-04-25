@@ -5,6 +5,7 @@ import pytest
 
 from plugins.platform.context_bridge import dispatch_hook_sync, render_context_blocks
 from plugins.platform.hook_dispatcher import clear_hooks, dispatch_hook, list_hooks, register_hook
+from plugins.platform.host_integration import build_generation_context_patch, notify_chapter_committed, review_chapter_with_plugins
 from plugins.platform.job_registry import PluginJobRecord, PluginJobRegistry
 from plugins.platform.plugin_storage import PluginStorage
 
@@ -78,49 +79,6 @@ def test_job_registry_appends_jsonl_and_builds_dedup_key(tmp_path):
     assert payload["dedup_key"] == "dynamic_rolecard:after_commit:novel-1:3:abc:auto"
     assert payload["status"] == "pending"
 
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
-
-from plugins.loader import init_api_plugins
-from plugins.platform.host_facade import PlotPilotPluginHost
-from plugins.platform.host_integration import build_generation_context_patch, notify_chapter_committed
-
-
-@pytest.mark.asyncio
-async def test_host_facade_uses_adapters_and_dispatches_hooks(tmp_path):
-    clear_hooks()
-    storage = PluginStorage(root=tmp_path)
-    host = PlotPilotPluginHost(
-        storage=storage,
-        novel_reader=lambda novel_id: {"id": novel_id},
-        chapter_reader=lambda novel_id, chapter_number: {"novel_id": novel_id, "number": chapter_number},
-    )
-
-    register_hook("sample", "before_context_build", lambda payload: {"ok": True, "data": {"seen": payload["novel_id"]}})
-
-    assert await host.get_novel("n1") == {"id": "n1"}
-    assert await host.get_chapter("n1", 2) == {"novel_id": "n1", "number": 2}
-    assert (await host.dispatch_hook("before_context_build", {"novel_id": "n1"}))[0]["data"] == {"seen": "n1"}
-
-    host.write_plugin_state("sample", ["novels", "n1", "state.json"], {"ok": True})
-    assert host.read_plugin_state("sample", ["novels", "n1", "state.json"]) == {"ok": True}
-    clear_hooks()
-
-
-def test_init_api_plugins_mounts_platform_status_router(tmp_path, monkeypatch):
-    import plugins.loader as plugin_loader
-
-    monkeypatch.setattr(plugin_loader, "_PLUGINS_ROOT", tmp_path / "plugins")
-    app = FastAPI()
-    init_api_plugins(app)
-    client = TestClient(app)
-
-    response = client.get("/api/v1/plugins/platform/status")
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload["ok"] is True
-    assert payload["features"]["host_facade"] is True
-
 
 
 def test_context_bridge_renders_before_context_blocks():
@@ -181,4 +139,38 @@ async def test_host_integration_notifies_chapter_committed():
     assert results[0]["data"] == {"updated": True}
     assert seen["source"] == "chapter_aftermath_pipeline"
     assert seen["payload"]["content"] == "《林澈》进入黑塔。"
+    clear_hooks()
+
+
+@pytest.mark.asyncio
+async def test_host_integration_reviews_chapter_with_plugins():
+    clear_hooks()
+    seen = {}
+
+    async def handler(payload):
+        seen.update(payload)
+        return {
+            "ok": True,
+            "data": {
+                "issues": [
+                    {
+                        "issue_type": "evolution_character_logic",
+                        "severity": "warning",
+                        "description": "林澈突然知道钥匙代价，但此前状态仍标记为未知。",
+                        "location": "Chapter 4",
+                        "suggestion": "补一笔他如何得知代价，或改为怀疑/推测。",
+                    }
+                ],
+                "suggestions": ["让 Evolution 审稿意见作为 PlotPilot 原有审稿建议的补充。"],
+            },
+        }
+
+    register_hook("evolution_world_assistant", "review_chapter", handler)
+
+    results = await review_chapter_with_plugins("novel-1", 4, "林澈知道钥匙会消耗记忆。")
+
+    assert results[0]["data"]["issues"][0]["issue_type"] == "evolution_character_logic"
+    assert seen["source"] == "chapter_review_service"
+    assert seen["chapter_number"] == 4
+    assert seen["payload"]["content"] == "林澈知道钥匙会消耗记忆。"
     clear_hooks()

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from .context_bridge import dispatch_hook_sync, render_context_blocks
 from .hook_dispatcher import clear_hooks, dispatch_hook, dispatch_hook_sync_best_effort, list_hooks, register_hook
-from .host_integration import build_generation_context_patch, notify_chapter_committed
+from .host_integration import build_generation_context_patch, notify_chapter_committed, review_chapter_with_plugins
 from .host_facade import PlotPilotPluginHost
 from .job_registry import PluginJobRecord, PluginJobRegistry
 from .plugin_storage import PluginStorage
@@ -25,4 +25,5 @@ __all__ = [
     "register_hook",
     "notify_chapter_committed",
     "render_context_blocks",
+    "review_chapter_with_plugins",
 ]
