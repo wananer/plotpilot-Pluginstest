@@ -299,6 +299,36 @@ class EvolutionWorldRepository:
             "constraints": (relevant_constraints or constraints[:limit])[:limit],
         }
 
+    def save_prehistory_worldline(self, novel_id: str, worldline: dict[str, Any]) -> None:
+        self.storage.write_json(PLUGIN_NAME, ["novels", novel_id, "prehistory", "worldline.json"], worldline)
+
+    def get_prehistory_worldline(self, novel_id: str) -> dict[str, Any] | None:
+        data = self.storage.read_json(
+            PLUGIN_NAME,
+            ["novels", novel_id, "prehistory", "worldline.json"],
+            default=None,
+        )
+        return data if isinstance(data, dict) else None
+
+    def build_story_planning_evidence(
+        self,
+        novel_id: str,
+        *,
+        purpose: str = "story_planning",
+        limit: int = 8,
+    ) -> dict[str, Any]:
+        worldline = self.get_prehistory_worldline(novel_id)
+        if not worldline:
+            return {}
+        return {
+            "purpose": purpose,
+            "worldline": worldline,
+            "eras": list(worldline.get("eras") or [])[-limit:],
+            "foreshadow_seeds": list(worldline.get("foreshadow_seeds") or [])[:limit],
+            "forces": list(worldline.get("forces") or [])[:limit],
+            "planning_guidance": list(worldline.get("planning_guidance") or [])[:limit],
+        }
+
 
     def save_imported_flows(self, novel_id: str, converted: dict[str, Any]) -> None:
         self.storage.write_json(PLUGIN_NAME, ["novels", novel_id, "imported_flows.json"], converted)

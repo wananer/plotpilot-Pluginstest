@@ -8,8 +8,10 @@ from plugins.platform.host_database import ReadOnlyHostDatabase
 from plugins.platform.host_facade import PlotPilotPluginHost
 from plugins.platform.host_integration import (
     build_generation_context_patch,
+    collect_story_planning_context_with_plugins,
     collect_chapter_review_context_with_plugins,
     notify_chapter_committed,
+    notify_novel_created_with_plugins,
     notify_chapter_review_completed,
     review_chapter_with_plugins,
 )
@@ -238,6 +240,34 @@ async def test_evolution_builds_timeline_evidence_for_review_flow(tmp_path):
     assert records[-1]["issue_count"] == len(review["data"]["issues"])
 
 
+@pytest.mark.asyncio
+async def test_evolution_seeds_prehistory_for_story_planning(tmp_path):
+    from plugins.world_evolution_core.service import EvolutionWorldAssistantService
+
+    storage = PluginStorage(root=tmp_path)
+    service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage))
+
+    await service.after_novel_created(
+        {
+            "novel_id": "novel-prehistory",
+            "payload": {
+                "title": "星海遗民",
+                "genre": "星际史诗",
+                "world_preset": "帝国衰亡后的多文明冲突",
+                "premise": "主角在旧帝国档案中发现文明灭绝的真相。",
+                "target_chapters": 800,
+                "length_tier": "epic",
+            },
+        }
+    )
+    result = service.before_story_planning({"novel_id": "novel-prehistory", "payload": {"purpose": "macro_outline_planning"}})
+
+    assert result["ok"] is True
+    assert result["data"]["worldline"]["depth"]["tier"] == "epic"
+    assert "故事开始前的世界线" in result["context_blocks"][0]["content"]
+    assert "可用于大纲与伏笔的种子" in result["context_blocks"][0]["content"]
+
+
 def test_job_registry_appends_jsonl_and_builds_dedup_key(tmp_path):
     storage = PluginStorage(root=tmp_path)
     registry = PluginJobRegistry(storage=storage)
@@ -327,6 +357,47 @@ async def test_host_integration_notifies_chapter_committed():
     assert results[0]["data"] == {"updated": True}
     assert seen["source"] == "chapter_aftermath_pipeline"
     assert seen["payload"]["content"] == "《林澈》进入黑塔。"
+    clear_hooks()
+
+
+@pytest.mark.asyncio
+async def test_host_integration_notifies_novel_created_and_collects_story_context():
+    clear_hooks()
+    seen = {}
+
+    async def after_create(payload):
+        seen.update(payload)
+        return {"ok": True, "data": {"worldline_seeded": True}}
+
+    def before_planning(payload):
+        return {
+            "ok": True,
+            "context_blocks": [
+                {
+                    "title": "Evolution 故事前史与伏笔库",
+                    "content": "开篇前约180-144年：旧案被粉饰。",
+                }
+            ],
+        }
+
+    register_hook("world_evolution_core", "after_novel_created", after_create)
+    register_hook("world_evolution_core", "before_story_planning", before_planning)
+
+    results = await notify_novel_created_with_plugins(
+        "novel-1",
+        "旧案回声",
+        "主角调查被抹去的旧案。",
+        genre="悬疑",
+        world_preset="贵族学校",
+        target_chapters=240,
+    )
+    context = collect_story_planning_context_with_plugins("novel-1", purpose="setup_main_plot_options")
+
+    assert results[0]["data"] == {"worldline_seeded": True}
+    assert seen["payload"]["genre"] == "悬疑"
+    assert seen["payload"]["target_chapters"] == 240
+    assert "Evolution 故事前史与伏笔库" in context
+    assert "旧案被粉饰" in context
     clear_hooks()
 
 
