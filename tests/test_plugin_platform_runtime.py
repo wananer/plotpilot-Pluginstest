@@ -59,11 +59,22 @@ def test_plugin_storage_lists_and_logs_by_novel_namespace(tmp_path):
 
     storage.write_json("world_evolution_core", ["novels", "novel-a", "facts", "chapter_1.json"], {"novel_id": "novel-a", "chapter_number": 1})
     storage.write_json("world_evolution_core", ["novels", "novel-a", "facts", "chapter_2.json"], {"novel_id": "novel-a", "chapter_number": 2})
+    storage.write_json("world_evolution_core", ["novels", "novel-a", "facts", "chapter_10.json"], {"novel_id": "novel-a", "chapter_number": 10})
     storage.write_json("world_evolution_core", ["novels", "novel-b", "facts", "chapter_1.json"], {"novel_id": "novel-b", "chapter_number": 1})
     storage.append_jsonl("world_evolution_core", ["novels", "novel-a", "runs.jsonl"], {"novel_id": "novel-a", "run": 1})
     storage.append_jsonl("world_evolution_core", ["novels", "novel-b", "runs.jsonl"], {"novel_id": "novel-b", "run": 1})
 
-    assert [item["chapter_number"] for item in storage.list_json("world_evolution_core", ["novels", "novel-a", "facts"])] == [1, 2]
+    assert [item["chapter_number"] for item in storage.list_json("world_evolution_core", ["novels", "novel-a", "facts"])] == [1, 2, 10]
+    assert [
+        item["chapter_number"]
+        for item in storage.list_json(
+            "world_evolution_core",
+            ["novels", "novel-a", "facts"],
+            before_chapter=10,
+            limit=1,
+            reverse=True,
+        )
+    ] == [2]
     assert storage.list_json("world_evolution_core", ["novels", "novel-b", "facts"]) == [{"chapter_number": 1, "novel_id": "novel-b"}]
     assert storage.read_jsonl("world_evolution_core", ["novels", "novel-a", "runs.jsonl"]) == [{"novel_id": "novel-a", "run": 1}]
 
@@ -119,6 +130,53 @@ def test_plugin_host_exposes_readonly_host_database_and_writable_plugin_area(tmp
 
     host.write_plugin_state("world_evolution_core", ["novels", "novel-1", "state.json"], {"ok": True})
     assert host.read_plugin_state("world_evolution_core", ["novels", "novel-1", "state.json"]) == {"ok": True}
+
+
+@pytest.mark.asyncio
+async def test_evolution_state_uses_plugin_db_records_per_novel(tmp_path):
+    import sqlite3
+
+    from plugins.world_evolution_core.service import EvolutionWorldAssistantService
+
+    storage = PluginStorage(root=tmp_path)
+    service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage))
+
+    await service.after_commit(
+        {
+            "novel_id": "novel-a",
+            "chapter_number": 1,
+            "payload": {"content": "《林澈》抵达雾城。"},
+        }
+    )
+    await service.after_commit(
+        {
+            "novel_id": "novel-b",
+            "chapter_number": 1,
+            "payload": {"content": "《沈月》进入星港。"},
+        }
+    )
+
+    assert (tmp_path / "plugin_platform.db").exists()
+    assert not (tmp_path / "world_evolution_core" / "novels" / "novel-a" / "characters.json").exists()
+    assert not (tmp_path / "world_evolution_core" / "novels" / "novel-a" / "facts" / "chapter_1.json").exists()
+
+    assert service.get_character("novel-a", "林澈") is not None
+    assert service.get_character("novel-a", "沈月") is None
+
+    conn = sqlite3.connect(tmp_path / "plugin_platform.db")
+    rows = conn.execute(
+        """
+        SELECT novel_id, scope, chapter_number, entity_id
+        FROM plugin_state
+        WHERE plugin_name = 'world_evolution_core'
+        ORDER BY novel_id, scope
+        """
+    ).fetchall()
+    conn.close()
+
+    assert any(row[0] == "novel-a" and row[1].startswith("novels/novel-a/characters/") and row[3] for row in rows)
+    assert any(row[0] == "novel-b" and row[1].startswith("novels/novel-b/characters/") for row in rows)
+    assert not any(row[0] == "novel-a" and "沈月" in str(row) for row in rows)
 
 
 def test_job_registry_appends_jsonl_and_builds_dedup_key(tmp_path):
