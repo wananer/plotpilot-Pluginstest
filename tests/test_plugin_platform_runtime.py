@@ -254,6 +254,31 @@ async def test_evolution_state_uses_plugin_db_records_per_novel(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_evolution_extracts_unquoted_chinese_character_names(tmp_path):
+    from plugins.world_evolution_core.service import EvolutionWorldAssistantService
+
+    storage = PluginStorage(root=tmp_path)
+    service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage))
+
+    result = await service.after_commit(
+        {
+            "novel_id": "novel-unquoted",
+            "chapter_number": 1,
+            "payload": {
+                "content": (
+                    "沈砚回到雾港学院。顾岚警告他别查坠塔事故，陆行舟登记他的临时访客权限。"
+                    "顾珩站在走廊尽头看着黑匣子发热。"
+                )
+            },
+        }
+    )
+
+    assert result["data"]["facts"]["characters"] == ["沈砚", "顾岚", "陆行舟", "顾珩"]
+    cards = service.list_characters("novel-unquoted")["items"]
+    assert {card["name"] for card in cards} == {"沈砚", "顾岚", "陆行舟", "顾珩"}
+
+
+@pytest.mark.asyncio
 async def test_evolution_builds_timeline_evidence_for_review_flow(tmp_path):
     from plugins.world_evolution_core.service import EvolutionWorldAssistantService
 
