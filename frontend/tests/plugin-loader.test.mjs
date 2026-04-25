@@ -32,6 +32,8 @@ function assertWorldEvolutionBridge(source) {
   assert.match(source, /novel:selected/)
   assert.match(source, /runtime\.events\.emit\('runtime:ready'/)
   assert.match(source, /runtime\.events\.emit\('plugins:loaded'/)
+  assert.match(source, /if \(nextPlugin\.enabled !== false\)/)
+  assert.match(source, /runtime\.plugins\.dispose\(item\.name\)/)
 }
 
 test('public plugin loader exposes the world_evolution_core host bridge', () => {

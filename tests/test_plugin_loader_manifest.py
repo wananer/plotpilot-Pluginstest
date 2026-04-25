@@ -192,6 +192,7 @@ def test_plugin_manifest_endpoint_lists_enabled_plugins_and_frontend_assets(monk
     (tmp_path / "gamma" / "static" / "inject.js").write_text("console.log('gamma');", encoding="utf-8")
 
     monkeypatch.setattr(loader, "_PLUGINS_ROOT", tmp_path)
+    monkeypatch.setattr(loader, "_PLUGIN_CONTROL_PATH", tmp_path / "data" / "plugin_controls.json")
     app = FastAPI()
     app.include_router(loader.create_plugin_manifest_router(), prefix="/api/v1")
 
@@ -199,16 +200,18 @@ def test_plugin_manifest_endpoint_lists_enabled_plugins_and_frontend_assets(monk
 
     assert response.status_code == 200
     body = response.json()
-    assert body["total"] == 2
-    assert [item["name"] for item in body["items"]] == ["alpha", "gamma"]
+    assert body["total"] == 3
+    assert [item["name"] for item in body["items"]] == ["alpha", "beta", "gamma"]
     assert body["items"][0]["display_name"] == "Alpha Plugin"
     assert body["items"][0]["version"] == "1.0.0"
     assert body["items"][0]["frontend_scripts"] == [
         "/plugins/alpha/static/a.js",
         "/plugins/alpha/static/b.js",
     ]
-    assert body["items"][1]["display_name"] == "gamma"
-    assert body["items"][1]["frontend_scripts"][0].startswith("/plugins/gamma/static/inject.js?v=")
+    assert body["items"][1]["enabled"] is False
+    assert body["items"][1]["frontend_scripts"] == []
+    assert body["items"][2]["display_name"] == "gamma"
+    assert body["items"][2]["frontend_scripts"][0].startswith("/plugins/gamma/static/inject.js?v=")
     assert body["runtime"] == {
         "manifest_endpoint": "/api/v1/plugins/manifest",
         "plugins_endpoint": "/api/v1/plugins",

@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 _PLUGINS_ROOT = _PROJECT_ROOT / "plugins"
+_PLUGIN_CONTROL_PATH = _PROJECT_ROOT / "data" / "plugin_platform" / "plugin_controls.json"
 _PLUGIN_NAME_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")
 
 
@@ -72,6 +73,59 @@ def _import_plugin_module(plugin_dir: Path):
 
 def _is_enabled(manifest: Dict[str, Any]) -> bool:
     return manifest.get("enabled", True) is not False
+
+
+def _load_plugin_controls() -> Dict[str, Any]:
+    if not _PLUGIN_CONTROL_PATH.exists():
+        return {}
+    try:
+        data = json.loads(_PLUGIN_CONTROL_PATH.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception as exc:
+        logger.warning("⚠️ Plugin control state read failed: %s", exc)
+        return {}
+
+
+def _write_plugin_controls(controls: Dict[str, Any]) -> None:
+    _PLUGIN_CONTROL_PATH.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = _PLUGIN_CONTROL_PATH.with_suffix(".tmp")
+    temp_path.write_text(json.dumps(controls, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    temp_path.replace(_PLUGIN_CONTROL_PATH)
+
+
+def _configured_plugin_enabled(plugin_name: str) -> bool | None:
+    record = _load_plugin_controls().get(plugin_name)
+    if not isinstance(record, dict):
+        return None
+    enabled = record.get("enabled")
+    return enabled if isinstance(enabled, bool) else None
+
+
+def set_plugin_enabled(plugin_name: str, enabled: bool) -> Dict[str, Any]:
+    normalized = _normalize_plugin_name(plugin_name)
+    if not normalized:
+        raise HTTPException(status_code=400, detail="插件名称无效")
+    controls = _load_plugin_controls()
+    controls[normalized] = {"enabled": bool(enabled)}
+    _write_plugin_controls(controls)
+    return controls[normalized]
+
+
+def _effective_plugin_enabled(plugin_name: str, manifest: Dict[str, Any]) -> bool:
+    configured = _configured_plugin_enabled(plugin_name)
+    if configured is not None:
+        return configured
+    return _is_enabled(manifest)
+
+
+def is_plugin_enabled(plugin_name: str) -> bool:
+    normalized = _normalize_plugin_name(plugin_name)
+    if not normalized:
+        return False
+    plugin_dir = _PLUGINS_ROOT / normalized
+    if not plugin_dir.exists():
+        return True
+    return _effective_plugin_enabled(normalized, _load_manifest(plugin_dir))
 
 
 def _normalize_plugin_name(raw: str) -> str:
@@ -182,16 +236,19 @@ def _collect_frontend_styles_for_plugin(plugin_dir: Path, manifest: Dict[str, An
 
 def _build_plugin_manifest_record(plugin_dir: Path) -> Dict[str, Any] | None:
     manifest = _load_manifest(plugin_dir)
-    if not _is_enabled(manifest):
-        return None
+    manifest_enabled = _is_enabled(manifest)
+    configured_enabled = _configured_plugin_enabled(plugin_dir.name)
+    enabled = configured_enabled if configured_enabled is not None else manifest_enabled
 
-    frontend_scripts = _collect_frontend_scripts_for_plugin(plugin_dir, manifest)
-    frontend_styles = _collect_frontend_styles_for_plugin(plugin_dir, manifest)
+    frontend_scripts = _collect_frontend_scripts_for_plugin(plugin_dir, manifest) if enabled else []
+    frontend_styles = _collect_frontend_styles_for_plugin(plugin_dir, manifest) if enabled else []
     return {
         "name": plugin_dir.name,
         "display_name": manifest.get("display_name") or manifest.get("name") or plugin_dir.name,
         "version": manifest.get("version"),
-        "enabled": True,
+        "enabled": enabled,
+        "manifest_enabled": manifest_enabled,
+        "configured_enabled": configured_enabled,
         "frontend_scripts": frontend_scripts,
         "frontend_styles": frontend_styles,
         "capabilities": manifest.get("capabilities") or {},
@@ -298,8 +355,8 @@ def load_plugins() -> List[Dict[str, Any]]:
     for plugin_dir in _discover_plugin_dirs():
         plugin_name = plugin_dir.name
         manifest = _load_manifest(plugin_dir)
-        if not _is_enabled(manifest):
-            logger.info("⏭️ Plugin %s disabled by manifest", plugin_name)
+        if not _effective_plugin_enabled(plugin_name, manifest):
+            logger.info("⏭️ Plugin %s disabled by platform control", plugin_name)
             continue
         try:
             mod = _import_plugin_module(plugin_dir)
@@ -406,6 +463,28 @@ def create_plugin_manifest_router() -> APIRouter:
                 "plugins_endpoint": "/api/v1/plugins",
                 "frontend_loader": "/plugin-loader.js",
             },
+        }
+
+    @router.put("/{plugin_name}/enabled")
+    async def update_plugin_enabled(plugin_name: str, payload: Dict[str, Any]):
+        normalized = _normalize_plugin_name(plugin_name)
+        if not normalized:
+            raise HTTPException(status_code=400, detail="插件名称无效")
+        plugin_dir = _PLUGINS_ROOT / normalized
+        if not plugin_dir.exists() or not plugin_dir.is_dir():
+            raise HTTPException(status_code=404, detail="插件不存在")
+        enabled = payload.get("enabled")
+        if not isinstance(enabled, bool):
+            raise HTTPException(status_code=400, detail="enabled 必须是 boolean")
+
+        set_plugin_enabled(normalized, enabled)
+        record = _build_plugin_manifest_record(plugin_dir)
+        return {
+            "ok": True,
+            "plugin_name": normalized,
+            "enabled": enabled,
+            "plugin": record,
+            "message": "插件已启用" if enabled else "插件已停用",
         }
 
     @router.post("/import/github")
@@ -517,7 +596,7 @@ def collect_frontend_scripts() -> List[str]:
     scripts: List[str] = []
     for plugin_dir in _discover_plugin_dirs():
         manifest = _load_manifest(plugin_dir)
-        if not _is_enabled(manifest):
+        if not _effective_plugin_enabled(plugin_dir.name, manifest):
             continue
         scripts.extend(_collect_frontend_scripts_for_plugin(plugin_dir, manifest))
     return scripts
@@ -527,7 +606,7 @@ def collect_frontend_styles() -> List[str]:
     styles: List[str] = []
     for plugin_dir in _discover_plugin_dirs():
         manifest = _load_manifest(plugin_dir)
-        if not _is_enabled(manifest):
+        if not _effective_plugin_enabled(plugin_dir.name, manifest):
             continue
         styles.extend(_collect_frontend_styles_for_plugin(plugin_dir, manifest))
     return styles

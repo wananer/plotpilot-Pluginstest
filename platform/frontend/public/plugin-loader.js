@@ -82,7 +82,9 @@
           const nextPlugin = { ...existing, ...plugin, name: plugin.name };
           loadedPlugins.set(plugin.name, nextPlugin);
           runtime.events.emit(existing.name ? 'plugin:updated' : 'plugin:registered', nextPlugin);
-          queueMicrotask(() => runtime.plugins.init(plugin.name));
+          if (nextPlugin.enabled !== false) {
+            queueMicrotask(() => runtime.plugins.init(plugin.name));
+          }
           return nextPlugin;
         },
         async init(name) {
@@ -338,6 +340,12 @@
   function registerManifestPlugins(runtime, items) {
     for (const item of items || []) {
       if (!item || !item.name) continue;
+      if (item.enabled === false) {
+        const existing = runtime.plugins.get(item.name);
+        if (existing && existing.__plotpilotInitialized) {
+          runtime.plugins.dispose(item.name);
+        }
+      }
       runtime.plugins.register({
         name: item.name,
         display_name: item.display_name || item.name,

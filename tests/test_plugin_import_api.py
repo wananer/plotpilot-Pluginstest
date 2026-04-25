@@ -92,22 +92,69 @@ def test_disabled_plugin_is_filtered_from_plugin_list(tmp_path, monkeypatch):
     (disabled_dir / "static" / "inject.js").write_text("console.log('disabled');\n", encoding="utf-8")
 
     monkeypatch.setattr(plugin_loader, "_PLUGINS_ROOT", plugins_root)
+    monkeypatch.setattr(plugin_loader, "_PLUGIN_CONTROL_PATH", tmp_path / "data" / "plugin_controls.json")
     client = _make_client()
 
     response = client.get("/api/v1/plugins")
     assert response.status_code == 200
     payload = response.json()
 
-    assert payload["total"] == 0
-    assert payload["items"] == []
+    assert payload["total"] == 1
+    assert payload["items"][0]["name"] == "disabled_plugin"
+    assert payload["items"][0]["enabled"] is False
+    assert payload["items"][0]["manifest_enabled"] is False
+    assert payload["items"][0]["configured_enabled"] is None
     assert payload["frontend_scripts"] == []
 
     manifest_response = client.get("/api/v1/plugins/manifest")
     assert manifest_response.status_code == 200
     manifest_payload = manifest_response.json()
-    assert manifest_payload["total"] == 0
-    assert manifest_payload["items"] == []
+    assert manifest_payload["total"] == 1
+    assert manifest_payload["items"][0]["enabled"] is False
     assert manifest_payload["frontend_scripts"] == []
+
+
+def test_plugin_enabled_endpoint_toggles_single_plugin(tmp_path, monkeypatch):
+    plugins_root = tmp_path / "plugins"
+    plugin_dir = plugins_root / "toggle_plugin"
+    (plugin_dir / "static").mkdir(parents=True)
+    (plugin_dir / "__init__.py").write_text("def init_api(app):\n    return None\n", encoding="utf-8")
+    (plugin_dir / "plugin.json").write_text(
+        json.dumps(
+            {
+                "name": "toggle_plugin",
+                "display_name": "Toggle Plugin",
+                "enabled": True,
+                "frontend": {"scripts": ["static/inject.js"]},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (plugin_dir / "static" / "inject.js").write_text("console.log('toggle');\n", encoding="utf-8")
+
+    monkeypatch.setattr(plugin_loader, "_PLUGINS_ROOT", plugins_root)
+    monkeypatch.setattr(plugin_loader, "_PLUGIN_CONTROL_PATH", tmp_path / "data" / "plugin_controls.json")
+    client = _make_client()
+
+    disable_response = client.put("/api/v1/plugins/toggle_plugin/enabled", json={"enabled": False})
+    assert disable_response.status_code == 200
+    assert disable_response.json()["enabled"] is False
+
+    disabled_payload = client.get("/api/v1/plugins").json()
+    assert disabled_payload["items"][0]["enabled"] is False
+    assert disabled_payload["items"][0]["configured_enabled"] is False
+    assert disabled_payload["frontend_scripts"] == []
+    assert plugin_loader.load_plugins() == []
+
+    enable_response = client.put("/api/v1/plugins/toggle_plugin/enabled", json={"enabled": True})
+    assert enable_response.status_code == 200
+    enabled_payload = client.get("/api/v1/plugins").json()
+
+    assert enabled_payload["items"][0]["enabled"] is True
+    assert enabled_payload["items"][0]["configured_enabled"] is True
+    assert [_strip_asset_version(url) for url in enabled_payload["frontend_scripts"]] == [
+        "/plugins/toggle_plugin/static/inject.js"
+    ]
 
 
 def test_plugin_upload_rejects_zip_path_traversal(tmp_path, monkeypatch):
