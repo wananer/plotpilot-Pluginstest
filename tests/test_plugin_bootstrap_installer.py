@@ -51,6 +51,7 @@ def test_install_plugin_platform_patches_fresh_clone_files(tmp_path):
     assert (repo / "plugins" / "loader.py").exists()
     assert (repo / "plugins" / "platform" / "hook_dispatcher.py").exists()
     assert (repo / "plugins" / "platform" / "host_facade.py").exists()
+    assert (repo / "plugins" / "platform" / "host_database.py").exists()
 
 
 def test_install_plugin_platform_is_idempotent(tmp_path):

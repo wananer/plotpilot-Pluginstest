@@ -6,13 +6,23 @@ from pathlib import Path
 from typing import Any, Optional, Union, Tuple
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
-_DEFAULT_STORAGE_ROOT = _PROJECT_ROOT / "data" / "plugins"
 _SAFE_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-.")
+
+
+def default_plugin_storage_root() -> Path:
+    """Return the dedicated read/write area owned by the plugin platform."""
+    try:
+        from application.paths import DATA_DIR
+
+        return Path(DATA_DIR) / "plugin_platform"
+    except Exception:
+        return _PROJECT_ROOT / "data" / "plugin_platform"
 
 
 class PluginStorage:
     def __init__(self, root: Path | None = None) -> None:
-        self.root = root or _DEFAULT_STORAGE_ROOT
+        self.root = Path(root) if root is not None else default_plugin_storage_root()
+        self.root.mkdir(parents=True, exist_ok=True)
 
     def read_json(self, plugin_name: str, scope: Union[list[str], Tuple[str, ...]], default: Any = None) -> Any:
         path = self._path(plugin_name, scope)

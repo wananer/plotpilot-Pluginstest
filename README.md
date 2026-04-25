@@ -88,6 +88,12 @@ pytest
 
 业务插件（如 `bionic_memory`）应继续作为**独立插件仓库**演进，而不是回灌到平台仓库主体。
 
+## 数据边界
+
+- PlotPilot 原有数据库只通过 `ReadOnlyHostDatabase` 暴露给插件平台，连接使用 SQLite read-only mode，并且只接受 `SELECT` / `WITH` 查询。
+- 插件平台自己的读写区域是宿主数据目录下的 `plugin_platform/`，插件状态、任务日志、派生数据都应写入这里。
+- 插件不要直接 import 宿主数据库连接或仓储实现；需要宿主数据时通过只读 facade 或明确 hook payload 获取。
+
 ## 相关文档
 
 - `docs/PLUGIN_DOCS_INDEX.md`

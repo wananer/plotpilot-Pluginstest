@@ -41,6 +41,7 @@
 - 平台核心职责清晰：loader / runtime / installer
 - `interfaces/main.py` 与 `scripts/start_daemon.py` 已收缩为最小宿主示例，不再携带完整 PlotPilot API、autopilot 守护进程或数据库依赖
 - `plugins/world_evolution_core/` 作为本轮指定的真实集成插件存在；其代码不进入 `platform/` 主体
+- 宿主原数据库只通过 read-only facade 暴露；插件平台可写数据限定在 `plugin_platform/` 专属区域
 
 ### 2. 测试层
 - 已移除对外部宿主仓库文件的绝对路径依赖

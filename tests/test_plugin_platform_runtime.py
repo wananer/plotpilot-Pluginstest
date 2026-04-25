@@ -5,6 +5,8 @@ import pytest
 
 from plugins.platform.context_bridge import dispatch_hook_sync, render_context_blocks
 from plugins.platform.hook_dispatcher import clear_hooks, dispatch_hook, list_hooks, register_hook
+from plugins.platform.host_database import ReadOnlyHostDatabase
+from plugins.platform.host_facade import PlotPilotPluginHost
 from plugins.platform.host_integration import build_generation_context_patch, notify_chapter_committed, review_chapter_with_plugins
 from plugins.platform.job_registry import PluginJobRecord, PluginJobRegistry
 from plugins.platform.plugin_storage import PluginStorage
@@ -48,6 +50,59 @@ def test_plugin_storage_scopes_state_under_plugin_root(tmp_path):
 
     with pytest.raises(ValueError):
         storage.write_json("sample_state_plugin", ["..", "escape.json"], {})
+
+
+def test_plugin_storage_default_root_is_dedicated_plugin_platform_area():
+    storage = PluginStorage()
+
+    assert storage.root.name == "plugin_platform"
+
+
+def test_readonly_host_database_allows_reads_and_blocks_writes(tmp_path):
+    import sqlite3
+
+    db_path = tmp_path / "host.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute("CREATE TABLE novels (id TEXT PRIMARY KEY, title TEXT)")
+    conn.execute("INSERT INTO novels (id, title) VALUES (?, ?)", ("novel-1", "雾城"))
+    conn.commit()
+    conn.close()
+
+    host_db = ReadOnlyHostDatabase(db_path)
+    assert host_db.fetch_one("SELECT title FROM novels WHERE id = ?", ("novel-1",)) == {"title": "雾城"}
+    assert host_db.fetch_all("WITH selected AS (SELECT id FROM novels) SELECT id FROM selected") == [{"id": "novel-1"}]
+
+    with pytest.raises(PermissionError):
+        host_db.fetch_all("UPDATE novels SET title = 'changed'")
+    with pytest.raises(PermissionError):
+        host_db.execute("INSERT INTO novels (id, title) VALUES ('novel-2', 'x')")
+
+    check = sqlite3.connect(db_path)
+    assert check.execute("SELECT title FROM novels WHERE id = 'novel-1'").fetchone()[0] == "雾城"
+    check.close()
+
+
+def test_plugin_host_exposes_readonly_host_database_and_writable_plugin_area(tmp_path):
+    import sqlite3
+
+    db_path = tmp_path / "host.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute("CREATE TABLE chapters (novel_id TEXT, chapter_number INTEGER, content TEXT)")
+    conn.execute("INSERT INTO chapters VALUES ('novel-1', 1, '第一章')")
+    conn.commit()
+    conn.close()
+
+    host = PlotPilotPluginHost(
+        storage=PluginStorage(root=tmp_path / "plugin_platform"),
+        host_database=ReadOnlyHostDatabase(db_path),
+    )
+
+    assert host.read_host_row("SELECT content FROM chapters WHERE novel_id = ?", ("novel-1",)) == {"content": "第一章"}
+    with pytest.raises(PermissionError):
+        host.read_host_rows("DELETE FROM chapters")
+
+    host.write_plugin_state("world_evolution_core", ["novels", "novel-1", "state.json"], {"ok": True})
+    assert host.read_plugin_state("world_evolution_core", ["novels", "novel-1", "state.json"]) == {"ok": True}
 
 
 def test_job_registry_appends_jsonl_and_builds_dedup_key(tmp_path):
