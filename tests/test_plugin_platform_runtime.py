@@ -6,7 +6,13 @@ from plugins.platform.context_bridge import dispatch_hook_sync, render_context_b
 from plugins.platform.hook_dispatcher import clear_hooks, dispatch_hook, list_hooks, register_hook
 from plugins.platform.host_database import ReadOnlyHostDatabase
 from plugins.platform.host_facade import PlotPilotPluginHost
-from plugins.platform.host_integration import build_generation_context_patch, notify_chapter_committed, review_chapter_with_plugins
+from plugins.platform.host_integration import (
+    build_generation_context_patch,
+    collect_chapter_review_context_with_plugins,
+    notify_chapter_committed,
+    notify_chapter_review_completed,
+    review_chapter_with_plugins,
+)
 from plugins.platform.job_registry import PluginJobRecord, PluginJobRegistry
 from plugins.platform.plugin_storage import PluginStorage
 
@@ -179,6 +185,59 @@ async def test_evolution_state_uses_plugin_db_records_per_novel(tmp_path):
     assert not any(row[0] == "novel-a" and "沈月" in str(row) for row in rows)
 
 
+@pytest.mark.asyncio
+async def test_evolution_builds_timeline_evidence_for_review_flow(tmp_path):
+    from plugins.world_evolution_core.service import EvolutionWorldAssistantService
+
+    storage = PluginStorage(root=tmp_path)
+    service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage))
+
+    await service.after_commit(
+        {
+            "novel_id": "novel-review-flow",
+            "chapter_number": 1,
+            "payload": {"content": "《林澈》进入黑塔，发现黑色钥匙。"},
+        }
+    )
+
+    events = service.list_timeline_events("novel-review-flow")["items"]
+    constraints = service.list_continuity_constraints("novel-review-flow")["items"]
+    before_review = service.before_chapter_review(
+        {
+            "novel_id": "novel-review-flow",
+            "chapter_number": 2,
+            "payload": {"content": "林澈知道其他角色未在场经历，并且一眼看穿黑塔机关。"},
+        }
+    )
+    review = service.review_chapter(
+        {
+            "novel_id": "novel-review-flow",
+            "chapter_number": 2,
+            "payload": {"content": "林澈知道其他角色未在场经历，并且一眼看穿黑塔机关。"},
+        }
+    )
+    after_review = service.after_chapter_review(
+        {
+            "novel_id": "novel-review-flow",
+            "chapter_number": 2,
+            "source": "chapter_review_service",
+            "payload": {"review_result": review["data"]},
+        }
+    )
+
+    assert events and events[0]["event_id"].startswith("evt_")
+    assert {item["type"] for item in constraints} & {"knowledge_boundary", "capability_boundary", "personality_boundary"}
+    assert [block["title"] for block in before_review["data"]["review_context_blocks"]][:2] == [
+        "Evolution 时间线证据",
+        "Evolution 连续性约束",
+    ]
+    assert review["data"]["evidence"]
+    assert any(issue.get("evidence") for issue in review["data"]["issues"])
+    assert after_review["data"]["recorded"] is True
+    records = service.list_review_records("novel-review-flow")["items"]
+    assert records[-1]["issue_count"] == len(review["data"]["issues"])
+
+
 def test_job_registry_appends_jsonl_and_builds_dedup_key(tmp_path):
     storage = PluginStorage(root=tmp_path)
     registry = PluginJobRegistry(storage=storage)
@@ -302,4 +361,49 @@ async def test_host_integration_reviews_chapter_with_plugins():
     assert seen["source"] == "chapter_review_service"
     assert seen["chapter_number"] == 4
     assert seen["payload"]["content"] == "林澈知道钥匙会消耗记忆。"
+    clear_hooks()
+
+
+@pytest.mark.asyncio
+async def test_host_integration_collects_and_notifies_chapter_review_hooks():
+    clear_hooks()
+    seen_before = {}
+    seen_after = {}
+
+    async def before_handler(payload):
+        seen_before.update(payload)
+        return {
+            "ok": True,
+            "data": {
+                "review_context_blocks": [
+                    {
+                        "title": "Evolution 时间线证据",
+                        "kind": "timeline_evidence",
+                        "content": "第1章：林澈获得黑色钥匙。",
+                    }
+                ]
+            },
+        }
+
+    async def after_handler(payload):
+        seen_after.update(payload)
+        return {"ok": True, "data": {"recorded": True}}
+
+    register_hook("world_evolution_core", "before_chapter_review", before_handler)
+    register_hook("world_evolution_core", "after_chapter_review", after_handler)
+
+    before_results = await collect_chapter_review_context_with_plugins("novel-1", 4, "林澈走进黑塔。")
+    after_results = await notify_chapter_review_completed(
+        "novel-1",
+        4,
+        "林澈走进黑塔。",
+        {"issues": [{"issue_type": "continuity"}], "overall_score": 82},
+    )
+
+    assert before_results[0]["data"]["review_context_blocks"][0]["kind"] == "timeline_evidence"
+    assert seen_before["payload"]["review_targets"] == ["character", "timeline", "storyline", "foreshadowing"]
+    assert seen_before["source"] == "chapter_review_service"
+    assert after_results[0]["data"] == {"recorded": True}
+    assert seen_after["payload"]["review_result"]["overall_score"] == 82
+    assert seen_after["payload"]["content"] == "林澈走进黑塔。"
     clear_hooks()
