@@ -268,6 +268,40 @@ async def test_evolution_seeds_prehistory_for_story_planning(tmp_path):
     assert "可用于大纲与伏笔的种子" in result["context_blocks"][0]["content"]
 
 
+@pytest.mark.asyncio
+async def test_evolution_prehistory_planning_context_adapts_style(tmp_path):
+    from plugins.world_evolution_core.service import EvolutionWorldAssistantService
+
+    storage = PluginStorage(root=tmp_path)
+    service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage))
+
+    await service.after_novel_created(
+        {
+            "novel_id": "novel-style",
+            "payload": {
+                "title": "雾港来信",
+                "genre": "悬疑",
+                "premise": "主角追查一封被迟寄十年的信。",
+                "target_chapters": 180,
+            },
+        }
+    )
+    result = service.before_story_planning(
+        {
+            "novel_id": "novel-style",
+            "payload": {
+                "purpose": "macro_outline_planning",
+                "style_hint": "诗性散文文风，意象浓，节奏舒缓，用海雾、灯和旧信承载伏笔。",
+            },
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["data"]["style_adapter"]["primary_style"] == "poetic_lyrical"
+    assert "文风适配协议" in result["context_blocks"][0]["content"]
+    assert "语义蓝图" in result["context_blocks"][0]["content"]
+
+
 def test_job_registry_appends_jsonl_and_builds_dedup_key(tmp_path):
     storage = PluginStorage(root=tmp_path)
     registry = PluginJobRegistry(storage=storage)
