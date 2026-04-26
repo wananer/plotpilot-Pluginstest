@@ -28,6 +28,7 @@ from infrastructure.persistence.database.story_node_repository import StoryNodeR
 from domain.ai.services.vector_store import VectorStore
 from domain.ai.services.embedding_service import EmbeddingService
 from application.ai.vector_retrieval_facade import VectorRetrievalFacade
+from plugins.platform.host_integration import build_generation_context_patch
 
 logger = logging.getLogger(__name__)
 
@@ -429,6 +430,17 @@ class ContextBudgetAllocator:
             max_tokens=1500,  # 最大 1500 tokens
             priority=85,  # 介于角色锚点和伏笔之间
         )
+
+        # 5. 插件上下文补丁（如 Evolution 动态角色状态）
+        plugin_context = self._get_plugin_context_patch(novel_id, chapter_number, outline)
+        slots["plugin_context_patch"] = ContextSlot(
+            name="插件上下文补丁",
+            tier=PriorityTier.T0_CRITICAL,
+            content=plugin_context,
+            tokens=self.estimate_tokens(plugin_context),
+            max_tokens=2500,
+            priority=88,
+        )
         
         # ==================== T1: 可压缩内容 ====================
         
@@ -551,6 +563,16 @@ class ContextBudgetAllocator:
         return total_used
     
     # ==================== 内容收集方法 ====================
+
+    def _get_plugin_context_patch(self, novel_id: str, chapter_number: int, outline: str) -> str:
+        """Fetch plugin-platform context patches before prompt assembly."""
+        return build_generation_context_patch(
+            novel_id,
+            chapter_number,
+            outline,
+            source="context_budget_allocator",
+            max_chars=6000,
+        )
     
     def _get_current_act_summary(self, novel_id: str, chapter_number: int) -> str:
         """获取当前幕摘要"""

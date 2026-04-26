@@ -3,6 +3,7 @@
     <StatsSidebar
       @create-book="focusCreateInput"
       @refresh-list="handleRefreshList"
+      @open-plugin-manager="openPluginManager"
       @collapsed-change="handleSidebarCollapsedChange"
     />
     <div class="home-content" :class="{ 'sidebar-collapsed': sidebarCollapsed }">
@@ -323,6 +324,93 @@
     <!-- LLM Settings Modal -->
     <LLMSettingsModal v-model:show="showLLMSettings" />
 
+    <n-modal
+      v-model:show="showPluginManager"
+      preset="card"
+      title="插件管理"
+      :style="{ width: '92vw', maxWidth: '880px' }"
+      :bordered="true"
+      :segmented="{ content: true, footer: 'soft' }"
+      :mask-closable="true"
+      :close-on-esc="true"
+    >
+      <n-space vertical size="large">
+        <n-grid :cols="2" :x-gap="16" responsive="screen">
+          <n-gi>
+            <n-card size="small" title="从 GitHub 导入">
+              <n-space vertical>
+                <n-input
+                  v-model:value="githubPluginUrl"
+                  placeholder="https://github.com/用户名/仓库"
+                  clearable
+                />
+                <n-button type="primary" :loading="pluginImporting" @click="handleImportPluginFromGithub">
+                  导入 GitHub 插件
+                </n-button>
+              </n-space>
+            </n-card>
+          </n-gi>
+          <n-gi>
+            <n-card size="small" title="上传 ZIP 插件包">
+              <n-space vertical>
+                <n-upload
+                  :show-file-list="false"
+                  accept=".zip"
+                  :custom-request="handleImportPluginFromZip"
+                >
+                  <n-button :loading="pluginImporting">选择 ZIP 并导入</n-button>
+                </n-upload>
+                <n-progress v-if="pluginImporting && uploadPercent > 0" type="line" :percentage="uploadPercent" />
+              </n-space>
+            </n-card>
+          </n-gi>
+        </n-grid>
+
+        <n-space justify="space-between" align="center">
+          <div class="plugin-manager-title-row">
+            <span class="plugin-manager-subtitle">已安装插件</span>
+            <n-tag size="small" type="info" :bordered="false">{{ plugins.length }} 个</n-tag>
+          </div>
+          <n-button tertiary size="small" :loading="pluginLoading" @click="fetchPlugins">刷新</n-button>
+        </n-space>
+
+        <n-spin :show="pluginLoading">
+          <n-empty v-if="!plugins.length" description="当前还没有可用插件" />
+          <n-space v-else vertical>
+            <n-card v-for="plugin in plugins" :key="plugin.name" size="small">
+              <n-space justify="space-between" align="center">
+                <div class="plugin-item-main">
+                  <n-checkbox
+                    :checked="plugin.enabled !== false"
+                    :disabled="pluginToggleLoading === plugin.name"
+                    @update:checked="(checked: boolean) => handleTogglePlugin(plugin, checked)"
+                  />
+                  <div>
+                    <div class="plugin-item-title">{{ plugin.display_name || plugin.name }}</div>
+                    <div class="plugin-item-meta">
+                      <span>标识：{{ plugin.name }}</span>
+                      <span v-if="plugin.version">版本：{{ plugin.version }}</span>
+                      <span v-if="plugin.configured_enabled !== null && plugin.configured_enabled !== undefined">平台控制</span>
+                    </div>
+                  </div>
+                </div>
+                <div class="plugin-item-status">
+                  <n-spin v-if="pluginToggleLoading === plugin.name" size="small" />
+                  <n-tag v-else :type="plugin.enabled === false ? 'default' : 'success'" size="small">
+                    {{ plugin.enabled === false ? '已停用' : '已启用' }}
+                  </n-tag>
+                  <div class="plugin-item-meta">
+                    <span>{{ (plugin.frontend_scripts?.length || 0) + (plugin.frontend_styles?.length || 0) }} 个前端资源</span>
+                    <span>{{ Array.isArray(plugin.hooks) ? plugin.hooks.length : 0 }} 个 hook</span>
+                  </div>
+                </div>
+              </n-space>
+            </n-card>
+          </n-space>
+        </n-spin>
+      </n-space>
+    </n-modal>
+
     <!-- 查看全部书目弹窗 -->
     <n-modal
       v-model:show="showAllModal"
@@ -415,6 +503,7 @@ import { h, ref, onMounted, computed, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { useMessage, NIcon } from 'naive-ui'
 import { novelApi, type NovelDTO } from '../api/novel'
+import { pluginPlatformApi, type PluginManifestRecord } from '../api/pluginPlatform'
 import StatsSidebar from '@/components/stats/StatsSidebar.vue'
 import NovelSetupGuide from '@/components/onboarding/NovelSetupGuide.vue'
 import LLMSettingsModal from '@/components/LLMSettingsModal.vue'
@@ -440,6 +529,7 @@ const IconChevronDown = () =>
 const IconChevronUp = () =>
   h('svg', { xmlns: 'http://www.w3.org/2000/svg', viewBox: '0 0 24 24', width: '1em', height: '1em' },
     h('path', { fill: 'currentColor', d: 'M7.41 15.41L12 10.83l4.59 4.58L18 14l-6-6-6 6 1.41 1.41z' }))
+
 
 interface BookListItem {
   slug: string
@@ -470,6 +560,13 @@ const books = ref<BookListItem[]>([])
 const searchQuery = ref('')
 const deletingSlug = ref<string | null>(null)
 const showLLMSettings = ref(false)
+const showPluginManager = ref(false)
+const pluginLoading = ref(false)
+const pluginImporting = ref(false)
+const pluginToggleLoading = ref<string | null>(null)
+const plugins = ref<PluginManifestRecord[]>([])
+const githubPluginUrl = ref('')
+const uploadPercent = ref(0)
 const showAllModal = ref(false)
 const modalSearchQuery = ref('')
 /** 有值时挂载向导；与 show 分离，挂载后始终 :show="true"，避免 Modal 先 false 再 true 闪烁 */
@@ -599,6 +696,90 @@ const fetchBooks = async () => {
     loading.value = false
   }
 }
+
+const fetchPlugins = async () => {
+  pluginLoading.value = true
+  try {
+    const result = await pluginPlatformApi.list()
+    plugins.value = result.items || []
+  } catch (error: any) {
+    message.error(error?.response?.data?.detail || '插件列表加载失败')
+  } finally {
+    pluginLoading.value = false
+  }
+}
+
+const openPluginManager = async () => {
+  showPluginManager.value = true
+  await fetchPlugins()
+}
+
+const handleImportPluginFromGithub = async () => {
+  if (!githubPluginUrl.value.trim()) {
+    message.warning('请输入 GitHub 仓库地址')
+    return
+  }
+
+  pluginImporting.value = true
+  try {
+    const result = await pluginPlatformApi.importFromGithub(githubPluginUrl.value.trim())
+    message.success(result.message || `插件 ${result.plugin_name} 导入成功`)
+    githubPluginUrl.value = ''
+    await fetchPlugins()
+  } catch (error: any) {
+    message.error(error?.response?.data?.detail || 'GitHub 插件导入失败')
+  } finally {
+    pluginImporting.value = false
+  }
+}
+
+const handleImportPluginFromZip = async (options: { file: File }) => {
+  pluginImporting.value = true
+  uploadPercent.value = 0
+  try {
+    const result = await pluginPlatformApi.importFromZip(options.file, (event) => {
+      if (!event.total) return
+      uploadPercent.value = Math.round((event.loaded / event.total) * 100)
+    })
+    message.success(result.message || `插件 ${result.plugin_name} 导入成功`)
+    await fetchPlugins()
+  } catch (error: any) {
+    message.error(error?.response?.data?.detail || 'ZIP 插件导入失败')
+  } finally {
+    pluginImporting.value = false
+    uploadPercent.value = 0
+  }
+  return false
+}
+
+const refreshPluginRuntime = async () => {
+  const runtime = window.PlotPilotPlugins
+  try {
+    await runtime?.refreshManifest?.()
+    await runtime?.reloadPlugins?.()
+  } catch {
+    // 后端状态已保存，运行时刷新失败时由用户手动刷新页面兜底。
+  }
+}
+
+const handleTogglePlugin = async (plugin: PluginManifestRecord, checked: boolean) => {
+  pluginToggleLoading.value = plugin.name
+  try {
+    const result = await pluginPlatformApi.setEnabled(plugin.name, checked)
+    message.success(result.message || `${plugin.display_name || plugin.name}${checked ? '已启用' : '已停用'}`)
+    if (result.plugin) {
+      plugins.value = plugins.value.map(item => (item.name === plugin.name ? result.plugin! : item))
+    } else {
+      await fetchPlugins()
+    }
+    await refreshPluginRuntime()
+  } catch (error: any) {
+    message.error(error?.response?.data?.detail || '插件状态更新失败')
+  } finally {
+    pluginToggleLoading.value = null
+  }
+}
+
 
 const getStageLabel = (stage: string): string => {
   const labels: Record<string, string> = {
@@ -1317,5 +1498,48 @@ onMounted(() => {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
   gap: 12px;
+}
+
+.plugin-manager-title-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.plugin-manager-subtitle {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--app-text-primary);
+}
+
+.plugin-item-main {
+  min-width: 0;
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.plugin-item-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--app-text-primary);
+}
+
+.plugin-item-meta {
+  margin-top: 6px;
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: var(--app-text-muted);
+}
+
+.plugin-item-status {
+  flex: 0 0 auto;
+  min-width: 130px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
 }
 </style>

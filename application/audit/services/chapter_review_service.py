@@ -24,11 +24,26 @@ from domain.novel.repositories.foreshadowing_repository import ForeshadowingRepo
 from application.ai.llm_json_extract import parse_llm_json_to_dict
 from domain.ai.services.llm_service import LLMService, GenerationConfig
 from domain.ai.value_objects.prompt import Prompt
+from plugins.platform.host_integration import (
+    collect_chapter_review_context_with_plugins,
+    notify_chapter_review_completed,
+    review_chapter_with_plugins,
+)
 
 if TYPE_CHECKING:
     from infrastructure.ai.chromadb_vector_store import ChromaDBVectorStore
 
 logger = logging.getLogger(__name__)
+
+
+def _format_plugin_review_context(plugin_review_context: str) -> str:
+    content = str(plugin_review_context or "").strip()
+    if not content:
+        return ""
+    return (
+        "插件提供的审查证据（用于辅助判断连续性；如与正文冲突，请指出证据链和需要补足的过渡）：\n"
+        f"{content}"
+    )
 
 
 class ConsistencyIssue:
@@ -121,41 +136,116 @@ class ChapterReviewService:
             raise ValueError(f"Chapter {chapter_number} has no content to review")
 
         issues: List[ConsistencyIssue] = []
+        plugin_review_context = await self._collect_plugin_review_context(novel_id, chapter)
 
         # 1. 人物一致性检查
-        character_issues = await self._check_character_consistency(novel_id, chapter)
+        character_issues = await self._check_character_consistency(novel_id, chapter, plugin_review_context)
         issues.extend(character_issues)
 
         # 2. 时间线一致性检查
-        timeline_issues = await self._check_timeline_consistency(novel_id, chapter)
+        timeline_issues = await self._check_timeline_consistency(novel_id, chapter, plugin_review_context)
         issues.extend(timeline_issues)
 
         # 3. 故事线连贯性检查
-        storyline_issues = await self._check_storyline_consistency(novel_id, chapter)
+        storyline_issues = await self._check_storyline_consistency(novel_id, chapter, plugin_review_context)
         issues.extend(storyline_issues)
 
         # 4. 伏笔使用检查
-        foreshadowing_issues = await self._check_foreshadowing_usage(novel_id, chapter)
+        foreshadowing_issues = await self._check_foreshadowing_usage(novel_id, chapter, plugin_review_context)
         issues.extend(foreshadowing_issues)
 
-        # 5. 生成改进建议
-        improvement_suggestions = await self._generate_improvement_suggestions(chapter, issues)
+        # 5. 插件协作审稿（如 Evolution 人物认知/成长/逻辑补强）
+        plugin_issues, plugin_suggestions = await self._review_with_plugins(novel_id, chapter)
+        issues.extend(plugin_issues)
 
-        # 6. 计算总体评分
+        # 6. 生成改进建议
+        improvement_suggestions = await self._generate_improvement_suggestions(chapter, issues)
+        improvement_suggestions.extend(plugin_suggestions)
+
+        # 7. 计算总体评分
         overall_score = self._calculate_overall_score(issues)
 
-        return ChapterReviewResult(
+        result = ChapterReviewResult(
             chapter_number=chapter_number,
             issues=issues,
             overall_score=overall_score,
             improvement_suggestions=improvement_suggestions,
             reviewed_at=datetime.now()
         )
+        await self._notify_plugins_review_completed(novel_id, chapter, result)
+        return result
+
+
+    async def _collect_plugin_review_context(self, novel_id: str, chapter: Chapter) -> str:
+        """Collect plugin-provided evidence before native review prompts are built."""
+        plugin_results = await collect_chapter_review_context_with_plugins(
+            novel_id,
+            chapter.chapter_number,
+            chapter.content or "",
+            source="chapter_review_service",
+        )
+        blocks: list[str] = []
+        for result in plugin_results:
+            if not result.get("ok", True) or result.get("skipped"):
+                continue
+            data = result.get("data") or {}
+            for block in data.get("review_context_blocks") or []:
+                if not isinstance(block, dict):
+                    continue
+                content = str(block.get("content") or "").strip()
+                if not content:
+                    continue
+                title = str(block.get("title") or block.get("kind") or result.get("plugin_name") or "插件审查证据")
+                blocks.append(f"【{title}】\n{content}")
+        return "\n\n".join(blocks)[:6000]
+
+    async def _notify_plugins_review_completed(self, novel_id: str, chapter: Chapter, result: ChapterReviewResult) -> None:
+        try:
+            await notify_chapter_review_completed(
+                novel_id,
+                chapter.chapter_number,
+                chapter.content or "",
+                result.to_dict(),
+                source="chapter_review_service",
+            )
+        except Exception as exc:  # pragma: no cover - plugin failures must not block review
+            logger.warning("Plugin after_chapter_review notification failed: %s", exc)
+
+    async def _review_with_plugins(self, novel_id: str, chapter: Chapter) -> tuple[List[ConsistencyIssue], List[str]]:
+        """Collect plugin review contributions through the plugin platform."""
+        plugin_results = await review_chapter_with_plugins(
+            novel_id,
+            chapter.chapter_number,
+            chapter.content or "",
+            source="chapter_review_service",
+        )
+        issues: List[ConsistencyIssue] = []
+        suggestions: List[str] = []
+        for result in plugin_results:
+            if not result.get("ok", True) or result.get("skipped"):
+                continue
+            data = result.get("data") or {}
+            plugin_name = result.get("plugin_name") or "plugin"
+            for item in data.get("issues") or []:
+                if not isinstance(item, dict):
+                    continue
+                issues.append(
+                    ConsistencyIssue(
+                        issue_type=str(item.get("issue_type") or f"plugin:{plugin_name}"),
+                        severity=str(item.get("severity") or "warning"),
+                        description=str(item.get("description") or ""),
+                        location=str(item.get("location") or f"Chapter {chapter.chapter_number}"),
+                        suggestion=item.get("suggestion"),
+                    )
+                )
+            suggestions.extend(str(item) for item in (data.get("suggestions") or []) if str(item).strip())
+        return issues, suggestions
 
     async def _check_character_consistency(
         self,
         novel_id: str,
-        chapter: Chapter
+        chapter: Chapter,
+        plugin_review_context: str = "",
     ) -> List[ConsistencyIssue]:
         """检查人物一致性"""
         issues = []
@@ -177,7 +267,8 @@ class ChapterReviewService:
             prompt_text = self._build_character_consistency_prompt(
                 character_name=char_name,
                 character_profile=character.to_dict(),
-                chapter_content=chapter.content
+                chapter_content=chapter.content,
+                plugin_review_context=plugin_review_context,
             )
 
             prompt = Prompt(system="你是小说审稿助手，专门检查人物一致性。", user=prompt_text)
@@ -208,7 +299,8 @@ class ChapterReviewService:
     async def _check_timeline_consistency(
         self,
         novel_id: str,
-        chapter: Chapter
+        chapter: Chapter,
+        plugin_review_context: str = "",
     ) -> List[ConsistencyIssue]:
         """检查时间线一致性"""
         issues = []
@@ -229,7 +321,8 @@ class ChapterReviewService:
             prompt_text = self._build_timeline_consistency_prompt(
                 current_events=current_events,
                 previous_events=previous_events[-5:],  # 只检查最近5个事件
-                chapter_content=chapter.content
+                chapter_content=chapter.content,
+                plugin_review_context=plugin_review_context,
             )
 
             prompt = Prompt(system="你是小说审稿助手，专门检查时间线一致性。", user=prompt_text)
@@ -260,7 +353,8 @@ class ChapterReviewService:
     async def _check_storyline_consistency(
         self,
         novel_id: str,
-        chapter: Chapter
+        chapter: Chapter,
+        plugin_review_context: str = "",
     ) -> List[ConsistencyIssue]:
         """检查故事线连贯性"""
         issues = []
@@ -274,7 +368,8 @@ class ChapterReviewService:
         # 使用 LLM 检查故事线连贯性
         prompt_text = self._build_storyline_consistency_prompt(
             active_storylines=active_storylines,
-            chapter_content=chapter.content
+            chapter_content=chapter.content,
+            plugin_review_context=plugin_review_context,
         )
 
         prompt = Prompt(system="你是小说审稿助手，专门检查故事线连贯性。", user=prompt_text)
@@ -305,7 +400,8 @@ class ChapterReviewService:
     async def _check_foreshadowing_usage(
         self,
         novel_id: str,
-        chapter: Chapter
+        chapter: Chapter,
+        plugin_review_context: str = "",
     ) -> List[ConsistencyIssue]:
         """检查伏笔使用"""
         issues = []
@@ -326,7 +422,8 @@ class ChapterReviewService:
         if relevant_foreshadowings:
             prompt_text = self._build_foreshadowing_usage_prompt(
                 foreshadowings=relevant_foreshadowings,
-                chapter_content=chapter.content
+                chapter_content=chapter.content,
+                plugin_review_context=plugin_review_context,
             )
 
             prompt = Prompt(system="你是小说审稿助手，专门检查伏笔使用。", user=prompt_text)
@@ -418,13 +515,17 @@ class ChapterReviewService:
         self,
         character_name: str,
         character_profile: Dict[str, Any],
-        chapter_content: str
+        chapter_content: str,
+        plugin_review_context: str = "",
     ) -> str:
         """构建人物一致性检查提示词"""
+        plugin_section = _format_plugin_review_context(plugin_review_context)
         return f"""请检查以下章节内容中人物"{character_name}"的表现是否与人物设定一致。
 
 人物设定：
 {json.dumps(character_profile, ensure_ascii=False, indent=2)}
+
+{plugin_section}
 
 章节内容：
 {chapter_content}
@@ -446,11 +547,13 @@ class ChapterReviewService:
         self,
         current_events: List[Any],
         previous_events: List[Any],
-        chapter_content: str
+        chapter_content: str,
+        plugin_review_context: str = "",
     ) -> str:
         """构建时间线一致性检查提示词"""
         current_events_str = "\n".join([f"- {e.description} ({e.time_type})" for e in current_events])
         previous_events_str = "\n".join([f"- {e.description} ({e.time_type})" for e in previous_events])
+        plugin_section = _format_plugin_review_context(plugin_review_context)
 
         return f"""请检查以下章节的时间线是否与之前的事件一致。
 
@@ -459,6 +562,8 @@ class ChapterReviewService:
 
 前置事件：
 {previous_events_str}
+
+{plugin_section}
 
 章节内容：
 {chapter_content[:1000]}...
@@ -479,18 +584,22 @@ class ChapterReviewService:
     def _build_storyline_consistency_prompt(
         self,
         active_storylines: List[Any],
-        chapter_content: str
+        chapter_content: str,
+        plugin_review_context: str = "",
     ) -> str:
         """构建故事线连贯性检查提示词"""
         storylines_str = "\n".join([
             f"- {s.name} ({s.storyline_type}): {s.progress_summary or '无进展摘要'}"
             for s in active_storylines
         ])
+        plugin_section = _format_plugin_review_context(plugin_review_context)
 
         return f"""请检查以下章节内容是否推进了活跃的故事线，或者是否存在故事线断裂。
 
 活跃故事线：
 {storylines_str}
+
+{plugin_section}
 
 章节内容：
 {chapter_content[:1000]}...
@@ -511,18 +620,22 @@ class ChapterReviewService:
     def _build_foreshadowing_usage_prompt(
         self,
         foreshadowings: List[Any],
-        chapter_content: str
+        chapter_content: str,
+        plugin_review_context: str = "",
     ) -> str:
         """构建伏笔使用检查提示词"""
         foreshadowings_str = "\n".join([
             f"- {f.get('metadata', {}).get('description', 'No description')}"
             for f in foreshadowings
         ])
+        plugin_section = _format_plugin_review_context(plugin_review_context)
 
         return f"""请检查以下章节内容是否错过了使用相关伏笔的机会。
 
 相关伏笔：
 {foreshadowings_str}
+
+{plugin_section}
 
 章节内容：
 {chapter_content[:1000]}...

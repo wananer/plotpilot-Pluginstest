@@ -136,6 +136,15 @@
         </button>
         <GlobalLLMEntryButton appearance="sidebar" />
         <PromptPlazaEntryButton appearance="sidebar" />
+        <button class="action-btn action-plugin-platform" @click="$emit('open-plugin-manager')">
+          <span class="action-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none">
+              <path d="M8.5 4.5h7l4 4v7l-4 4h-7l-4-4v-7l4-4Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
+              <path d="M12 8.4v7.2M8.4 12h7.2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+            </svg>
+          </span>
+          <span>插件平台</span>
+        </button>
       </div>
     </section>
 
@@ -176,6 +185,7 @@ import PromptPlazaEntryButton from '@/components/global/PromptPlazaEntryButton.v
 const emit = defineEmits<{
   (e: 'create-book'): void
   (e: 'refresh-list'): void
+  (e: 'open-plugin-manager'): void
   (e: 'collapsed-change', collapsed: boolean): void
 }>()
 
@@ -610,7 +620,8 @@ const updateTimeText = computed(() => formatTime(lastUpdateTime.value))
   border-color: color-mix(in srgb, var(--color-brand, #4f46e5) 52%, transparent);
 }
 
-.action-btn.action-refresh {
+.action-btn.action-refresh,
+.action-btn.action-plugin-platform {
   background: linear-gradient(135deg, var(--color-brand-hover, #6366f1) 0%, var(--color-brand, #4f46e5) 55%, var(--color-brand-pressed, #4338ca) 100%);
   border-color: color-mix(in srgb, var(--color-brand, #4f46e5) 52%, transparent);
 }

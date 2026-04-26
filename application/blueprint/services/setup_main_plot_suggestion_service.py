@@ -11,6 +11,7 @@ from domain.ai.value_objects.prompt import Prompt
 from application.world.services.bible_service import BibleService
 from application.core.services.novel_service import NovelService
 from application.ai.knowledge_llm_contract import parse_json_from_response
+from plugins.platform.host_integration import collect_story_planning_context_with_plugins
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +101,21 @@ class SetupMainPlotSuggestionService:
                     (f"{n.category}: {n.content}"[:200] for n in notes[:5] if n.content)
                 )
 
+        plugin_story_context = collect_story_planning_context_with_plugins(
+            novel_id,
+            purpose="setup_main_plot_options",
+            payload={
+                "novel_title": title,
+                "premise": premise,
+                "target_chapters": target_chapters,
+                "protagonist": protagonist,
+                "worldview_summary": world_lines[:24],
+                "style_hint": style_hint[:1200],
+            },
+            source="setup_main_plot_suggestion_service",
+            max_chars=5000,
+        )
+
         return {
             "novel_title": title,
             "premise": premise,
@@ -109,6 +125,7 @@ class SetupMainPlotSuggestionService:
             "locations": locations,
             "worldview_summary": world_lines[:24],
             "style_hint": style_hint[:1200],
+            "plugin_story_context": plugin_story_context,
         }
 
     @staticmethod

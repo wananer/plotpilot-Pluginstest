@@ -12,6 +12,9 @@ if os.getenv('DISABLE_SSL_VERIFY', 'false').lower() == 'true':
     os.environ['REQUESTS_CA_BUNDLE'] = ''
 
 import sys
+from plugins.loader import init_daemon_plugins
+
+loaded_plugins = init_daemon_plugins()
 import logging
 import time
 from pathlib import Path

@@ -1,6 +1,12 @@
 import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
-import { resolve } from 'path'
+import { resolve, dirname } from 'path'
+import { fileURLToPath } from 'url'
+
+const __dirname = dirname(fileURLToPath(import.meta.url))
+const DEV_FRONTEND_PORT = Number(process.env.PLOTPILOT_FRONTEND_PORT || 3001)
+const DEV_API_TARGET = process.env.PLOTPILOT_API_TARGET || 'http://127.0.0.1:3000'
+const DEV_PLUGIN_TARGET = process.env.PLOTPILOT_PLUGIN_TARGET || DEV_API_TARGET
 
 // https://vite.dev/config/
 export default defineConfig({
@@ -15,12 +21,17 @@ export default defineConfig({
     },
   },
   server: {
-    port: 3000,
+    port: DEV_FRONTEND_PORT,
     host: '127.0.0.1',
     proxy: {
+      '/plugins': {
+        target: DEV_PLUGIN_TARGET,
+        changeOrigin: true,
+        rewrite: (path) => path,
+      },
       // 代理到后端服务器（默认 8005 端口）
       '/api': {
-        target: 'http://127.0.0.1:8005',
+        target: DEV_API_TARGET,
         changeOrigin: true,
         ws: true,
         // SSE 长连接，避免代理过早断开

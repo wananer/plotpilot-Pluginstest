@@ -22,10 +22,17 @@ from infrastructure.persistence.database.chapter_element_repository import Chapt
 from domain.ai.services.llm_service import LLMService, GenerationConfig
 from domain.ai.value_objects.prompt import Prompt
 from application.audit.services.macro_merge_engine import MacroMergeEngine, MergePlan, MergeConflictException
+from plugins.platform.host_integration import collect_story_planning_context_with_plugins
 
 logger = logging.getLogger(__name__)
 _macro_plan_progress_store: Dict[str, Dict] = {}
 _macro_plan_result_store: Dict[str, Dict] = {}
+
+
+def _append_plugin_story_context(context_parts: List[str], bible_context: Dict) -> None:
+    plugin_context = str((bible_context or {}).get("plugin_story_context") or "").strip()
+    if plugin_context:
+        context_parts.append(f"{plugin_context}\n")
 
 
 # ======================================================================
@@ -1262,13 +1269,36 @@ class ContinuousPlanningService:
     def _get_bible_context(self, novel_id: str) -> Dict:
         """获取 Bible 上下文"""
         if not self.bible_service:
-            return {}
+            return {
+                "plugin_story_context": collect_story_planning_context_with_plugins(
+                    novel_id,
+                    purpose="macro_outline_planning",
+                    source="continuous_planning_service",
+                    max_chars=6000,
+                )
+            }
 
         bible = self.bible_service.get_bible_by_novel(novel_id)
         if not bible:
-            return {}
+            return {
+                "plugin_story_context": collect_story_planning_context_with_plugins(
+                    novel_id,
+                    purpose="macro_outline_planning",
+                    source="continuous_planning_service",
+                    max_chars=6000,
+                )
+            }
 
-        return {
+        style_notes = []
+        for note in getattr(bible, "style_notes", []) or []:
+            style_notes.append(
+                {
+                    "category": str(getattr(note, "category", "") or ""),
+                    "content": str(getattr(note, "content", "") or ""),
+                }
+            )
+
+        context = {
             "characters": [{"id": c.id, "name": c.name, "description": c.description}
                            for c in bible.characters],
             "world_settings": [{"id": w.id, "name": w.name, "description": w.description}
@@ -1277,7 +1307,17 @@ class ContinuousPlanningService:
                           for l in bible.locations],
             "timeline_notes": [{"id": t.id, "event": t.event, "description": t.description}
                                for t in bible.timeline_notes],
+            "style_notes": style_notes[:8],
+            "style_hint": "；".join(item["content"] for item in style_notes[:5] if item.get("content"))[:1200],
         }
+        context["plugin_story_context"] = collect_story_planning_context_with_plugins(
+            novel_id,
+            purpose="macro_outline_planning",
+            payload={"bible_context": context},
+            source="continuous_planning_service",
+            max_chars=6000,
+        )
+        return context
 
     def _create_node_from_data(
         self, novel_id: str, parent_id: Optional[str], node_type: NodeType,
@@ -1641,6 +1681,7 @@ class ContinuousPlanningService:
 
         # 构建丰富的世界观上下文
         context_parts = []
+        _append_plugin_story_context(context_parts, bible_context)
 
         # 世界观
         if bible_context.get("worldview"):
@@ -1851,6 +1892,7 @@ class ContinuousPlanningService:
 
         # 构建丰富的世界观上下文（与极速模式一致）
         context_parts = []
+        _append_plugin_story_context(context_parts, bible_context)
 
         # 世界观
         if bible_context.get("worldview"):
@@ -1988,6 +2030,7 @@ class ContinuousPlanningService:
         act_scope = current_volume.get("acts", [])
 
         context_parts = []
+        _append_plugin_story_context(context_parts, bible_context)
         if bible_context.get("worldview"):
             context_parts.append(f"【世界观】\n{bible_context['worldview']}\n")
         if bible_context.get("characters"):
@@ -2073,6 +2116,7 @@ class ContinuousPlanningService:
         avg_chapters_per_act = max(target_chapters // total_acts, 1)
 
         context_parts = []
+        _append_plugin_story_context(context_parts, bible_context)
         if bible_context.get("worldview"):
             context_parts.append(f"【世界观】\n{bible_context['worldview']}\n")
         if bible_context.get("characters"):
@@ -2162,6 +2206,8 @@ class ContinuousPlanningService:
 
         if previous_summary:
             context_parts.append(f"\n前情提要：{previous_summary}")
+
+        _append_plugin_story_context(context_parts, bible_context)
 
         # 添加 Bible 信息
         if bible_context.get("characters"):
@@ -2278,6 +2324,7 @@ class ContinuousPlanningService:
                 "current_volume_summary": "当前卷的摘要",
                 "pending_foreshadowings": "待回收伏笔列表",
                 "character_states": "角色状态锚点",
+                "plugin_story_context": "Evolution 等插件提供的前史/伏笔规划上下文",
             }
         """
         context = {
@@ -2285,6 +2332,7 @@ class ContinuousPlanningService:
             "current_volume_summary": "",
             "pending_foreshadowings": "",
             "character_states": "",
+            "plugin_story_context": "",
         }
         
         try:
@@ -2357,6 +2405,22 @@ class ContinuousPlanningService:
                     char_lines.append(char_info)
                 
                 context["character_states"] = "\n".join(char_lines)
+
+            context["plugin_story_context"] = collect_story_planning_context_with_plugins(
+                novel_id,
+                purpose="next_act_planning",
+                payload={
+                    "current_act": {
+                        "id": current_act.id,
+                        "title": current_act.title,
+                        "description": current_act.description,
+                        "number": current_act.number,
+                    },
+                    "bible_context": bible_context,
+                },
+                source="continuous_planning_service",
+                max_chars=6000,
+            )
         
         except Exception as e:
             logger.warning(f"收集双轨上下文失败: {e}")
@@ -2389,6 +2453,9 @@ class ContinuousPlanningService:
         
         if dual_track_context.get("pending_foreshadowings"):
             context_parts.append(dual_track_context["pending_foreshadowings"])
+
+        if dual_track_context.get("plugin_story_context"):
+            context_parts.append(dual_track_context["plugin_story_context"])
         
         if dual_track_context.get("character_states"):
             context_parts.append(dual_track_context["character_states"])

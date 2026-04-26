@@ -76,6 +76,11 @@ import SettingsPanel from '../components/workbench/SettingsPanel.vue'
 import ActPlanningModal from '../components/workbench/ActPlanningModal.vue'
 import LLMSettingsModal from '../components/LLMSettingsModal.vue'
 
+const pluginHost =
+  typeof window !== 'undefined' && window.PlotPilotPlugins && window.PlotPilotPlugins.host
+    ? window.PlotPilotPlugins.host
+    : null
+
 const route = useRoute()
 const message = useMessage()
 const statsStore = useStatsStore()
@@ -88,6 +93,15 @@ const workAreaRef = ref<ComponentPublicInstance<{ ensureAssistedMode: () => void
 
 async function onSidebarChapterSelect(chapterId: number, title = '') {
   await handleChapterSelect(chapterId, title)
+  const selectedChapter = chapters.value.find(ch => ch.id === chapterId) || null
+  pluginHost?.emitChapterLoaded({
+    novelId: slug,
+    chapterId,
+    chapterNumber: selectedChapter?.number ?? null,
+    title: selectedChapter?.title ?? (title || ''),
+    view: 'workbench',
+    source: 'sidebar-select',
+  })
   workAreaRef.value?.ensureAssistedMode?.()
 }
 
@@ -149,12 +163,31 @@ async function syncChapterFromRoute() {
   const n = parseChapterQuery(route.query.chapter)
   if (n != null) {
     await goToChapter(n)
+    const routeChapter = chapters.value.find(ch => ch.number === n) || null
+    pluginHost?.emitChapterLoaded({
+      novelId: slug,
+      chapterId: routeChapter?.id ?? null,
+      chapterNumber: n,
+      title: routeChapter?.title ?? '',
+      view: 'workbench',
+      source: 'route-query',
+    })
   }
 }
 
 onMounted(async () => {
   try {
     await loadDesk()
+    pluginHost?.emitWorkbenchOpened({
+      novelId: slug,
+      view: 'workbench',
+      source: 'workbench-mounted',
+    })
+    pluginHost?.emitNovelSelected({
+      novelId: slug,
+      view: 'workbench',
+      source: 'novel-route',
+    })
     await syncChapterFromRoute()
   } catch {
     message.error('加载失败，请检查网络与后端是否已启动')

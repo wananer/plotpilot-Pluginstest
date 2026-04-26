@@ -39,6 +39,7 @@ setup_logging(level=log_level, log_file=log_file)
 logger = logging.getLogger(__name__)
 
 from fastapi import FastAPI, HTTPException
+from plugins.loader import init_api_plugins, create_plugin_manifest_router
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, JSONResponse
@@ -105,6 +106,15 @@ logger.info(f"   Python: {sys.version.split()[0]}")
 logger.info(f"   Working Dir: {Path.cwd()}")
 logger.info("=" * 80)
 
+
+
+def init_api(app: FastAPI) -> list[str]:
+    loaded_plugins = init_api_plugins(app)
+    manifest_route = "/api/v1/plugins/manifest"
+    if not any(getattr(route, "path", "") == manifest_route for route in app.routes):
+        app.include_router(create_plugin_manifest_router(), prefix="/api/v1")
+    return loaded_plugins
+
 # 创建 FastAPI 应用
 app = FastAPI(
     title="PlotPilot API",
@@ -113,8 +123,19 @@ app = FastAPI(
     redirect_slashes=True,  # 自动将 /api/v1/novels 重定向到 /api/v1/novels/
 )
 
+_loaded_api_plugins = init_api(app)
+if _loaded_api_plugins:
+    logger.info("🔌 API plugins preloaded: %s", ", ".join(_loaded_api_plugins))
+
 # ── 前端静态文件托管 ──
 _FRONTEND_DIR = Path(__file__).resolve().parents[1] / "frontend" / "dist"
+_FRONTEND_PUBLIC_DIR = Path(__file__).resolve().parents[1] / "frontend" / "public"
+if _FRONTEND_PUBLIC_DIR.exists():
+    _plugin_loader = _FRONTEND_PUBLIC_DIR / "plugin-loader.js"
+    if _plugin_loader.exists():
+        app.get("/plugin-loader.js", include_in_schema=False, response_class=FileResponse)(
+            lambda: FileResponse(str(_plugin_loader), media_type="application/javascript")
+        )
 if _FRONTEND_DIR.exists():
     app.mount("/assets", StaticFiles(directory=str(_FRONTEND_DIR / "assets")), name="frontend-assets")
     # favicon 等根级静态资源

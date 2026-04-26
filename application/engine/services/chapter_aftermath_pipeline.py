@@ -15,6 +15,7 @@ import logging
 from typing import Any, Dict, TYPE_CHECKING
 
 from domain.ai.services.llm_service import LLMService
+from plugins.platform.host_integration import notify_chapter_committed
 
 if TYPE_CHECKING:
     from application.world.services.knowledge_service import KnowledgeService
@@ -95,6 +96,7 @@ class ChapterAftermathPipeline:
             "vector_stored": False,
             "foreshadow_stored": False,
             "triples_extracted": False,
+            "plugin_after_commit_ok": False,
         }
 
         if not content or not str(content).strip():
@@ -162,5 +164,15 @@ class ChapterAftermathPipeline:
 
         # 3) 结构树 KG 推断
         await infer_kg_from_chapter(novel_id, chapter_number)
+
+        # 4) 插件平台 after_commit：由平台分发给已安装插件
+        plugin_results = await notify_chapter_committed(
+            novel_id,
+            chapter_number,
+            content,
+            source="chapter_aftermath_pipeline",
+        )
+        out["plugin_after_commit_ok"] = all(result.get("ok", True) for result in plugin_results)
+        out["plugin_after_commit_results"] = plugin_results
 
         return out

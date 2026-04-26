@@ -473,6 +473,11 @@ import ChapterStatusPanel from './ChapterStatusPanel.vue'
 import AutopilotPanel from '../autopilot/AutopilotPanel.vue'
 import AutopilotDashboard from '../autopilot/AutopilotDashboard.vue'
 
+const pluginHost =
+  typeof window !== 'undefined' && window.PlotPilotPlugins && window.PlotPilotPlugins.host
+    ? window.PlotPilotPlugins.host
+    : null
+
 interface Chapter {
   id: number
   number: number
@@ -850,12 +855,20 @@ const handleSave = async () => {
   }
 
   saving.value = true
-  try {
-    await chapterApi.updateChapter(props.slug, currentChapter.value.id, { content: chapterContent.value })
-    originalContent.value = chapterContent.value
-    message.success('保存成功')
-    emit('chapterUpdated')
-  } catch (error) {
+      try {
+        await chapterApi.updateChapter(props.slug, currentChapter.value.id, { content: chapterContent.value })
+        originalContent.value = chapterContent.value
+        pluginHost?.emitChapterSaved({
+          novelId: props.slug,
+          chapterId: currentChapter.value.id,
+          chapterNumber: currentChapter.value.number,
+          title: currentChapter.value.title || '',
+          view: 'workbench',
+          source: 'editor-save',
+        })
+        message.success('保存成功')
+        emit('chapterUpdated')
+      } catch (error) {
     message.error('保存失败')
   } finally {
     saving.value = false
@@ -979,6 +992,15 @@ const handleStartGenerate = async () => {
           generatedContent.value = result.content
           streamProgressPct.value = 100
           streamPhaseLabel.value = '已完成'
+          pluginHost?.emitGenerationCompleted({
+            novelId: props.slug,
+            chapterId: targetChapterId,
+            chapterNumber: targetChapterNumber,
+            title: target.title || '',
+            view: 'workbench',
+            source: 'manual-generate',
+            wordCount: result.content?.length ?? 0,
+          })
           if (props.currentChapterId === targetChapterId) {
             message.success('生成完成，质检已同步到「章节状态」')
           } else {
@@ -1023,6 +1045,22 @@ const handleSaveGenerated = async () => {
       chapterContent.value = generatedContent.value
       originalContent.value = generatedContent.value
     }
+    pluginHost?.emitChapterSaved({
+      novelId: props.slug,
+      chapterId: saveTarget.id,
+      chapterNumber: saveTarget.number,
+      title: saveTarget.title || '',
+      view: 'workbench',
+      source: 'generation-save',
+    })
+    pluginHost?.emitChapterCommitted({
+      novelId: props.slug,
+      chapterId: saveTarget.id,
+      chapterNumber: saveTarget.number,
+      title: saveTarget.title || '',
+      view: 'workbench',
+      source: 'generation-save',
+    })
     message.success(`已保存到第 ${saveTarget.number} 章`)
     emit('chapterUpdated')
     showGenerateModal.value = false

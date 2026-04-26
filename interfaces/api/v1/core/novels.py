@@ -8,6 +8,7 @@ from application.core.services.novel_service import NovelService
 from application.world.services.auto_bible_generator import AutoBibleGenerator
 from application.world.services.auto_knowledge_generator import AutoKnowledgeGenerator
 from application.core.dtos.novel_dto import NovelDTO
+from plugins.platform.host_integration import notify_novel_created_with_plugins
 from interfaces.api.dependencies import (
     get_novel_service,
     get_auto_bible_generator,
@@ -133,6 +134,17 @@ async def create_novel(
         world_preset=request.world_preset,
         length_tier=request.length_tier,
         target_words_per_chapter=request.target_words_per_chapter,
+    )
+    await notify_novel_created_with_plugins(
+        novel_id=request.novel_id,
+        title=request.title,
+        author=request.author,
+        premise=novel_dto.premise or request.premise,
+        genre=request.genre,
+        world_preset=request.world_preset,
+        target_chapters=novel_dto.target_chapters,
+        length_tier=request.length_tier,
+        target_words_per_chapter=novel_dto.target_words_per_chapter,
     )
 
     return novel_dto

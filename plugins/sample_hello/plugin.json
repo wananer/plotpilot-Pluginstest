@@ -1,0 +1,9 @@
+{
+  "name": "sample_hello",
+  "display_name": "Sample Hello",
+  "version": "0.1.0",
+  "enabled": true,
+  "frontend": {
+    "scripts": ["static/inject.js"]
+  }
+}
