@@ -88,6 +88,8 @@ scripts/evaluation/results/
 data/chromadb/
 data/logs/
 data/llm_configs.json
+data/plugin_platform/
+data/plugins/
 
 # ── 日志 ──
 logs/
@@ -155,3 +157,4 @@ mcps/
 *.rs.bk
 *.orig
 *.rej
+.omx/
