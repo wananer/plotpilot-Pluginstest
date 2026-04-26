@@ -93,6 +93,44 @@ EVALUATION_CRITERIA: list[dict[str, Any]] = [
 
 
 @dataclass
+class LLMCallResult:
+    content: str
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_creation_input_tokens: int = 0
+    cache_read_input_tokens: int = 0
+    total_cost_usd: float = 0.0
+    duration_seconds: float = 0.0
+    model: str = ""
+    usage_source: str = "unknown"
+    raw_usage: dict[str, Any] | None = None
+
+    @property
+    def non_cache_tokens(self) -> int:
+        return self.input_tokens + self.output_tokens
+
+    @property
+    def total_tokens(self) -> int:
+        return self.input_tokens + self.output_tokens + self.cache_creation_input_tokens + self.cache_read_input_tokens
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "call_count": 1,
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "cache_creation_input_tokens": self.cache_creation_input_tokens,
+            "cache_read_input_tokens": self.cache_read_input_tokens,
+            "non_cache_tokens": self.non_cache_tokens,
+            "total_tokens": self.total_tokens,
+            "total_cost_usd": round(self.total_cost_usd, 6),
+            "duration_seconds": round(self.duration_seconds, 2),
+            "model": self.model,
+            "usage_source": self.usage_source,
+            "raw_usage": self.raw_usage or {},
+        }
+
+
+@dataclass
 class ChapterResult:
     arm: str
     chapter_number: int
@@ -101,6 +139,26 @@ class ChapterResult:
     prompt_chars: int
     duration_seconds: float
     evolution_context_chars: int = 0
+    llm_call_count: int = 0
+    llm_input_tokens: int = 0
+    llm_output_tokens: int = 0
+    llm_cache_creation_input_tokens: int = 0
+    llm_cache_read_input_tokens: int = 0
+    llm_total_cost_usd: float = 0.0
+    llm_usage_source: str = "none"
+
+    @property
+    def llm_non_cache_tokens(self) -> int:
+        return self.llm_input_tokens + self.llm_output_tokens
+
+    @property
+    def llm_total_tokens(self) -> int:
+        return (
+            self.llm_input_tokens
+            + self.llm_output_tokens
+            + self.llm_cache_creation_input_tokens
+            + self.llm_cache_read_input_tokens
+        )
 
 
 def _now_slug() -> str:
@@ -222,8 +280,103 @@ def _build_generation_prompt(
 开始写正文："""
 
 
-def _run_claude(prompt: str, *, model: str, timeout: int, budget_usd: str | None = None) -> str:
-    cmd = ["claude", "-p", "--model", model, "--permission-mode", "default"]
+def _estimate_tokens(text: str) -> int:
+    compact = re.sub(r"\s+", "", text or "")
+    if not compact:
+        return 0
+    cjk = len(re.findall(r"[\u4e00-\u9fff]", compact))
+    non_cjk = max(len(compact) - cjk, 0)
+    return int(cjk / 1.5 + non_cjk / 4) + 1
+
+
+def _parse_claude_json_result(raw: str, *, prompt: str, duration_seconds: float, model: str) -> LLMCallResult:
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        content = _clean_text(raw)
+        return LLMCallResult(
+            content=content,
+            input_tokens=_estimate_tokens(prompt),
+            output_tokens=_estimate_tokens(content),
+            duration_seconds=duration_seconds,
+            model=model,
+            usage_source="estimated_from_text_output",
+        )
+
+    content = _clean_text(str(payload.get("result") or ""))
+    usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else {}
+    model_usage = payload.get("modelUsage") if isinstance(payload.get("modelUsage"), dict) else {}
+    input_tokens = int(usage.get("input_tokens") or 0)
+    output_tokens = int(usage.get("output_tokens") or 0)
+    cache_creation = int(usage.get("cache_creation_input_tokens") or 0)
+    cache_read = int(usage.get("cache_read_input_tokens") or 0)
+    total_cost = float(payload.get("total_cost_usd") or 0.0)
+    resolved_model = model
+    if model_usage:
+        resolved_model = ",".join(sorted(model_usage.keys()))
+        if not total_cost:
+            total_cost = sum(float(item.get("costUSD") or 0.0) for item in model_usage.values() if isinstance(item, dict))
+    source = "claude_json_usage" if any([input_tokens, output_tokens, cache_creation, cache_read]) else "estimated_missing_usage"
+    if source == "estimated_missing_usage":
+        input_tokens = _estimate_tokens(prompt)
+        output_tokens = _estimate_tokens(content)
+    return LLMCallResult(
+        content=content,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cache_creation_input_tokens=cache_creation,
+        cache_read_input_tokens=cache_read,
+        total_cost_usd=total_cost,
+        duration_seconds=duration_seconds,
+        model=resolved_model,
+        usage_source=source,
+        raw_usage=usage,
+    )
+
+
+def _sum_llm_usage(calls: list[LLMCallResult]) -> dict[str, Any]:
+    return {
+        "call_count": len(calls),
+        "input_tokens": sum(call.input_tokens for call in calls),
+        "output_tokens": sum(call.output_tokens for call in calls),
+        "cache_creation_input_tokens": sum(call.cache_creation_input_tokens for call in calls),
+        "cache_read_input_tokens": sum(call.cache_read_input_tokens for call in calls),
+        "non_cache_tokens": sum(call.non_cache_tokens for call in calls),
+        "total_tokens": sum(call.total_tokens for call in calls),
+        "total_cost_usd": round(sum(call.total_cost_usd for call in calls), 6),
+        "duration_seconds": round(sum(call.duration_seconds for call in calls), 2),
+        "usage_sources": sorted({call.usage_source for call in calls}),
+        "models": sorted({call.model for call in calls if call.model}),
+    }
+
+
+def _sum_usage_dicts(items: list[dict[str, Any]]) -> dict[str, Any]:
+    sources: set[str] = set()
+    models: set[str] = set()
+    for item in items:
+        sources.update(str(source) for source in (item.get("usage_sources") or []) if source)
+        if item.get("usage_source"):
+            sources.add(str(item.get("usage_source")))
+        models.update(str(model) for model in (item.get("models") or []) if model)
+        if item.get("model"):
+            models.add(str(item.get("model")))
+    return {
+        "call_count": sum(int(item.get("call_count") or 0) for item in items),
+        "input_tokens": sum(int(item.get("input_tokens") or 0) for item in items),
+        "output_tokens": sum(int(item.get("output_tokens") or 0) for item in items),
+        "cache_creation_input_tokens": sum(int(item.get("cache_creation_input_tokens") or 0) for item in items),
+        "cache_read_input_tokens": sum(int(item.get("cache_read_input_tokens") or 0) for item in items),
+        "non_cache_tokens": sum(int(item.get("non_cache_tokens") or 0) for item in items),
+        "total_tokens": sum(int(item.get("total_tokens") or 0) for item in items),
+        "total_cost_usd": round(sum(float(item.get("total_cost_usd") or 0.0) for item in items), 6),
+        "duration_seconds": round(sum(float(item.get("duration_seconds") or 0.0) for item in items), 2),
+        "usage_sources": sorted(sources),
+        "models": sorted(models),
+    }
+
+
+def _run_claude(prompt: str, *, model: str, timeout: int, budget_usd: str | None = None) -> LLMCallResult:
+    cmd = ["claude", "-p", "--model", model, "--permission-mode", "default", "--output-format", "json"]
     if budget_usd:
         cmd.extend(["--max-budget-usd", budget_usd])
     started = time.perf_counter()
@@ -236,9 +389,10 @@ def _run_claude(prompt: str, *, model: str, timeout: int, budget_usd: str | None
         cwd=str(PROJECT_ROOT),
         timeout=timeout,
     )
+    duration = time.perf_counter() - started
     if proc.returncode != 0:
-        raise RuntimeError(f"claude failed after {time.perf_counter() - started:.1f}s: {proc.stderr.strip()}")
-    return _clean_text(proc.stdout)
+        raise RuntimeError(f"claude failed after {duration:.1f}s: {proc.stderr.strip()}")
+    return _parse_claude_json_result(proc.stdout, prompt=prompt, duration_seconds=duration, model=model)
 
 
 async def _generate_arm(
@@ -254,6 +408,7 @@ async def _generate_arm(
     prior_summaries: list[str] = []
     chapters: list[ChapterResult] = []
     evolution_meta: dict[str, Any] = {}
+    llm_calls: list[dict[str, Any]] = []
     service: EvolutionWorldAssistantService | None = None
     novel_id = f"pressure-{arm}-{output_dir.name}"
 
@@ -306,12 +461,15 @@ async def _generate_arm(
             evolution_context=evolution_context,
             target_chars=target_chars,
         )
-        started = time.perf_counter()
-        content = _run_claude(prompt, model=model, timeout=timeout, budget_usd=budget_usd)
-        duration = time.perf_counter() - started
+        call_result = _run_claude(prompt, model=model, timeout=timeout, budget_usd=budget_usd)
+        content = call_result.content
+        duration = call_result.duration_seconds
+        call_payload = call_result.to_dict()
+        call_payload.update({"arm": arm, "chapter_number": index, "phase": "chapter_generation"})
+        llm_calls.append(call_payload)
         print(
             f"[{arm}] chapter {index}/10 done: chars={_chapter_char_count(content)} duration={duration:.1f}s "
-            f"evo_context_chars={len(evolution_context)}",
+            f"evo_context_chars={len(evolution_context)} llm_tokens={call_result.total_tokens} cost=${call_result.total_cost_usd:.4f}",
             flush=True,
         )
         chapters.append(
@@ -323,6 +481,13 @@ async def _generate_arm(
                 prompt_chars=len(prompt),
                 duration_seconds=duration,
                 evolution_context_chars=len(evolution_context),
+                llm_call_count=1,
+                llm_input_tokens=call_result.input_tokens,
+                llm_output_tokens=call_result.output_tokens,
+                llm_cache_creation_input_tokens=call_result.cache_creation_input_tokens,
+                llm_cache_read_input_tokens=call_result.cache_read_input_tokens,
+                llm_total_cost_usd=call_result.total_cost_usd,
+                llm_usage_source=call_result.usage_source,
             )
         )
         prior_summaries.append(f"第{index}章：{_short_summary(content)}")
@@ -344,6 +509,23 @@ async def _generate_arm(
         evolution_meta["runs"] = service.list_runs(novel_id, limit=100)
         evolution_meta["chapter_summaries"] = {"items": service.repository.list_chapter_summaries(novel_id, limit=200)}
         evolution_meta["volume_summaries"] = {"items": service.repository.list_volume_summaries(novel_id, limit=20)}
+    evolution_meta["llm_calls"] = llm_calls
+    evolution_meta["llm_usage"] = _sum_llm_usage(
+        [
+            LLMCallResult(
+                content="",
+                input_tokens=int(item.get("input_tokens") or 0),
+                output_tokens=int(item.get("output_tokens") or 0),
+                cache_creation_input_tokens=int(item.get("cache_creation_input_tokens") or 0),
+                cache_read_input_tokens=int(item.get("cache_read_input_tokens") or 0),
+                total_cost_usd=float(item.get("total_cost_usd") or 0.0),
+                duration_seconds=float(item.get("duration_seconds") or 0.0),
+                model=str(item.get("model") or ""),
+                usage_source=str(item.get("usage_source") or "unknown"),
+            )
+            for item in llm_calls
+        ]
+    )
     return chapters, evolution_meta
 
 
@@ -407,8 +589,25 @@ def _compute_metrics(chapters: list[ChapterResult], evolution_meta: dict[str, An
                 "prompt_chars": chapter.prompt_chars,
                 "duration_seconds": round(chapter.duration_seconds, 2),
                 "evolution_context_chars": chapter.evolution_context_chars,
+                "llm_call_count": chapter.llm_call_count,
+                "llm_input_tokens": chapter.llm_input_tokens,
+                "llm_output_tokens": chapter.llm_output_tokens,
+                "llm_cache_creation_input_tokens": chapter.llm_cache_creation_input_tokens,
+                "llm_cache_read_input_tokens": chapter.llm_cache_read_input_tokens,
+                "llm_non_cache_tokens": chapter.llm_non_cache_tokens,
+                "llm_total_tokens": chapter.llm_total_tokens,
+                "llm_total_cost_usd": round(chapter.llm_total_cost_usd, 6),
+                "llm_usage_source": chapter.llm_usage_source,
             }
         )
+    total_calls = sum(item["llm_call_count"] for item in chapter_metrics)
+    total_input_tokens = sum(item["llm_input_tokens"] for item in chapter_metrics)
+    total_output_tokens = sum(item["llm_output_tokens"] for item in chapter_metrics)
+    total_cache_creation_tokens = sum(item["llm_cache_creation_input_tokens"] for item in chapter_metrics)
+    total_cache_read_tokens = sum(item["llm_cache_read_input_tokens"] for item in chapter_metrics)
+    total_non_cache_tokens = sum(item["llm_non_cache_tokens"] for item in chapter_metrics)
+    total_tokens = sum(item["llm_total_tokens"] for item in chapter_metrics)
+    total_cost = sum(item["llm_total_cost_usd"] for item in chapter_metrics)
     return {
         "chapters": chapter_metrics,
         "aggregate": {
@@ -420,6 +619,16 @@ def _compute_metrics(chapters: list[ChapterResult], evolution_meta: dict[str, An
             "avg_sensory_density_per_1k_chars": round(sum(item["sensory_density_per_1k_chars"] for item in chapter_metrics) / max(len(chapter_metrics), 1), 4),
             "avg_repetition_uniqueness": round(sum(item["repetition_uniqueness"] for item in chapter_metrics) / max(len(chapter_metrics), 1), 4),
             "total_generation_seconds": round(sum(item["duration_seconds"] for item in chapter_metrics), 2),
+            "generation_llm_call_count": total_calls,
+            "generation_llm_input_tokens": total_input_tokens,
+            "generation_llm_output_tokens": total_output_tokens,
+            "generation_llm_cache_creation_input_tokens": total_cache_creation_tokens,
+            "generation_llm_cache_read_input_tokens": total_cache_read_tokens,
+            "generation_llm_non_cache_tokens": total_non_cache_tokens,
+            "generation_llm_total_tokens": total_tokens,
+            "generation_llm_total_cost_usd": round(total_cost, 6),
+            "generation_llm_avg_total_tokens_per_chapter": round(total_tokens / max(total_calls, 1), 2),
+            "generation_llm_usage_sources": sorted({item["llm_usage_source"] for item in chapter_metrics if item["llm_usage_source"] != "none"}),
             "transition_conflict_count": transitions["aggregate"]["conflict_count"],
             "transition_hard_conflict_count": transitions["aggregate"]["hard_conflict_count"],
             "transition_warning_count": transitions["aggregate"]["warning_count"],
@@ -568,10 +777,48 @@ async def main() -> None:
     scoring_prompt_path = output_dir / "claude_scoring_prompt.md"
     scoring_prompt_path.write_text(scoring_prompt, encoding="utf-8")
     print("[scoring] calling Claude Code for metric-based evaluation", flush=True)
-    scoring_output = _run_claude(scoring_prompt, model=args.model, timeout=args.timeout, budget_usd=args.budget_usd)
+    scoring_call = _run_claude(scoring_prompt, model=args.model, timeout=args.timeout, budget_usd=args.budget_usd)
+    scoring_output = scoring_call.content
     score_path = output_dir / "claude_score.md"
     score_path.write_text(scoring_output, encoding="utf-8")
     claude_artifact = _write_claude_artifact(output_dir, scoring_prompt, scoring_output)
+    scoring_usage_path = output_dir / "scoring_llm_usage.json"
+    scoring_usage_path.write_text(json.dumps(scoring_call.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
+    generation_usage = {
+        "control_off": {
+            "aggregate": control_evo.get("llm_usage") or {},
+            "calls": control_evo.get("llm_calls") or [],
+        },
+        "experiment_on": {
+            "aggregate": experiment_evo.get("llm_usage") or {},
+            "calls": experiment_evo.get("llm_calls") or [],
+        },
+    }
+    llm_usage_path = output_dir / "llm_usage.json"
+    llm_usage_path.write_text(
+        json.dumps(
+            {
+                "generation": generation_usage,
+                "generation_combined": _sum_usage_dicts(
+                    [
+                        generation_usage["control_off"]["aggregate"],
+                        generation_usage["experiment_on"]["aggregate"],
+                    ]
+                ),
+                "scoring": scoring_call.to_dict(),
+                "generation_plus_scoring": _sum_usage_dicts(
+                    [
+                        generation_usage["control_off"]["aggregate"],
+                        generation_usage["experiment_on"]["aggregate"],
+                        scoring_call.to_dict(),
+                    ]
+                ),
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
 
     manifest = {
         "started_at": started_at,
@@ -590,8 +837,12 @@ async def main() -> None:
             "evolution_state": str(evo_path),
             "claude_scoring_prompt": str(scoring_prompt_path),
             "claude_score": str(score_path),
+            "llm_usage": str(llm_usage_path),
+            "scoring_llm_usage": str(scoring_usage_path),
             "claude_artifact": str(claude_artifact),
         },
+        "generation_llm_usage": generation_usage,
+        "scoring_llm_usage": scoring_call.to_dict(),
     }
     manifest_path = output_dir / "run_manifest.json"
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
