@@ -4,8 +4,8 @@ import { resolve, dirname } from 'path'
 import { fileURLToPath } from 'url'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
-const DEV_FRONTEND_PORT = Number(process.env.PLOTPILOT_FRONTEND_PORT || 3001)
-const DEV_API_TARGET = process.env.PLOTPILOT_API_TARGET || 'http://127.0.0.1:3000'
+const DEV_FRONTEND_PORT = Number(process.env.PLOTPILOT_FRONTEND_PORT || 3000)
+const DEV_API_TARGET = process.env.PLOTPILOT_API_TARGET || 'http://127.0.0.1:8005'
 const DEV_PLUGIN_TARGET = process.env.PLOTPILOT_PLUGIN_TARGET || DEV_API_TARGET
 
 // https://vite.dev/config/
