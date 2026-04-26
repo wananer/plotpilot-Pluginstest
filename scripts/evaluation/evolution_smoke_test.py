@@ -249,6 +249,7 @@ async def run_smoke() -> Path:
         status_response = runner.check("evolution.route_status", lambda: client.get("/api/v1/plugins/evolution-world/status"))
         assert status_response.status_code == 200
         assert "prehistory_worldline" in status_response.json()["capabilities"]
+        assert "global_route_map" in status_response.json()["capabilities"]
 
         static_response = runner.check("platform.static_serves_evolution_asset", lambda: client.get("/plugins/world_evolution_core/static/inject.js"))
         assert static_response.status_code == 200
@@ -391,6 +392,11 @@ async def run_smoke() -> Path:
         runner.check("evolution.list_events", lambda: service.list_events(novel_id))
         runner.check("evolution.list_timeline_events", lambda: service.list_timeline_events(novel_id))
         runner.check("evolution.list_continuity_constraints", lambda: service.list_continuity_constraints(novel_id))
+        route_map = runner.check("evolution.get_global_route_map", lambda: service.get_global_route_map(novel_id))
+        assert route_map["aggregate"]["route_edge_count"] >= 10
+        assert route_map["vector_index"]["count"] >= 10
+        runner.check("evolution.list_route_conflicts", lambda: service.list_route_conflicts(novel_id))
+        runner.check("evolution.list_story_graph_chapters", lambda: service.list_story_graph_chapters(novel_id))
         runner.check("evolution.list_review_records", lambda: service.list_review_records(novel_id))
         runner.check("evolution.list_snapshots", lambda: service.list_snapshots(novel_id))
         runner.check("evolution.list_characters", lambda: service.list_characters(novel_id))
@@ -537,6 +543,9 @@ async def run_smoke() -> Path:
             "events": "/api/v1/plugins/evolution-world/novels/smoke-http/events",
             "timeline_events": "/api/v1/plugins/evolution-world/novels/smoke-http/timeline/events",
             "constraints": "/api/v1/plugins/evolution-world/novels/smoke-http/timeline/constraints",
+            "story_graph": "/api/v1/plugins/evolution-world/novels/smoke-http/story-graph/chapters",
+            "route_map": "/api/v1/plugins/evolution-world/novels/smoke-http/routes/global",
+            "route_conflicts": "/api/v1/plugins/evolution-world/novels/smoke-http/routes/conflicts",
             "prehistory": f"/api/v1/plugins/evolution-world/novels/{novel_id}/prehistory/worldline",
             "review_records": f"/api/v1/plugins/evolution-world/novels/{novel_id}/timeline/review-records",
         }
