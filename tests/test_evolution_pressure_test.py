@@ -1,11 +1,11 @@
 import json
 
 from scripts.evaluation.evolution_pressure_test import (
-    _build_api2_control_card_prompt,
     _load_existing_arm,
     _repetitive_phrase_counts,
     _repetitive_phrase_total,
 )
+from plugins.world_evolution_core.service import _build_api2_control_card_prompt
 
 
 def test_repetitive_phrase_metrics_catch_silent_templates():
@@ -24,14 +24,14 @@ def test_api2_control_card_prompt_is_compression_not_generation():
     prompt = _build_api2_control_card_prompt(
         chapter_number=7,
         outline="三人潜入潮汐机房，黑匣子投影出争执。",
-        raw_evolution_context="上一章结尾：沈砚已经进入C307，黑匣子仍在他手里。",
+        raw_context="上一章结尾：沈砚已经进入C307，黑匣子仍在他手里。",
     )
 
-    assert "Evolution 状态压缩器" in prompt
-    assert "不写正文" in prompt
-    assert "只输出控制卡" in prompt
-    assert "沈砚已经进入C307" in prompt
-    assert "没有说话/没有回答" in prompt
+    assert "状态压缩器" in prompt.system
+    assert "不写正文" in prompt.system
+    assert "只输出控制卡" in prompt.user
+    assert "沈砚已经进入C307" in prompt.user
+    assert "没有说话/没有回答" in prompt.user
 
 
 def test_load_existing_arm_preserves_reused_usage_metadata(tmp_path):

@@ -31,6 +31,8 @@ from plugins.platform.job_registry import PluginJobRegistry
 from plugins.platform.plugin_storage import PluginStorage
 from plugins.world_evolution_core.continuity import analyze_chapter_transitions
 from plugins.world_evolution_core.service import EvolutionWorldAssistantService
+from domain.ai.services.llm_service import GenerationResult
+from domain.ai.value_objects.token_usage import TokenUsage
 
 
 ARTIFACT_ROOT = PROJECT_ROOT / ".omx" / "artifacts"
@@ -173,6 +175,36 @@ class ChapterResult:
         )
 
 
+class PressureTestApi2LLM:
+    """Adapter that lets the Evolution plugin own API2 compression during CLI pressure tests."""
+
+    def __init__(self, *, model: str, timeout: int, budget_usd: str | None, arm: str):
+        self.model = model
+        self.timeout = timeout
+        self.budget_usd = budget_usd
+        self.arm = arm
+        self.current_chapter_number = 0
+        self._calls: list[LLMCallResult] = []
+
+    async def generate(self, prompt, config) -> GenerationResult:
+        prompt_text = f"{getattr(prompt, 'system', '')}\n\n{getattr(prompt, 'user', '')}".strip()
+        call = _run_claude(prompt_text, model=self.model, timeout=self.timeout, budget_usd=self.budget_usd)
+        self._calls.append(call)
+        return GenerationResult(
+            content=call.content,
+            token_usage=TokenUsage(input_tokens=call.input_tokens, output_tokens=call.output_tokens),
+        )
+
+    async def stream_generate(self, prompt, config):
+        result = await self.generate(prompt, config)
+        yield result.content
+
+    def drain_calls(self) -> list[LLMCallResult]:
+        calls = list(self._calls)
+        self._calls.clear()
+        return calls
+
+
 def _now_slug() -> str:
     return datetime.now().strftime("%Y%m%d-%H%M%S")
 
@@ -300,28 +332,6 @@ def _build_generation_prompt(
 7. 避免反复使用同一种沉默/停顿套话；尤其不要高频使用“没有说话”“没有回答”“沉默了几秒”。如果角色不回应，请改用具体动作、视线、呼吸、环境反应或信息处理过程表现。
 
 开始写正文："""
-
-
-def _build_api2_control_card_prompt(*, chapter_number: int, outline: str, raw_evolution_context: str) -> str:
-    return f"""你是 Evolution 状态压缩器，不写正文。你的任务是把冗长世界状态压缩成“本章写作控制卡”。
-
-【本章大纲】
-第{chapter_number}章：{outline}
-
-【原始 Evolution 上下文】
-{raw_evolution_context}
-
-请输出可直接给正文作者使用的中文控制卡，限 900-1300 中文字符，必须包含：
-1. 必须承接的上一章结尾状态。
-2. 本章硬约束/禁写事项。
-3. 角色信息边界：谁知道什么，谁不能提前知道什么。
-4. 本章必须推进的剧情目标。
-5. 禁用重复模板：不要使用“没有说话/没有回答/没有立刻回答/沉默了几秒/盯着屏幕看了几秒/呼吸停了一拍”等。
-6. 替代表现方式：给出具体动作、环境反应、技术操作、心理判断或场面调度建议。
-7. 字数保障建议：指出哪些场景可以慢写扩展，但不得新增事实真相。
-
-只输出控制卡，不要写正文。"""
-
 
 def _build_expansion_prompt(*, chapter_number: int, outline: str, content: str, target_chars: int) -> str:
     current_chars = _chapter_char_count(content)
@@ -512,11 +522,25 @@ async def _generate_arm(
     llm_calls: list[dict[str, Any]] = []
     api2_cards: list[dict[str, Any]] = []
     service: EvolutionWorldAssistantService | None = None
+    api2_llm: PressureTestApi2LLM | None = None
     novel_id = f"pressure-{arm}-{output_dir.name}"
 
     if evolution_enabled:
         storage = PluginStorage(root=output_dir / "plugin_platform")
-        service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage))
+        if use_api2_control_card:
+            api2_llm = PressureTestApi2LLM(model=model, timeout=timeout, budget_usd=budget_usd, arm=arm)
+        service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage), api2_llm_service=api2_llm)
+        if use_api2_control_card:
+            service.update_settings(
+                {
+                    "api2_control_card": {
+                        "enabled": True,
+                        "provider_mode": "same_as_main",
+                        "temperature": 0.2,
+                        "max_tokens": 1400,
+                    }
+                }
+            )
         prehistory = await service.after_novel_created(
             {
                 "novel_id": novel_id,
@@ -544,6 +568,8 @@ async def _generate_arm(
         chapter_call_results: list[LLMCallResult] = []
         if service is not None:
             context_parts: list[str] = []
+            if api2_llm is not None:
+                api2_llm.current_chapter_number = index
             if index == 1:
                 for block in evolution_meta.get("planning_context", {}).get("context_blocks", []):
                     context_parts.append(f"【{block.get('title')}】\n{block.get('content')}")
@@ -556,36 +582,36 @@ async def _generate_arm(
             )
             for block in before.get("context_blocks", []):
                 context_parts.append(f"【{block.get('title')}】\n{block.get('content')}")
+                metadata = block.get("metadata") if isinstance(block.get("metadata"), dict) else {}
+                if metadata.get("api2_control_card_enabled"):
+                    raw_evolution_context_chars = int(metadata.get("api2_raw_context_chars") or 0)
+                    api2_control_card_chars = int(metadata.get("api2_control_card_chars") or 0)
             evolution_context = "\n\n".join(part for part in context_parts if part.strip())
-            raw_evolution_context_chars = len(evolution_context)
-            if use_api2_control_card and evolution_context.strip():
-                card_prompt = _build_api2_control_card_prompt(
-                    chapter_number=index,
-                    outline=outline,
-                    raw_evolution_context=evolution_context,
-                )
-                card_call = _run_claude(card_prompt, model=model, timeout=timeout, budget_usd=budget_usd)
-                chapter_call_results.append(card_call)
-                card = card_call.content
-                api2_control_card_chars = len(card)
+            if not raw_evolution_context_chars:
+                raw_evolution_context_chars = len(evolution_context)
+            if api2_llm is not None:
+                api2_calls = api2_llm.drain_calls()
                 card_dir = output_dir / "api2_control_cards"
-                card_dir.mkdir(parents=True, exist_ok=True)
-                card_path = card_dir / f"{arm}_chapter_{index:02d}.md"
-                card_path.write_text(card, encoding="utf-8")
-                card_payload = card_call.to_dict()
-                card_payload.update({"arm": arm, "chapter_number": index, "phase": "api2_control_card"})
-                llm_calls.append(card_payload)
-                api2_cards.append(
-                    {
-                        "chapter_number": index,
-                        "raw_evolution_context_chars": raw_evolution_context_chars,
-                        "api2_control_card_chars": api2_control_card_chars,
-                        "compression_ratio": round(api2_control_card_chars / max(raw_evolution_context_chars, 1), 4),
-                        "path": str(card_path),
-                        "usage": card_call.to_dict(),
-                    }
-                )
-                evolution_context = f"【Evolution 写作控制卡】\n{card}"
+                if api2_calls and api2_control_card_chars:
+                    card_dir.mkdir(parents=True, exist_ok=True)
+                    card_path = card_dir / f"{arm}_chapter_{index:02d}.md"
+                    card_path.write_text(evolution_context, encoding="utf-8")
+                for card_call in api2_calls:
+                    card_payload = card_call.to_dict()
+                    card_payload.update({"arm": arm, "chapter_number": index, "phase": "api2_control_card"})
+                    llm_calls.append(card_payload)
+                    chapter_call_results.append(card_call)
+                if api2_calls and api2_control_card_chars:
+                    api2_cards.append(
+                        {
+                            "chapter_number": index,
+                            "raw_evolution_context_chars": raw_evolution_context_chars,
+                            "api2_control_card_chars": api2_control_card_chars,
+                            "compression_ratio": round(api2_control_card_chars / max(raw_evolution_context_chars, 1), 4),
+                            "path": str(card_dir / f"{arm}_chapter_{index:02d}.md"),
+                            "usage": api2_calls[-1].to_dict(),
+                        }
+                    )
 
         prompt = _build_generation_prompt(
             arm_label="实验组：Evolution 插件开启" if evolution_enabled else "对照组：Evolution 插件关闭",
@@ -920,7 +946,7 @@ async def main() -> None:
     parser.add_argument(
         "--use-api2-control-card",
         action="store_true",
-        help="Before chapter generation, call a second API to compress Evolution context into a writing control card.",
+        help="Enable Evolution plugin API2 control-card compression before chapter generation.",
     )
     parser.add_argument(
         "--expand-short-chapters",
