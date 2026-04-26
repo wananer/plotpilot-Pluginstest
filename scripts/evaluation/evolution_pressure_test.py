@@ -88,7 +88,16 @@ EVALUATION_CRITERIA: list[dict[str, Any]] = [
     {"name": "信息边界", "weight": 0.10, "description": "角色不知道的信息是否没有被无根据写成已知。"},
     {"name": "文风适配", "weight": 0.07, "description": "是否维持冷峻克制、重质感和悬疑推进的风格。"},
     {"name": "可读性", "weight": 0.06, "description": "单章叙事节奏、场景调度、对话自然度和阅读吸引力。"},
-    {"name": "冗余与重复控制", "weight": 0.05, "description": "是否减少重复解释、重复措辞和机械总结。"},
+    {"name": "冗余与重复控制", "weight": 0.05, "description": "是否减少重复解释、重复措辞、机械总结和“没有说话/没有回答/沉默几秒”等高频套话。"},
+]
+
+REPETITIVE_PHRASES: list[str] = [
+    "没有说话",
+    "没说话",
+    "没有回答",
+    "沉默了几秒",
+    "沉默了很久",
+    "沉默",
 ]
 
 
@@ -139,6 +148,9 @@ class ChapterResult:
     prompt_chars: int
     duration_seconds: float
     evolution_context_chars: int = 0
+    raw_evolution_context_chars: int = 0
+    api2_control_card_chars: int = 0
+    expansion_applied: bool = False
     llm_call_count: int = 0
     llm_input_tokens: int = 0
     llm_output_tokens: int = 0
@@ -226,6 +238,15 @@ def _repetition_score(content: str) -> float:
     return max(0.0, 1.0 - repeated / max(len(chunks), 1))
 
 
+def _repetitive_phrase_counts(content: str) -> dict[str, int]:
+    return {phrase: content.count(phrase) for phrase in REPETITIVE_PHRASES}
+
+
+def _repetitive_phrase_total(content: str) -> int:
+    pattern = "|".join(re.escape(phrase) for phrase in sorted(REPETITIVE_PHRASES, key=len, reverse=True))
+    return len(re.findall(pattern, content))
+
+
 def _build_base_context() -> str:
     return "\n".join(
         [
@@ -276,8 +297,50 @@ def _build_generation_prompt(
 4. 严守信息边界：角色不能知道尚未通过剧情获得的信息。
 5. 本章必须完成大纲节点，但不能提前揭示后续章节真相。
 6. 每章末尾自然留下一个新问题或伏笔。
+7. 避免反复使用同一种沉默/停顿套话；尤其不要高频使用“没有说话”“没有回答”“沉默了几秒”。如果角色不回应，请改用具体动作、视线、呼吸、环境反应或信息处理过程表现。
 
 开始写正文："""
+
+
+def _build_api2_control_card_prompt(*, chapter_number: int, outline: str, raw_evolution_context: str) -> str:
+    return f"""你是 Evolution 状态压缩器，不写正文。你的任务是把冗长世界状态压缩成“本章写作控制卡”。
+
+【本章大纲】
+第{chapter_number}章：{outline}
+
+【原始 Evolution 上下文】
+{raw_evolution_context}
+
+请输出可直接给正文作者使用的中文控制卡，限 900-1300 中文字符，必须包含：
+1. 必须承接的上一章结尾状态。
+2. 本章硬约束/禁写事项。
+3. 角色信息边界：谁知道什么，谁不能提前知道什么。
+4. 本章必须推进的剧情目标。
+5. 禁用重复模板：不要使用“没有说话/没有回答/没有立刻回答/沉默了几秒/盯着屏幕看了几秒/呼吸停了一拍”等。
+6. 替代表现方式：给出具体动作、环境反应、技术操作、心理判断或场面调度建议。
+7. 字数保障建议：指出哪些场景可以慢写扩展，但不得新增事实真相。
+
+只输出控制卡，不要写正文。"""
+
+
+def _build_expansion_prompt(*, chapter_number: int, outline: str, content: str, target_chars: int) -> str:
+    current_chars = _chapter_char_count(content)
+    return f"""你是小说扩写编辑。请在不改变事实、不改变结尾钩子、不新增提前真相的前提下，把下面第{chapter_number}章正文扩写到接近 {target_chars} 个中文字符。
+
+【本章大纲】
+第{chapter_number}章：{outline}
+
+【当前正文】
+{content}
+
+【扩写要求】
+1. 只输出扩写后的完整正文，不要解释。
+2. 当前约 {current_chars} 字符，目标接近 {target_chars} 字符，优先补足场景调度、动作过程、环境压力、对话转折和人物判断。
+3. 不要增加新真相，不要提前泄露后续章节，不要改动已发生事件顺序。
+4. 避免“没有说话/没有回答/沉默了几秒/盯着屏幕看了几秒/呼吸停了一拍”等套话。
+5. 保持冷峻、克制、重伏笔的近未来悬疑文风。
+
+开始输出扩写后的完整正文："""
 
 
 def _estimate_tokens(text: str) -> int:
@@ -375,6 +438,37 @@ def _sum_usage_dicts(items: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _load_reused_arm_meta(source_dir: Path, arm: str) -> dict[str, Any]:
+    meta: dict[str, Any] = {"reused_from": str(source_dir)}
+    usage_path = source_dir / "llm_usage.json"
+    if usage_path.exists():
+        try:
+            usage_payload = json.loads(usage_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            usage_payload = {}
+        arm_usage = (usage_payload.get("generation") or {}).get(arm) or {}
+        if arm_usage:
+            meta["llm_usage"] = arm_usage.get("aggregate") or {}
+            meta["llm_calls"] = arm_usage.get("calls") or []
+    return meta
+
+
+def _load_reused_chapter_metrics(source_dir: Path, arm: str) -> dict[int, dict[str, Any]]:
+    metrics_path = source_dir / "metrics.json"
+    if not metrics_path.exists():
+        return {}
+    try:
+        metrics_payload = json.loads(metrics_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    chapters = ((metrics_payload.get(arm) or {}).get("chapters") or [])
+    return {
+        int(item.get("chapter_number")): item
+        for item in chapters
+        if isinstance(item, dict) and item.get("chapter_number") is not None
+    }
+
+
 def _run_claude(prompt: str, *, model: str, timeout: int, budget_usd: str | None = None) -> LLMCallResult:
     cmd = ["claude", "-p", "--model", model, "--permission-mode", "default", "--output-format", "json"]
     if budget_usd:
@@ -395,6 +489,10 @@ def _run_claude(prompt: str, *, model: str, timeout: int, budget_usd: str | None
     return _parse_claude_json_result(proc.stdout, prompt=prompt, duration_seconds=duration, model=model)
 
 
+def _usage_from_calls(calls: list[LLMCallResult]) -> dict[str, Any]:
+    return _sum_llm_usage(calls)
+
+
 async def _generate_arm(
     *,
     arm: str,
@@ -404,11 +502,15 @@ async def _generate_arm(
     timeout: int,
     budget_usd: str | None,
     evolution_enabled: bool,
+    use_api2_control_card: bool = False,
+    expand_short_chapters: bool = False,
+    expansion_min_ratio: float = 0.9,
 ) -> tuple[list[ChapterResult], dict[str, Any]]:
     prior_summaries: list[str] = []
     chapters: list[ChapterResult] = []
     evolution_meta: dict[str, Any] = {}
     llm_calls: list[dict[str, Any]] = []
+    api2_cards: list[dict[str, Any]] = []
     service: EvolutionWorldAssistantService | None = None
     novel_id = f"pressure-{arm}-{output_dir.name}"
 
@@ -437,6 +539,9 @@ async def _generate_arm(
     for index, outline in enumerate(EXPERIMENT_SPEC["chapter_outlines"], start=1):
         print(f"[{arm}] generating chapter {index}/10 (evolution={evolution_enabled})", flush=True)
         evolution_context = ""
+        raw_evolution_context_chars = 0
+        api2_control_card_chars = 0
+        chapter_call_results: list[LLMCallResult] = []
         if service is not None:
             context_parts: list[str] = []
             if index == 1:
@@ -452,6 +557,35 @@ async def _generate_arm(
             for block in before.get("context_blocks", []):
                 context_parts.append(f"【{block.get('title')}】\n{block.get('content')}")
             evolution_context = "\n\n".join(part for part in context_parts if part.strip())
+            raw_evolution_context_chars = len(evolution_context)
+            if use_api2_control_card and evolution_context.strip():
+                card_prompt = _build_api2_control_card_prompt(
+                    chapter_number=index,
+                    outline=outline,
+                    raw_evolution_context=evolution_context,
+                )
+                card_call = _run_claude(card_prompt, model=model, timeout=timeout, budget_usd=budget_usd)
+                chapter_call_results.append(card_call)
+                card = card_call.content
+                api2_control_card_chars = len(card)
+                card_dir = output_dir / "api2_control_cards"
+                card_dir.mkdir(parents=True, exist_ok=True)
+                card_path = card_dir / f"{arm}_chapter_{index:02d}.md"
+                card_path.write_text(card, encoding="utf-8")
+                card_payload = card_call.to_dict()
+                card_payload.update({"arm": arm, "chapter_number": index, "phase": "api2_control_card"})
+                llm_calls.append(card_payload)
+                api2_cards.append(
+                    {
+                        "chapter_number": index,
+                        "raw_evolution_context_chars": raw_evolution_context_chars,
+                        "api2_control_card_chars": api2_control_card_chars,
+                        "compression_ratio": round(api2_control_card_chars / max(raw_evolution_context_chars, 1), 4),
+                        "path": str(card_path),
+                        "usage": card_call.to_dict(),
+                    }
+                )
+                evolution_context = f"【Evolution 写作控制卡】\n{card}"
 
         prompt = _build_generation_prompt(
             arm_label="实验组：Evolution 插件开启" if evolution_enabled else "对照组：Evolution 插件关闭",
@@ -462,14 +596,41 @@ async def _generate_arm(
             target_chars=target_chars,
         )
         call_result = _run_claude(prompt, model=model, timeout=timeout, budget_usd=budget_usd)
+        chapter_call_results.append(call_result)
         content = call_result.content
-        duration = call_result.duration_seconds
         call_payload = call_result.to_dict()
         call_payload.update({"arm": arm, "chapter_number": index, "phase": "chapter_generation"})
         llm_calls.append(call_payload)
+        expansion_applied = False
+        if expand_short_chapters and _chapter_char_count(content) < int(target_chars * expansion_min_ratio):
+            expansion_prompt = _build_expansion_prompt(
+                chapter_number=index,
+                outline=outline,
+                content=content,
+                target_chars=target_chars,
+            )
+            expansion_call = _run_claude(expansion_prompt, model=model, timeout=timeout, budget_usd=budget_usd)
+            expanded = expansion_call.content
+            if _chapter_char_count(expanded) > _chapter_char_count(content):
+                content = expanded
+                expansion_applied = True
+            chapter_call_results.append(expansion_call)
+            expansion_payload = expansion_call.to_dict()
+            expansion_payload.update(
+                {
+                    "arm": arm,
+                    "chapter_number": index,
+                    "phase": "chapter_expansion",
+                    "applied": expansion_applied,
+                }
+            )
+            llm_calls.append(expansion_payload)
+        chapter_usage = _usage_from_calls(chapter_call_results)
         print(
-            f"[{arm}] chapter {index}/10 done: chars={_chapter_char_count(content)} duration={duration:.1f}s "
-            f"evo_context_chars={len(evolution_context)} llm_tokens={call_result.total_tokens} cost=${call_result.total_cost_usd:.4f}",
+            f"[{arm}] chapter {index}/10 done: chars={_chapter_char_count(content)} duration={chapter_usage['duration_seconds']:.1f}s "
+            f"evo_context_chars={len(evolution_context)} raw_evo_chars={raw_evolution_context_chars} "
+            f"api2_card_chars={api2_control_card_chars} llm_calls={chapter_usage['call_count']} "
+            f"llm_tokens={chapter_usage['total_tokens']} cost=${chapter_usage['total_cost_usd']:.4f}",
             flush=True,
         )
         chapters.append(
@@ -479,15 +640,18 @@ async def _generate_arm(
                 outline=outline,
                 content=content,
                 prompt_chars=len(prompt),
-                duration_seconds=duration,
+                duration_seconds=float(chapter_usage["duration_seconds"]),
                 evolution_context_chars=len(evolution_context),
-                llm_call_count=1,
-                llm_input_tokens=call_result.input_tokens,
-                llm_output_tokens=call_result.output_tokens,
-                llm_cache_creation_input_tokens=call_result.cache_creation_input_tokens,
-                llm_cache_read_input_tokens=call_result.cache_read_input_tokens,
-                llm_total_cost_usd=call_result.total_cost_usd,
-                llm_usage_source=call_result.usage_source,
+                raw_evolution_context_chars=raw_evolution_context_chars,
+                api2_control_card_chars=api2_control_card_chars,
+                expansion_applied=expansion_applied,
+                llm_call_count=int(chapter_usage["call_count"]),
+                llm_input_tokens=int(chapter_usage["input_tokens"]),
+                llm_output_tokens=int(chapter_usage["output_tokens"]),
+                llm_cache_creation_input_tokens=int(chapter_usage["cache_creation_input_tokens"]),
+                llm_cache_read_input_tokens=int(chapter_usage["cache_read_input_tokens"]),
+                llm_total_cost_usd=float(chapter_usage["total_cost_usd"]),
+                llm_usage_source=",".join(chapter_usage.get("usage_sources") or []),
             )
         )
         prior_summaries.append(f"第{index}章：{_short_summary(content)}")
@@ -510,6 +674,7 @@ async def _generate_arm(
         evolution_meta["chapter_summaries"] = {"items": service.repository.list_chapter_summaries(novel_id, limit=200)}
         evolution_meta["volume_summaries"] = {"items": service.repository.list_volume_summaries(novel_id, limit=20)}
     evolution_meta["llm_calls"] = llm_calls
+    evolution_meta["api2_control_cards"] = api2_cards
     evolution_meta["llm_usage"] = _sum_llm_usage(
         [
             LLMCallResult(
@@ -541,6 +706,13 @@ def _export_arm(output_dir: Path, arm: str, chapters: list[ChapterResult]) -> Pa
 
 def _load_existing_arm(source_dir: Path, output_dir: Path, arm: str) -> tuple[list[ChapterResult], dict[str, Any]]:
     chapters: list[ChapterResult] = []
+    reused_meta = _load_reused_arm_meta(source_dir, arm)
+    reused_metrics = _load_reused_chapter_metrics(source_dir, arm)
+    calls_by_chapter: dict[int, list[dict[str, Any]]] = {}
+    for call in reused_meta.get("llm_calls") or []:
+        if not isinstance(call, dict) or call.get("chapter_number") is None:
+            continue
+        calls_by_chapter.setdefault(int(call["chapter_number"]), []).append(call)
     for index, outline in enumerate(EXPERIMENT_SPEC["chapter_outlines"], start=1):
         source_path = source_dir / f"{arm}_chapter_{index:02d}.md"
         if not source_path.exists():
@@ -549,18 +721,35 @@ def _load_existing_arm(source_dir: Path, output_dir: Path, arm: str) -> tuple[li
         target_path = output_dir / source_path.name
         if source_path.resolve() != target_path.resolve():
             shutil.copyfile(source_path, target_path)
+        call_usage = _sum_usage_dicts(calls_by_chapter.get(index, [])) if calls_by_chapter.get(index) else {}
+        metric = reused_metrics.get(index) or {}
         chapters.append(
             ChapterResult(
                 arm=arm,
                 chapter_number=index,
                 outline=outline,
                 content=content,
-                prompt_chars=0,
-                duration_seconds=0.0,
-                evolution_context_chars=0,
+                prompt_chars=int(metric.get("prompt_chars") or 0),
+                duration_seconds=float(call_usage.get("duration_seconds") or metric.get("duration_seconds") or 0.0),
+                evolution_context_chars=int(metric.get("evolution_context_chars") or 0),
+                raw_evolution_context_chars=int(metric.get("raw_evolution_context_chars") or 0),
+                api2_control_card_chars=int(metric.get("api2_control_card_chars") or 0),
+                expansion_applied=bool(metric.get("expansion_applied") or False),
+                llm_call_count=int(call_usage.get("call_count") or metric.get("llm_call_count") or 0),
+                llm_input_tokens=int(call_usage.get("input_tokens") or metric.get("llm_input_tokens") or 0),
+                llm_output_tokens=int(call_usage.get("output_tokens") or metric.get("llm_output_tokens") or 0),
+                llm_cache_creation_input_tokens=int(
+                    call_usage.get("cache_creation_input_tokens") or metric.get("llm_cache_creation_input_tokens") or 0
+                ),
+                llm_cache_read_input_tokens=int(
+                    call_usage.get("cache_read_input_tokens") or metric.get("llm_cache_read_input_tokens") or 0
+                ),
+                llm_total_cost_usd=float(call_usage.get("total_cost_usd") or metric.get("llm_total_cost_usd") or 0.0),
+                llm_usage_source=",".join(call_usage.get("usage_sources") or [])
+                or str(metric.get("llm_usage_source") or "none"),
             )
         )
-    return chapters, {}
+    return chapters, reused_meta
 
 
 def _compute_metrics(chapters: list[ChapterResult], evolution_meta: dict[str, Any]) -> dict[str, Any]:
@@ -574,6 +763,7 @@ def _compute_metrics(chapters: list[ChapterResult], evolution_meta: dict[str, An
         outline_terms = [term for term in re.split(r"[，。；、\s]+", chapter.outline) if len(term) >= 2][:12]
         hits = _extract_keyword_hits(chapter.content, outline_terms)
         entity_hits = _extract_keyword_hits(chapter.content, key_entities)
+        repetitive_phrase_counts = _repetitive_phrase_counts(chapter.content)
         chapter_metrics.append(
             {
                 "chapter_number": chapter.chapter_number,
@@ -586,9 +776,14 @@ def _compute_metrics(chapters: list[ChapterResult], evolution_meta: dict[str, An
                 "dialogue_ratio": round(_dialogue_ratio(chapter.content), 4),
                 "sensory_density_per_1k_chars": round(_sensory_density(chapter.content), 4),
                 "repetition_uniqueness": round(_repetition_score(chapter.content), 4),
+                "repetitive_phrase_counts": repetitive_phrase_counts,
+                "repetitive_phrase_total": _repetitive_phrase_total(chapter.content),
                 "prompt_chars": chapter.prompt_chars,
                 "duration_seconds": round(chapter.duration_seconds, 2),
                 "evolution_context_chars": chapter.evolution_context_chars,
+                "raw_evolution_context_chars": chapter.raw_evolution_context_chars,
+                "api2_control_card_chars": chapter.api2_control_card_chars,
+                "expansion_applied": chapter.expansion_applied,
                 "llm_call_count": chapter.llm_call_count,
                 "llm_input_tokens": chapter.llm_input_tokens,
                 "llm_output_tokens": chapter.llm_output_tokens,
@@ -608,6 +803,8 @@ def _compute_metrics(chapters: list[ChapterResult], evolution_meta: dict[str, An
     total_non_cache_tokens = sum(item["llm_non_cache_tokens"] for item in chapter_metrics)
     total_tokens = sum(item["llm_total_tokens"] for item in chapter_metrics)
     total_cost = sum(item["llm_total_cost_usd"] for item in chapter_metrics)
+    total_chars = sum(item["char_count"] for item in chapter_metrics)
+    repetitive_phrase_total = sum(item["repetitive_phrase_total"] for item in chapter_metrics)
     return {
         "chapters": chapter_metrics,
         "aggregate": {
@@ -618,6 +815,16 @@ def _compute_metrics(chapters: list[ChapterResult], evolution_meta: dict[str, An
             "avg_dialogue_ratio": round(sum(item["dialogue_ratio"] for item in chapter_metrics) / max(len(chapter_metrics), 1), 4),
             "avg_sensory_density_per_1k_chars": round(sum(item["sensory_density_per_1k_chars"] for item in chapter_metrics) / max(len(chapter_metrics), 1), 4),
             "avg_repetition_uniqueness": round(sum(item["repetition_uniqueness"] for item in chapter_metrics) / max(len(chapter_metrics), 1), 4),
+            "avg_evolution_context_chars": round(sum(item["evolution_context_chars"] for item in chapter_metrics) / max(len(chapter_metrics), 1), 2),
+            "avg_raw_evolution_context_chars": round(sum(item["raw_evolution_context_chars"] for item in chapter_metrics) / max(len(chapter_metrics), 1), 2),
+            "avg_api2_control_card_chars": round(sum(item["api2_control_card_chars"] for item in chapter_metrics) / max(len(chapter_metrics), 1), 2),
+            "expansion_applied_count": sum(1 for item in chapter_metrics if item["expansion_applied"]),
+            "repetitive_phrase_total": repetitive_phrase_total,
+            "repetitive_phrase_per_10k_chars": round(repetitive_phrase_total / max(total_chars, 1) * 10000, 4),
+            "repetitive_phrase_counts": {
+                phrase: sum(item["repetitive_phrase_counts"].get(phrase, 0) for item in chapter_metrics)
+                for phrase in REPETITIVE_PHRASES
+            },
             "total_generation_seconds": round(sum(item["duration_seconds"] for item in chapter_metrics), 2),
             "generation_llm_call_count": total_calls,
             "generation_llm_input_tokens": total_input_tokens,
@@ -663,9 +870,10 @@ def _build_claude_scoring_prompt(output_dir: Path, metrics: dict[str, Any]) -> s
 2. 计算加权总分（满分10）。
 3. 评分前必须先输出“相邻章节连续性表”，逐对检查 1->2、2->3 ... 9->10；若自动指标已有 transition_conflicts，请逐条复核。
 4. 对重复抵达、时间回退、物件瞬移、权限状态重置、已知信息回滚等硬冲突，必须扣“相邻章节状态连续性”和“跨章连续性”分。
-5. 明确指出 Evolution 插件开启后对连续性、伏笔、信息边界、人物状态的正负影响。
-6. 给出证据：引用章节号和简短片段即可，不要长篇复述。
-7. 输出 Markdown 表格和结论。
+5. 对“没有说话”“没有回答”“沉默了几秒”等沉默套话做频率复核；即使自动 n-gram 重复率良好，也要在“冗余与重复控制”里扣除高频套话。
+6. 明确指出 Evolution 插件开启后对连续性、伏笔、信息边界、人物状态的正负影响。
+7. 给出证据：引用章节号和简短片段即可，不要长篇复述。
+8. 输出 Markdown 表格和结论。
 
 {criteria}
 
@@ -710,6 +918,17 @@ async def main() -> None:
     parser.add_argument("--skip-generation", action="store_true")
     parser.add_argument("--output-dir", default="")
     parser.add_argument(
+        "--use-api2-control-card",
+        action="store_true",
+        help="Before chapter generation, call a second API to compress Evolution context into a writing control card.",
+    )
+    parser.add_argument(
+        "--expand-short-chapters",
+        action="store_true",
+        help="If a generated chapter is too short, call an expansion API that preserves facts and extends scene writing.",
+    )
+    parser.add_argument("--expansion-min-ratio", type=float, default=0.9)
+    parser.add_argument(
         "--reuse-control-dir",
         default="",
         help="Reuse an existing pressure-test directory for control_off chapters and generate only experiment_on.",
@@ -736,6 +955,8 @@ async def main() -> None:
             timeout=args.timeout,
             budget_usd=args.budget_usd,
             evolution_enabled=False,
+            use_api2_control_card=False,
+            expand_short_chapters=False,
         )
     experiment, experiment_evo = await _generate_arm(
         arm="experiment_on",
@@ -745,6 +966,9 @@ async def main() -> None:
         timeout=args.timeout,
         budget_usd=args.budget_usd,
         evolution_enabled=True,
+        use_api2_control_card=args.use_api2_control_card,
+        expand_short_chapters=args.expand_short_chapters,
+        expansion_min_ratio=args.expansion_min_ratio,
     )
 
     control_export = _export_arm(output_dir, "control_off", control)
@@ -827,6 +1051,9 @@ async def main() -> None:
         "model": args.model,
         "target_chars": args.target_chars,
         "mode": "reuse_control_generate_experiment" if reused_control_dir else "generate_control_and_experiment",
+        "use_api2_control_card": args.use_api2_control_card,
+        "expand_short_chapters": args.expand_short_chapters,
+        "expansion_min_ratio": args.expansion_min_ratio,
         "reused_control_dir": str(reused_control_dir) if reused_control_dir else "",
         "files": {
             "control_export": str(control_export),
