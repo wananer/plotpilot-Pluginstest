@@ -112,13 +112,16 @@ def test_disabled_plugin_routes_and_static_are_blocked(tmp_path, monkeypatch):
                 "    @app.get('/api/v1/plugins/guard_plugin/ping')",
                 "    def ping():",
                 "        return {'ok': True}",
+                "    @app.get('/api/v1/plugins/guard-alias/ping')",
+                "    def alias_ping():",
+                "        return {'ok': True}",
                 "",
             ]
         ),
         encoding="utf-8",
     )
     (plugin_dir / "plugin.json").write_text(
-        '{"name":"guard_plugin","enabled":true,"frontend":{"scripts":["static/inject.js"]}}',
+        '{"name":"guard_plugin","enabled":true,"route_aliases":["guard-alias"],"frontend":{"scripts":["static/inject.js"]}}',
         encoding="utf-8",
     )
     (plugin_dir / "static" / "inject.js").write_text("console.log('guard');\n", encoding="utf-8")
@@ -131,15 +134,19 @@ def test_disabled_plugin_routes_and_static_are_blocked(tmp_path, monkeypatch):
     client = TestClient(app)
 
     assert client.get("/api/v1/plugins/guard_plugin/ping").status_code == 200
+    assert client.get("/api/v1/plugins/guard-alias/ping").status_code == 200
     assert client.get("/plugins/guard_plugin/static/inject.js").status_code == 200
 
     plugin_loader.set_plugin_enabled("guard_plugin", False)
 
     api_response = client.get("/api/v1/plugins/guard_plugin/ping")
+    alias_response = client.get("/api/v1/plugins/guard-alias/ping")
     static_response = client.get("/plugins/guard_plugin/static/inject.js")
 
     assert api_response.status_code == 403
     assert api_response.json()["plugin_name"] == "guard_plugin"
+    assert alias_response.status_code == 403
+    assert alias_response.json()["plugin_name"] == "guard_plugin"
     assert static_response.status_code == 403
     assert static_response.json()["plugin_name"] == "guard_plugin"
 

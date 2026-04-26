@@ -174,6 +174,11 @@ def _validate_manifest_contract(manifest: Dict[str, Any], plugin_dir_name: str) 
         if value is not None and not isinstance(value, (dict, list)):
             raise HTTPException(status_code=400, detail=f"manifest.{key} 必须是 object 或数组")
 
+    route_aliases = manifest.get("route_aliases")
+    if route_aliases is not None:
+        if not isinstance(route_aliases, list) or any(not isinstance(item, str) or not _normalize_plugin_name(item) for item in route_aliases):
+            raise HTTPException(status_code=400, detail="manifest.route_aliases 必须是非空字符串数组")
+
     return {"plugin_name": plugin_name, "manifest": manifest}
 
 
@@ -293,6 +298,7 @@ def _build_plugin_manifest_record(plugin_dir: Path) -> Dict[str, Any] | None:
         "capabilities": manifest.get("capabilities") or {},
         "permissions": manifest.get("permissions") or [],
         "hooks": manifest.get("hooks") or [],
+        "route_aliases": manifest.get("route_aliases") or [],
         "manifest": manifest,
     }
 
@@ -312,6 +318,14 @@ def _include_plugin_router(app, plugin_name: str) -> None:
 
     router = getattr(routes_module, "router", None)
     if router is None:
+        return
+
+    existing_paths = {getattr(route, "path", "") for route in app.routes}
+    router_paths = {
+        f"{getattr(router, 'prefix', '')}{getattr(route, 'path', '')}"
+        for route in getattr(router, "routes", [])
+    }
+    if existing_paths & router_paths:
         return
 
     try:
@@ -343,11 +357,23 @@ def _plugin_name_from_runtime_path(path: str) -> str | None:
             return None
         if len(parts) == 5 and parts[4] == "enabled":
             return None
-        return plugin_name
+        return _resolve_plugin_route_alias(plugin_name)
     if len(parts) >= 3 and parts[0] == "plugins":
         plugin_name = _normalize_plugin_name(parts[1])
         return plugin_name or None
     return None
+
+
+def _resolve_plugin_route_alias(route_name: str) -> str:
+    plugin_dir = _PLUGINS_ROOT / route_name
+    if plugin_dir.exists():
+        return route_name
+    for candidate in _discover_plugin_dirs():
+        manifest = _load_manifest(candidate)
+        aliases = manifest.get("route_aliases") if isinstance(manifest, dict) else None
+        if route_name in {_normalize_plugin_name(str(item)) for item in aliases or []}:
+            return candidate.name
+    return route_name
 
 
 def _install_plugin_disabled_route_guard(app) -> None:
