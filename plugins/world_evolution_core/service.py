@@ -10,6 +10,7 @@ from plugins.platform.job_registry import PluginJobRecord, PluginJobRegistry
 from plugins.platform.plugin_storage import PluginStorage
 
 from .continuity import build_chapter_summary, build_volume_summary
+from .context_capsules import build_injection_record
 from .context_patch import build_context_patch, render_patch_summary
 from .preset_converter import convert_st_preset
 from .repositories import RECENT_CONTEXT_FACT_LIMIT, EvolutionWorldRepository
@@ -252,9 +253,19 @@ class EvolutionWorldAssistantService:
         if not summary:
             return {"ok": True, "skipped": True, "reason": "no evolution state yet"}
 
+        injection_record = build_injection_record(
+            novel_id=novel_id,
+            chapter_number=chapter_number,
+            blocks=patch.get("blocks") or [],
+            skipped_blocks=patch.get("skipped_blocks") or [],
+            at=_now(),
+        )
+        self.repository.append_context_injection_record(novel_id, injection_record)
+
         return {
             "ok": True,
             "context_patch": patch,
+            "context_injection_record": injection_record,
             "context_blocks": [
                 {
                     "plugin_name": PLUGIN_NAME,
@@ -500,6 +511,7 @@ class EvolutionWorldAssistantService:
         characters = self.repository.list_relevant_character_cards(novel_id, outline).get("items", [])
         chapter_summaries = self.repository.list_chapter_summaries(novel_id, before_chapter=chapter_number, limit=10)
         volume_summaries = self.repository.list_volume_summaries(novel_id, before_chapter=chapter_number, limit=3)
+        previous_injections = self.repository.list_context_injection_records(novel_id, limit=20)
         return build_context_patch(
             novel_id,
             chapter_number,
@@ -508,6 +520,7 @@ class EvolutionWorldAssistantService:
             outline=outline,
             chapter_summaries=chapter_summaries,
             volume_summaries=volume_summaries,
+            previous_injections=previous_injections,
         )
 
     def build_context_summary(self, novel_id: str, chapter_number: Optional[int], *, outline: str = "") -> str:
