@@ -81,6 +81,20 @@ def test_plugin_storage_lists_and_logs_by_novel_namespace(tmp_path):
     assert storage.read_jsonl("world_evolution_core", ["novels", "novel-a", "runs.jsonl"]) == [{"novel_id": "novel-a", "run": 1}]
 
 
+def test_plugin_storage_schema_stays_domain_agnostic(tmp_path):
+    import sqlite3
+
+    storage = PluginStorage(root=tmp_path)
+    storage.write_json("world_evolution_core", ["novels", "novel-a", "facts", "chapter_1.json"], {"chapter_number": 1})
+
+    with sqlite3.connect(storage.db_path) as conn:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(plugin_state)").fetchall()}
+
+    assert "chapter_number" not in columns
+    assert "entity_id" not in columns
+    assert "entity_name" not in columns
+
+
 def test_plugin_storage_default_root_is_dedicated_plugin_platform_area():
     storage = PluginStorage()
 
