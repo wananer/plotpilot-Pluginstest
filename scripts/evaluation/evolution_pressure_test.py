@@ -350,6 +350,8 @@ def _local_embedding_path_status(model_path: str) -> dict[str, Any]:
 def _build_preflight_snapshot(*, output_dir: Path, args: argparse.Namespace, started_at: str) -> dict[str, Any]:
     git_status = _run_repo_command(["git", "status", "--short"])
     git_diff_stat = _run_repo_command(["git", "diff", "--stat"])
+    git_head = _run_repo_command(["git", "rev-parse", "HEAD"])
+    git_branch = _run_repo_command(["git", "branch", "--show-current"])
     script_path = Path(__file__).resolve()
     plugin_control_path = PROJECT_ROOT / "data" / "plugin_platform" / "plugin_controls.json"
     plugin_controls = {}
@@ -428,6 +430,8 @@ def _build_preflight_snapshot(*, output_dir: Path, args: argparse.Namespace, sta
             "reuse_control_dir": str(args.reuse_control_dir or ""),
         },
         "git": {
+            "head": (git_head.get("stdout") or "").strip(),
+            "branch": (git_branch.get("stdout") or "").strip(),
             "status_short": git_status,
             "diff_stat": git_diff_stat,
             "dirty_entry_count": len(dirty_entries),

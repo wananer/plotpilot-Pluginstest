@@ -597,7 +597,7 @@ class EvolutionWorldRepository:
 
     def get_host_context_summary(self, novel_id: str) -> dict[str, Any]:
         data = self.storage.read_json(PLUGIN_NAME, ["novels", novel_id, "agent", "host_context_summary.json"], default={})
-        return data if isinstance(data, dict) else {}
+        return _normalize_host_context_summary(data if isinstance(data, dict) else {})
 
     def save_semantic_recall_summary(self, novel_id: str, summary: dict[str, Any]) -> None:
         self.storage.write_json(PLUGIN_NAME, ["novels", novel_id, "agent", "semantic_recall_summary.json"], summary)
@@ -1099,6 +1099,81 @@ def _agent_api_usage_from_control_cards(records: list[dict[str, Any]]) -> dict[s
         totals["total_cost_usd"] += float(call.get("total_cost_usd") or 0.0)
     totals["total_cost_usd"] = round(totals["total_cost_usd"], 6)
     return {"aggregate": totals, "calls": calls[-20:]}
+
+
+def _normalize_host_context_summary(summary: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(summary, dict) or not summary:
+        return {}
+    normalized = dict(summary)
+    counts = dict(normalized.get("counts") or {})
+    degraded_sources = list(normalized.get("degraded_sources") or [])
+    empty_sources = list(normalized.get("empty_sources") or [])
+    field_missing_sources = list(normalized.get("field_missing_sources") or [])
+    source_status = dict(normalized.get("source_status") or {})
+    active_sources = list(normalized.get("active_sources") or [])
+    if not active_sources and counts:
+        active_sources = [
+            source
+            for source in (
+                "bible",
+                "world",
+                "knowledge",
+                "story_knowledge",
+                "storyline",
+                "timeline",
+                "chronicle",
+                "foreshadow",
+                "dialogue",
+                "triples",
+                "memory_engine",
+            )
+            if int(counts.get(source) or 0) > 0
+        ]
+        active_sources.extend(source for source, count in counts.items() if source not in active_sources and int(count or 0) > 0)
+
+    usage = dict(normalized.get("plotpilot_context_usage") or {})
+    observability_normalized = False
+    if not usage:
+        usage = {
+            "source": "plotpilot_native_context_adapter",
+            "mode": "strategy_only",
+            "hit_counts_by_tier": {},
+            "degraded_sources": degraded_sources,
+            "empty_sources": empty_sources,
+            "field_missing_sources": field_missing_sources,
+            "long_context_duplicated": False,
+        }
+        observability_normalized = True
+    else:
+        defaults = {
+            "source": "plotpilot_native_context_adapter",
+            "mode": "strategy_only",
+            "hit_counts_by_tier": {},
+            "degraded_sources": degraded_sources,
+            "empty_sources": empty_sources,
+            "field_missing_sources": field_missing_sources,
+            "long_context_duplicated": False,
+        }
+        for key, value in defaults.items():
+            if key not in usage:
+                usage[key] = value
+                observability_normalized = True
+
+    for key, value in {
+        "active_sources": active_sources,
+        "degraded_sources": degraded_sources,
+        "empty_sources": empty_sources,
+        "field_missing_sources": field_missing_sources,
+        "source_status": source_status,
+        "counts": counts,
+        "plotpilot_context_usage": usage,
+    }.items():
+        if key not in normalized:
+            observability_normalized = True
+        normalized[key] = value
+    if observability_normalized:
+        normalized["observability_normalized"] = True
+    return normalized
 
 
 def _slug(value: str) -> str:

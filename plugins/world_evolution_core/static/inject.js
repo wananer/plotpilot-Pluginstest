@@ -6,6 +6,7 @@
   }
 
   const pluginName = 'world_evolution_core';
+  const frontendBuild = 'observability-v2-20260428';
   const state = {
     activeTab: 'characters',
     viewMode: 'novel',
@@ -54,7 +55,7 @@
       </nav>
       <main data-content class="ewa-content">加载中...</main>
       <footer class="ewa-footer">
-        <span>Phase 1 · Fact-driven rolecards</span>
+        <span>Phase 1 · ${frontendBuild}</span>
         <button type="button" data-refresh>刷新</button>
       </footer>
     `;
@@ -457,6 +458,9 @@
     const semanticRecall = agent.semantic_recall_summary || {};
     const agentApiUsage = agent.agent_api_usage || {};
     const agentApiAggregate = agentApiUsage.aggregate || {};
+    const observabilityNotes = [];
+    if (hostContext.observability_normalized) observabilityNotes.push('旧版原生资料摘要已按当前 schema 兼容显示');
+    if (!plotpilotUsage.mode) observabilityNotes.push('PlotPilot 原生资料策略模式暂未写入，已按 strategy_only 展示');
     const diagnostics = payload.diagnostics || {};
     const diagnosticRisks = Array.isArray(diagnostics.risks) ? diagnostics.risks : [];
     const degradedRisks = diagnosticRisks.filter((item) => item.source === 'host_context' || item.source === 'semantic_recall' || item.source === 'agent_events').slice(0, 4);
@@ -510,6 +514,7 @@
           <em>向量:${semanticRecall.vector_enabled ? '启用' : '未启用'}</em>
           <em>召回:${escapeHtml(semanticRecall.item_count || 0)}</em>
         </div>
+        ${observabilityNotes.length ? `<p class="ewa-muted">${observabilityNotes.map(escapeHtml).join('；')}。若看不到 Agent API 成本或实验护栏，请刷新工作台以重新加载 ${escapeHtml(frontendBuild)}。</p>` : ''}
       </section>
       <section class="ewa-section">
         <div class="ewa-section-head">
@@ -660,6 +665,9 @@
     const counts = diagnostics.agent_asset_counts || {};
     const leakage = diagnostics.plugin_leakage_check || {};
     const budget = diagnostics.context_budget_summary || {};
+    const observabilityNotes = [];
+    if (hostContext.observability_normalized) observabilityNotes.push('旧版 host context 摘要已兼容补齐');
+    if (budget.legacy_record_normalized) observabilityNotes.push('历史 context injection 记录已兼容统计');
     content.innerHTML = `
       <section class="ewa-summary-grid">
         <article><b>${escapeHtml(summary.critical || 0)}</b><span>Critical</span></article>
@@ -692,6 +700,7 @@
           <div><dt>向量依赖</dt><dd>${escapeHtml(formatDependencyStatus(dependencies))}</dd></div>
           <div><dt>Agent资产</dt><dd>Gene ${escapeHtml(counts.genes || 0)} · Capsule ${escapeHtml(counts.capsules || 0)} · Event ${escapeHtml(counts.events || 0)}</dd></div>
         </dl>
+        ${observabilityNotes.length ? `<p class="ewa-muted">${observabilityNotes.map(escapeHtml).join('；')}。如页面字段与接口不一致，请刷新工作台以重新加载 ${escapeHtml(frontendBuild)}。</p>` : ''}
       </section>
       <section class="ewa-section">
         <div class="ewa-section-head">

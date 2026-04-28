@@ -132,6 +132,8 @@ def test_preflight_snapshot_records_risk_inputs_without_model_calls(tmp_path):
     assert snapshot["generation_parameters"]["use_api2_control_card"] is False
     assert snapshot["generation_parameters"]["agent_api_is_primary"] is True
     assert snapshot["script"]["sha256"]
+    assert "head" in snapshot["git"]
+    assert "branch" in snapshot["git"]
     assert "plugin_manifest_snapshot" in snapshot
     assert "embedding_status" in snapshot
     assert {item["id"] for item in snapshot["risk_register"]} >= {

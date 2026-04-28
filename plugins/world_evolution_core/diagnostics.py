@@ -140,7 +140,7 @@ def _host_feature_alignment(summary: dict[str, Any]) -> dict[str, Any]:
 def _context_budget_summary(repository: Any, novel_id: str) -> dict[str, Any]:
     records = repository.list_context_injection_records(novel_id, limit=1)
     latest = records[-1] if records else {}
-    blocks = [block for block in latest.get("blocks") or [] if isinstance(block, dict)] if isinstance(latest, dict) else []
+    blocks = _context_blocks_from_record(latest)
     block_ids = [str(block.get("id") or block.get("title") or "") for block in blocks if block]
     token_budget = sum(int(block.get("token_budget") or 0) for block in blocks)
     return {
@@ -150,7 +150,25 @@ def _context_budget_summary(repository: Any, novel_id: str) -> dict[str, Any]:
         "duplicate_block_ids": _duplicates(item for item in block_ids if item),
         "strategy_only": any(block.get("id") == "plotpilot_native_strategy" for block in blocks),
         "latest_chapter": latest.get("chapter_number") if isinstance(latest, dict) else None,
+        "legacy_record_normalized": bool(records) and not bool((latest or {}).get("blocks")) and bool(blocks),
     }
+
+
+def _context_blocks_from_record(record: Any) -> list[dict[str, Any]]:
+    if not isinstance(record, dict):
+        return []
+    candidates = [
+        record.get("blocks"),
+        record.get("selected"),
+        record.get("context_blocks"),
+    ]
+    patch = record.get("context_patch") if isinstance(record.get("context_patch"), dict) else {}
+    candidates.append(patch.get("blocks"))
+    for value in candidates:
+        blocks = [block for block in (value or []) if isinstance(block, dict)]
+        if blocks:
+            return blocks
+    return []
 
 
 def _plugin_leakage_check(repository: Any, novel_id: str, agent_status: dict[str, Any]) -> dict[str, Any]:

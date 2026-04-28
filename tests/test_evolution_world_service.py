@@ -1911,6 +1911,54 @@ def test_diagnostics_reports_risks_and_redacts_sensitive_settings(tmp_path):
     assert "agent-secret" not in json.dumps(diagnostics, ensure_ascii=False)
 
 
+def test_agent_status_normalizes_legacy_host_context_summary(tmp_path):
+    storage = PluginStorage(root=tmp_path)
+    service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage))
+    service.repository.save_host_context_summary(
+        "novel-legacy-host-summary",
+        {
+            "source": "plotpilot_host_readonly",
+            "counts": {"world": 2, "foreshadow": 1},
+            "degraded_sources": ["timeline"],
+        },
+    )
+
+    status = service.get_agent_status("novel-legacy-host-summary")
+
+    host = status["host_context_summary"]
+    assert host["active_sources"] == ["world", "foreshadow"]
+    assert host["empty_sources"] == []
+    assert host["field_missing_sources"] == []
+    assert host["source_status"] == {}
+    assert host["observability_normalized"] is True
+    assert status["plotpilot_context_usage"]["mode"] == "strategy_only"
+    assert status["plotpilot_context_usage"]["degraded_sources"] == ["timeline"]
+
+
+def test_diagnostics_context_budget_reads_legacy_context_injection_shapes(tmp_path):
+    storage = PluginStorage(root=tmp_path)
+    service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage))
+    service.repository.append_context_injection_record(
+        "novel-legacy-context-record",
+        {
+            "chapter_number": 4,
+            "selected": [
+                {"id": "plotpilot_native_strategy", "token_budget": 360},
+                {"id": "plotpilot_native_strategy", "token_budget": 140},
+            ],
+        },
+    )
+
+    diagnostics = service.get_diagnostics("novel-legacy-context-record")
+
+    budget = diagnostics["context_budget_summary"]
+    assert budget["block_count"] == 2
+    assert budget["token_budget"] == 500
+    assert budget["duplicate_block_ids"] == ["plotpilot_native_strategy"]
+    assert budget["strategy_only"] is True
+    assert budget["legacy_record_normalized"] is True
+
+
 def test_diagnostics_reports_plugin_disabled_without_hook_execution(tmp_path, monkeypatch):
     storage = PluginStorage(root=tmp_path)
     service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage))
