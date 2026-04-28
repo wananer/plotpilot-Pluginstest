@@ -11,9 +11,9 @@
     viewMode: 'novel',
     selectedCharacterId: null,
     lastPayload: null,
-    settingsMessage: '',
-    modelFetchMessage: '',
-    api2Models: [],
+    agentSettingsMessage: '',
+    agentModelFetchMessage: '',
+    agentModels: [],
   };
 
   function ensurePanel() {
@@ -47,6 +47,8 @@
         <button type="button" data-tab="characters" class="active">角色卡</button>
         <button type="button" data-tab="events">世界线</button>
         <button type="button" data-tab="routes">路线图</button>
+        <button type="button" data-tab="agent">智能体</button>
+        <button type="button" data-tab="diagnostics">风险审查</button>
         <button type="button" data-tab="status">运行态</button>
         <button type="button" data-tab="settings">设置</button>
       </nav>
@@ -79,7 +81,7 @@
       return;
     }
     try {
-      const [characters, status, runs, snapshots, importedFlows, settings, routeMap] = await Promise.all([
+      const [characters, status, runs, snapshots, importedFlows, settings, routeMap, agentStatus, diagnostics] = await Promise.all([
         runtime.fetchJson(`/api/v1/plugins/evolution-world/novels/${encodeURIComponent(novelId)}/characters`),
         runtime.fetchJson('/api/v1/plugins/evolution-world/status'),
         runtime.fetchJson(`/api/v1/plugins/evolution-world/novels/${encodeURIComponent(novelId)}/runs?limit=8`),
@@ -87,8 +89,10 @@
         runtime.fetchJson(`/api/v1/plugins/evolution-world/novels/${encodeURIComponent(novelId)}/imported-flows`),
         runtime.fetchJson('/api/v1/plugins/evolution-world/settings'),
         runtime.fetchJson(`/api/v1/plugins/evolution-world/novels/${encodeURIComponent(novelId)}/routes/global`),
+        runtime.fetchJson(`/api/v1/plugins/evolution-world/novels/${encodeURIComponent(novelId)}/agent/status`),
+        runtime.fetchJson(`/api/v1/plugins/evolution-world/novels/${encodeURIComponent(novelId)}/diagnostics`),
       ]);
-      state.lastPayload = { novelId, characters, status, runs, snapshots, importedFlows, settings, routeMap };
+      state.lastPayload = { novelId, characters, status, runs, snapshots, importedFlows, settings, routeMap, agentStatus, diagnostics };
       renderPanel(drawer);
     } catch (error) {
       console.warn('[EvolutionWorld] panel request failed:', error);
@@ -103,6 +107,8 @@
     }
     if (state.activeTab === 'events') return renderEvents(drawer, state.lastPayload);
     if (state.activeTab === 'routes') return renderRoutes(drawer, state.lastPayload);
+    if (state.activeTab === 'agent') return renderAgent(drawer, state.lastPayload);
+    if (state.activeTab === 'diagnostics') return renderDiagnostics(drawer, state.lastPayload);
     if (state.activeTab === 'status') return renderStatus(drawer, state.lastPayload);
     if (state.activeTab === 'settings') return renderSettings(drawer, state.lastPayload);
     return renderCharacters(drawer, state.lastPayload);
@@ -437,6 +443,276 @@
     `;
   }
 
+  function renderAgent(drawer, payload) {
+    const content = drawer.querySelector('[data-content]');
+    const agent = payload.agentStatus || {};
+    const counts = agent.asset_counts || {};
+    const selection = agent.latest_selection || {};
+    const genes = Array.isArray(selection.selected_genes) ? selection.selected_genes : [];
+    const topGenes = Array.isArray(agent.top_genes) ? agent.top_genes : [];
+    const capsules = Array.isArray(agent.top_capsules) ? agent.top_capsules : [];
+    const memoryLayers = agent.memory_layers || {};
+    const hostContext = agent.host_context_summary || {};
+    const plotpilotUsage = agent.plotpilot_context_usage || hostContext.plotpilot_context_usage || {};
+    const semanticRecall = agent.semantic_recall_summary || {};
+    const diagnostics = payload.diagnostics || {};
+    const diagnosticRisks = Array.isArray(diagnostics.risks) ? diagnostics.risks : [];
+    const degradedRisks = diagnosticRisks.filter((item) => item.source === 'host_context' || item.source === 'semantic_recall' || item.source === 'agent_events').slice(0, 4);
+    const reflections = Array.isArray(agent.latest_reflections) ? agent.latest_reflections.slice().reverse() : [];
+    const candidates = Array.isArray(agent.gene_candidates) ? agent.gene_candidates.slice().reverse() : [];
+    const learning = Array.isArray(agent.latest_learning) ? agent.latest_learning.slice().reverse() : [];
+    const events = Array.isArray(agent.recent_events) ? agent.recent_events.slice().reverse() : [];
+    content.innerHTML = `
+      <section class="ewa-summary-grid">
+        <article><b>${counts.genes || 0}</b><span>Gene</span></article>
+        <article><b>${counts.capsules || 0}</b><span>Capsule</span></article>
+        <article><b>${counts.reflections || 0}</b><span>Reflection</span></article>
+        <article><b>${counts.gene_candidates || 0}</b><span>候选</span></article>
+        <article><b>${counts.events || 0}</b><span>Event</span></article>
+      </section>
+      <section class="ewa-section">
+        <div class="ewa-section-head">
+          <h3>记忆层</h3>
+          <p>事件、语义、策略与反思资产</p>
+        </div>
+        <dl class="ewa-status-list">
+          <div><dt>Episodic</dt><dd>${escapeHtml(memoryLayers.episodic || 0)}</dd></div>
+          <div><dt>Semantic</dt><dd>${escapeHtml(memoryLayers.semantic || 0)}</dd></div>
+          <div><dt>Procedural</dt><dd>${escapeHtml(memoryLayers.procedural || 0)}</dd></div>
+          <div><dt>Reflective</dt><dd>${escapeHtml(memoryLayers.reflective || 0)}</dd></div>
+        </dl>
+      </section>
+      <section class="ewa-section">
+        <div class="ewa-section-head">
+          <h3>外部信息源</h3>
+          <p>PlotPilot 内置模块只读召回状态</p>
+        </div>
+        <dl class="ewa-status-list">
+          <div><dt>Bible</dt><dd>${escapeHtml(hostContext.counts?.bible || 0)}</dd></div>
+          <div><dt>世界观</dt><dd>${escapeHtml(hostContext.counts?.world || 0)}</dd></div>
+          <div><dt>知识库</dt><dd>${escapeHtml(hostContext.counts?.knowledge || 0)}</dd></div>
+          <div><dt>章后同步</dt><dd>${escapeHtml(hostContext.counts?.story_knowledge || 0)}</dd></div>
+          <div><dt>故事线</dt><dd>${escapeHtml(hostContext.counts?.storyline || 0)}</dd></div>
+          <div><dt>时间线</dt><dd>${escapeHtml(hostContext.counts?.timeline || hostContext.counts?.chronicle || 0)}</dd></div>
+          <div><dt>伏笔</dt><dd>${escapeHtml(hostContext.counts?.foreshadow || 0)}</dd></div>
+          <div><dt>对白</dt><dd>${escapeHtml(hostContext.counts?.dialogue || 0)}</dd></div>
+          <div><dt>Triples</dt><dd>${escapeHtml(hostContext.counts?.triples || 0)}</dd></div>
+          <div><dt>MemoryEngine</dt><dd>${escapeHtml(hostContext.counts?.memory_engine || 0)}</dd></div>
+        </dl>
+        <div class="ewa-chip-row">
+          <em>${escapeHtml(plotpilotUsage.mode || 'strategy_only')}</em>
+          ${Object.entries(plotpilotUsage.hit_counts_by_tier || {}).map(([key, value]) => `<em>${escapeHtml(key)}:${escapeHtml(value)}</em>`).join('')}
+          ${(hostContext.active_sources || []).map((item) => `<em>${escapeHtml(item)}</em>`).join('') || '<em>暂无外部命中</em>'}
+          ${(hostContext.degraded_sources || []).map((item) => `<em>降级:${escapeHtml(item)}</em>`).join('')}
+          ${(hostContext.empty_sources || []).map((item) => `<em>空:${escapeHtml(item)}</em>`).join('')}
+          <em>向量:${semanticRecall.vector_enabled ? '启用' : '未启用'}</em>
+          <em>召回:${escapeHtml(semanticRecall.item_count || 0)}</em>
+        </div>
+      </section>
+      <section class="ewa-section">
+        <div class="ewa-section-head">
+          <h3>降级与失败摘要</h3>
+          <p>来自风险审查的最近可观测信号</p>
+        </div>
+        <ol class="ewa-agent-list">
+          ${degradedRisks.map((risk) => `
+            <li>
+              <strong>${escapeHtml(risk.severity || 'info')} · ${escapeHtml(risk.affected_feature || risk.source || '-')}</strong>
+              <p>${escapeHtml(risk.message || '')}</p>
+            </li>
+          `).join('') || '<li><p>暂无降级或失败风险。</p></li>'}
+        </ol>
+      </section>
+      <section class="ewa-section">
+        <div class="ewa-section-head">
+          <h3>最近选择</h3>
+          <p>根据章节信号选择注入策略</p>
+        </div>
+        <div class="ewa-chip-row">
+          ${(selection.signals || []).map((item) => `<em>${escapeHtml(item)}</em>`).join('') || '<em>暂无信号</em>'}
+        </div>
+        <ol class="ewa-agent-list">
+          ${genes.map((gene) => `
+            <li>
+              <strong>${escapeHtml(gene.title || gene.id || 'Gene')}</strong>
+              <p>${escapeHtml((gene.strategy || []).slice(0, 2).join('；') || '')}</p>
+            </li>
+          `).join('') || '<li><p>暂无策略选择。生成上下文后会记录。</p></li>'}
+        </ol>
+      </section>
+      <section class="ewa-section">
+        <div class="ewa-section-head">
+          <h3>策略贡献</h3>
+          <p>正向记录 Gene 对章节稳定性的保护</p>
+        </div>
+        <ol class="ewa-agent-list">
+          ${topGenes.map((gene) => `
+            <li>
+              <strong>${escapeHtml(gene.title || gene.id || 'Gene')}</strong>
+              <span>命中 ${escapeHtml(gene.hit_count || 0)} · 保护 ${escapeHtml(gene.protected_count || 0)} · 有效 ${escapeHtml(gene.helpful_count || 0)} · 待改进 ${escapeHtml(gene.failure_count || 0)}</span>
+              <p>${escapeHtml(gene.last_positive_reason || gene.last_improvement_advice || (gene.signals_match || []).join('、') || '')}</p>
+            </li>
+          `).join('') || '<li><p>暂无策略贡献。章节审查后会更新。</p></li>'}
+        </ol>
+      </section>
+      <section class="ewa-section ewa-run-section">
+        <div class="ewa-section-head">
+          <h3>经验胶囊</h3>
+          <p>从审查问题中保守固化</p>
+        </div>
+        <ol class="ewa-agent-list">
+          ${capsules.map((capsule) => `
+            <li>
+              <strong>${escapeHtml(capsule.title || capsule.id || 'Capsule')}</strong>
+              <span>第${escapeHtml(capsule.last_seen_chapter || capsule.chapter_number || '-')}章 · ${escapeHtml(capsule.category || '-')} · 成功 ${escapeHtml(capsule.success_count || 0)} · 失败 ${escapeHtml(capsule.failure_count || 0)}</span>
+              <p>${escapeHtml(capsule.guidance || capsule.summary || '')}</p>
+            </li>
+          `).join('') || '<li><p>暂无固化经验。审查发现高置信问题后会出现。</p></li>'}
+        </ol>
+      </section>
+      <section class="ewa-section ewa-run-section">
+        <div class="ewa-section-head">
+          <h3>反思记录</h3>
+          <p>从审查与 Capsule 中沉淀的下一章约束</p>
+        </div>
+        <ol class="ewa-agent-list">
+          ${reflections.map((reflection) => `
+            <li>
+              <strong>${escapeHtml(reflection.problem_pattern || reflection.id || 'Reflection')}</strong>
+              <span>第${escapeHtml(reflection.chapter_number || '-')}章 · ${escapeHtml(reflection.source || '-')}</span>
+              <p>${escapeHtml((reflection.next_chapter_constraints || []).join('；') || reflection.root_cause || reflection.content || '')}</p>
+            </li>
+          `).join('') || '<li><p>暂无反思记录。固化 Capsule 后会出现。</p></li>'}
+        </ol>
+      </section>
+      <section class="ewa-section ewa-run-section">
+        <div class="ewa-section-head">
+          <h3>候选 Gene</h3>
+          <p>只读待审，不会自动替换正式策略</p>
+        </div>
+        <ol class="ewa-agent-list">
+          ${candidates.map((candidate) => `
+            <li>
+              <strong>${escapeHtml(candidate.title || candidate.id || 'GeneCandidate')}</strong>
+              <span>${escapeHtml(candidate.status || 'pending_review')} · 第${escapeHtml(candidate.last_seen_chapter || candidate.created_chapter || '-')}章</span>
+              <p>${escapeHtml((candidate.strategy_draft || []).join('；') || candidate.trigger_reason || '')}</p>
+            </li>
+          `).join('') || '<li><p>暂无候选 Gene。重复问题或连续待改进后会生成。</p></li>'}
+        </ol>
+      </section>
+      <section class="ewa-section ewa-run-section">
+        <div class="ewa-section-head">
+          <h3>最近学习</h3>
+          <p>固化、反思与策略评估</p>
+        </div>
+        <ol class="ewa-timeline">
+          ${learning.map((event) => `
+            <li>
+              <span>${escapeHtml(event.intent || '-')} · 第${escapeHtml(event.chapter_number || '-')}章</span>
+              <strong>${escapeHtml(event.hook_name || event.type || 'EvolutionEvent')}</strong>
+              <p>${escapeHtml((event.outcome?.protected || event.outcome?.helpful || event.outcome?.needs_improvement || event.outcome?.failures || event.outcome?.successes || event.signals || []).join('、') || event.outcome?.status || '')}</p>
+            </li>
+          `).join('') || '<li><p>暂无学习记录</p></li>'}
+        </ol>
+      </section>
+      <section class="ewa-section ewa-run-section">
+        <div class="ewa-section-head">
+          <h3>智能体事件</h3>
+          <p>观察、注入、固化闭环</p>
+        </div>
+        <ol class="ewa-timeline">
+          ${events.map((event) => `
+            <li>
+              <span>${escapeHtml(event.intent || '-')} · 第${escapeHtml(event.chapter_number || '-')}章</span>
+              <strong>${escapeHtml(event.hook_name || event.type || 'EvolutionEvent')}</strong>
+              <p>${escapeHtml((event.signals || []).join('、') || event.outcome?.status || '')}</p>
+            </li>
+          `).join('') || '<li><p>暂无智能体事件</p></li>'}
+        </ol>
+      </section>
+    `;
+  }
+
+  function renderDiagnostics(drawer, payload) {
+    const content = drawer.querySelector('[data-content]');
+    const diagnostics = payload.diagnostics || {};
+    const summary = diagnostics.summary || {};
+    const runtime = diagnostics.runtime || {};
+    const risks = Array.isArray(diagnostics.risks) ? diagnostics.risks : [];
+    const hostContext = diagnostics.host_context_summary || {};
+    const alignment = diagnostics.host_feature_alignment || {};
+    const semanticRecall = diagnostics.semantic_recall_summary || {};
+    const dependencies = diagnostics.dependency_status || {};
+    const counts = diagnostics.agent_asset_counts || {};
+    content.innerHTML = `
+      <section class="ewa-summary-grid">
+        <article><b>${escapeHtml(summary.critical || 0)}</b><span>Critical</span></article>
+        <article><b>${escapeHtml(summary.warning || 0)}</b><span>Warning</span></article>
+        <article><b>${escapeHtml(summary.info || 0)}</b><span>Info</span></article>
+        <article><b>${escapeHtml(summary.total || 0)}</b><span>总风险</span></article>
+      </section>
+      <section class="ewa-section">
+        <div class="ewa-section-head">
+          <h3>运行边界</h3>
+          <p>插件平台、Hook 与只读宿主能力</p>
+        </div>
+        <dl class="ewa-status-list">
+          <div><dt>插件启用</dt><dd>${runtime.enabled ? '是' : '否'}</dd></div>
+          <div><dt>已注册 Hook</dt><dd>${escapeHtml(Object.keys(runtime.registered_hooks || {}).length)}</dd></div>
+          <div><dt>缺失 Hook</dt><dd>${escapeHtml((runtime.missing_hooks || []).join('、') || '无')}</dd></div>
+          <div><dt>重复 Hook</dt><dd>${escapeHtml((runtime.duplicate_hooks || []).join('、') || '无')}</dd></div>
+        </dl>
+      </section>
+      <section class="ewa-section">
+        <div class="ewa-section-head">
+          <h3>数据源状态</h3>
+          <p>外部信息源、向量召回与智能体资产</p>
+        </div>
+        <dl class="ewa-status-list">
+          <div><dt>外部命中</dt><dd>${escapeHtml((hostContext.active_sources || []).join('、') || '无')}</dd></div>
+          <div><dt>外部降级</dt><dd>${escapeHtml((hostContext.degraded_sources || []).join('、') || '无')}</dd></div>
+          <div><dt>向量</dt><dd>${semanticRecall.vector_enabled ? '启用' : '未启用'} · ${escapeHtml(semanticRecall.item_count || 0)} 条</dd></div>
+          <div><dt>向量依赖</dt><dd>${escapeHtml(formatDependencyStatus(dependencies))}</dd></div>
+          <div><dt>Agent资产</dt><dd>Gene ${escapeHtml(counts.genes || 0)} · Capsule ${escapeHtml(counts.capsules || 0)} · Event ${escapeHtml(counts.events || 0)}</dd></div>
+        </dl>
+      </section>
+      <section class="ewa-section">
+        <div class="ewa-section-head">
+          <h3>原生资料适配</h3>
+          <p>Bible、章后同步、故事线、伏笔、时间线、对白、Triples 与 MemoryEngine</p>
+        </div>
+        <dl class="ewa-status-list">
+          ${Object.entries(alignment.native_sources || {}).map(([key, value]) => `<div><dt>${escapeHtml(key)}</dt><dd>${escapeHtml(value)}</dd></div>`).join('') || '<div><dt>状态</dt><dd>暂无摘要</dd></div>'}
+          <div><dt>模式</dt><dd>${escapeHtml(alignment.mode || 'strategy_only')}</dd></div>
+          <div><dt>空源</dt><dd>${escapeHtml((alignment.empty_sources || []).join('、') || '无')}</dd></div>
+          <div><dt>降级</dt><dd>${escapeHtml((alignment.degraded_sources || []).join('、') || '无')}</dd></div>
+        </dl>
+      </section>
+      <section class="ewa-section ewa-run-section">
+        <div class="ewa-section-head">
+          <h3>风险列表</h3>
+          <p>只读诊断，不会自动修改数据</p>
+        </div>
+        <ol class="ewa-agent-list">
+          ${risks.map((risk) => `
+            <li class="ewa-risk-${escapeAttr(risk.severity || 'info')}">
+              <strong>${escapeHtml(risk.severity || 'info')} · ${escapeHtml(risk.affected_feature || risk.source || '-')}</strong>
+              <span>${escapeHtml(risk.source || '-')}</span>
+              <p>${escapeHtml(risk.message || '')}</p>
+              <p>${escapeHtml(risk.suggestion || '')}</p>
+            </li>
+          `).join('') || '<li><p>暂无风险。</p></li>'}
+        </ol>
+      </section>
+    `;
+  }
+
+  function formatDependencyStatus(status) {
+    const entries = Object.entries(status || {});
+    if (!entries.length) return '-';
+    return entries.map(([key, value]) => `${key}:${value ? 'ok' : '缺失'}`).join(' · ');
+  }
+
   function renderRouteCanvas(nodes, edges, characters, meetings) {
     if (!nodes.length) {
       return '<p class="ewa-empty-inline">暂无路线图数据。提交或重跑章节后会生成。</p>';
@@ -565,147 +841,146 @@
   function renderSettings(drawer, payload) {
     const content = drawer.querySelector('[data-content]');
     const settings = payload.settings?.settings || {};
-    const api2 = settings.api2_control_card || {};
-    const custom = api2.custom_profile || {};
-    const providerMode = api2.provider_mode || 'same_as_main';
+    const agentApi = settings.agent_api || {};
+    const agentCustom = agentApi.custom_profile || {};
+    const agentProviderMode = agentApi.provider_mode || 'same_as_main';
     content.innerHTML = `
-      <section class="ewa-section ewa-settings-section">
+      <section class="ewa-section ewa-settings-section ewa-run-section">
         <div class="ewa-section-head">
-          <h3>API2 控制卡</h3>
-          <p>压缩 Evolution 上下文，减轻正文 API 负担</p>
+          <h3>智能体 API</h3>
+          <p>统一接管上下文控制卡、审查反思和策略固化，可独立于正文 API</p>
         </div>
-        <form class="ewa-settings-form" data-api2-settings-form>
+        <form class="ewa-settings-form" data-agent-settings-form>
           <label class="ewa-switch-row">
-            <input type="checkbox" name="enabled" ${api2.enabled ? 'checked' : ''}>
-            <span>启用 API2 写作控制卡</span>
+            <input type="checkbox" name="enabled" ${agentApi.enabled ? 'checked' : ''}>
+            <span>启用 Evolution 智能体专用 API</span>
           </label>
           <fieldset class="ewa-fieldset">
             <legend>调用方式</legend>
-            <label><input type="radio" name="provider_mode" value="same_as_main" ${providerMode !== 'custom' ? 'checked' : ''}> 与主 API 使用同一配置</label>
-            <label><input type="radio" name="provider_mode" value="custom" ${providerMode === 'custom' ? 'checked' : ''}> 使用 Evolution 自定义 API</label>
+            <label><input type="radio" name="provider_mode" value="same_as_main" ${agentProviderMode !== 'custom' ? 'checked' : ''}> 与主 API 使用同一配置</label>
+            <label><input type="radio" name="provider_mode" value="custom" ${agentProviderMode === 'custom' ? 'checked' : ''}> 使用智能体自定义 API</label>
           </fieldset>
-          <div class="ewa-form-grid" data-api2-custom-fields>
+          <div class="ewa-form-grid" data-agent-custom-fields>
             <label>协议
               <select name="protocol">
-                ${['openai', 'anthropic', 'gemini'].map((item) => `<option value="${item}" ${custom.protocol === item ? 'selected' : ''}>${item}</option>`).join('')}
+                ${['openai', 'anthropic', 'gemini'].map((item) => `<option value="${item}" ${agentCustom.protocol === item ? 'selected' : ''}>${item}</option>`).join('')}
               </select>
             </label>
             <label>Base URL
-              <input name="base_url" value="${escapeAttr(custom.base_url || '')}" placeholder="https://api.example.com/v1">
+              <input name="base_url" value="${escapeAttr(agentCustom.base_url || '')}" placeholder="https://api.example.com/v1">
             </label>
             <div class="ewa-model-field">
               <span>模型名</span>
               <div class="ewa-model-picker">
-                <input name="model" data-api2-model-input list="ewa-api2-model-options" value="${escapeAttr(custom.model || '')}" placeholder="用于压缩控制卡的模型">
-                <button type="button" class="ewa-mini-action" data-fetch-api2-models>获取模型</button>
+                <input name="model" data-agent-model-input list="ewa-agent-model-options" value="${escapeAttr(agentCustom.model || '')}" placeholder="用于智能体反思的模型">
+                <button type="button" class="ewa-mini-action" data-fetch-agent-models>获取模型</button>
               </div>
-              <datalist id="ewa-api2-model-options">
-                ${state.api2Models.map((item) => `<option value="${escapeAttr(item.id || item.name || item)}"></option>`).join('')}
+              <datalist id="ewa-agent-model-options">
+                ${state.agentModels.map((item) => `<option value="${escapeAttr(item.id || item.name || item)}"></option>`).join('')}
               </datalist>
-              <select data-api2-model-select>
+              <select data-agent-model-select>
                 <option value="">选择已获取模型</option>
-                ${state.api2Models.map((item) => {
+                ${state.agentModels.map((item) => {
                   const modelId = item.id || item.name || item;
-                  return `<option value="${escapeAttr(modelId)}" ${modelId === custom.model ? 'selected' : ''}>${escapeHtml(modelId)}</option>`;
+                  return `<option value="${escapeAttr(modelId)}" ${modelId === agentCustom.model ? 'selected' : ''}>${escapeHtml(modelId)}</option>`;
                 }).join('')}
               </select>
             </div>
             <label>API Key
-              <input name="api_key" type="password" value="" placeholder="${custom.api_key_configured ? '已保存，留空则继续使用' : '输入自定义 API Key'}">
+              <input name="api_key" type="password" value="" placeholder="${agentCustom.api_key_configured ? '已保存，留空则继续使用' : '输入智能体 API Key'}">
             </label>
             <label>温度
-              <input name="temperature" type="number" min="0" max="2" step="0.1" value="${escapeAttr(custom.temperature ?? api2.temperature ?? 0.2)}">
+              <input name="temperature" type="number" min="0" max="2" step="0.1" value="${escapeAttr(agentCustom.temperature ?? agentApi.temperature ?? 0.1)}">
             </label>
             <label>最大输出 Token
-              <input name="max_tokens" type="number" min="256" max="4096" step="1" value="${escapeAttr(custom.max_tokens ?? api2.max_tokens ?? 1400)}">
+              <input name="max_tokens" type="number" min="128" max="2048" step="1" value="${escapeAttr(agentCustom.max_tokens ?? agentApi.max_tokens ?? 800)}">
             </label>
             <label>超时秒数
-              <input name="timeout_seconds" type="number" min="10" max="900" step="10" value="${escapeAttr(custom.timeout_seconds ?? 180)}">
+              <input name="timeout_seconds" type="number" min="10" max="900" step="10" value="${escapeAttr(agentCustom.timeout_seconds ?? 180)}">
             </label>
           </div>
           <div class="ewa-action-row">
-            <button type="submit" class="ewa-mini-action">保存设置</button>
-            <button type="button" class="ewa-mini-action" data-test-api2-connection>测试连接</button>
-            <span class="ewa-import-message" data-settings-message>${escapeHtml(state.settingsMessage || '')}</span>
-            <span class="ewa-import-message" data-model-fetch-message>${escapeHtml(state.modelFetchMessage || '')}</span>
+            <button type="submit" class="ewa-mini-action">保存智能体 API</button>
+            <button type="button" class="ewa-mini-action" data-test-agent-connection>测试连接</button>
+            <span class="ewa-import-message" data-agent-settings-message>${escapeHtml(state.agentSettingsMessage || '')}</span>
+            <span class="ewa-import-message" data-agent-model-fetch-message>${escapeHtml(state.agentModelFetchMessage || '')}</span>
           </div>
         </form>
       </section>
     `;
-    bindSettingsInteractions(content);
+    bindAgentSettingsInteractions(content);
   }
 
-  function bindSettingsInteractions(root) {
-    const form = root.querySelector('[data-api2-settings-form]');
+  function bindAgentSettingsInteractions(root) {
+    const form = root.querySelector('[data-agent-settings-form]');
     if (!form) return;
     const syncCustomVisibility = () => {
       const mode = form.querySelector('input[name="provider_mode"]:checked')?.value || 'same_as_main';
-      form.querySelector('[data-api2-custom-fields]')?.classList.toggle('is-muted', mode !== 'custom');
+      form.querySelector('[data-agent-custom-fields]')?.classList.toggle('is-muted', mode !== 'custom');
     };
     form.querySelectorAll('input[name="provider_mode"]').forEach((item) => item.addEventListener('change', syncCustomVisibility));
     syncCustomVisibility();
-    form.querySelector('[data-api2-model-select]')?.addEventListener('change', (event) => {
+    form.querySelector('[data-agent-model-select]')?.addEventListener('change', (event) => {
       const value = event.currentTarget.value || '';
       if (value && form.elements.model) form.elements.model.value = value;
     });
-    form.querySelector('[data-fetch-api2-models]')?.addEventListener('click', async (event) => {
+    form.querySelector('[data-fetch-agent-models]')?.addEventListener('click', async (event) => {
       const button = event.currentTarget;
-      const message = form.querySelector('[data-model-fetch-message]');
+      const message = form.querySelector('[data-agent-model-fetch-message]');
       button.disabled = true;
       button.textContent = '获取中...';
-      state.modelFetchMessage = '';
+      state.agentModelFetchMessage = '';
       if (message) message.textContent = '';
       try {
-        const response = await fetch('/api/v1/plugins/evolution-world/settings/models', {
+        const response = await fetch('/api/v1/plugins/evolution-world/settings/agent/models', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(buildApi2SettingsPayload(form)),
+          body: JSON.stringify(buildAgentSettingsPayload(form)),
         });
         if (!response.ok) throw new Error(await readErrorDetail(response, `模型拉取失败：${response.status}`));
         const result = await response.json();
-        state.api2Models = Array.isArray(result.items) ? result.items : [];
-        state.modelFetchMessage = state.api2Models.length ? `已获取 ${state.api2Models.length} 个模型。` : '未获取到模型。';
-        const currentModel = form.elements.model?.value || '';
-        updateApi2ModelChoices(form, currentModel);
-        if (message) message.textContent = state.modelFetchMessage;
+        state.agentModels = Array.isArray(result.items) ? result.items : [];
+        state.agentModelFetchMessage = state.agentModels.length ? `已获取 ${state.agentModels.length} 个模型。` : '未获取到模型。';
+        updateModelChoices(form, state.agentModels, form.elements.model?.value || '', '#ewa-agent-model-options', '[data-agent-model-select]');
+        if (message) message.textContent = state.agentModelFetchMessage;
       } catch (error) {
-        state.modelFetchMessage = String(error);
-        if (message) message.textContent = state.modelFetchMessage;
+        state.agentModelFetchMessage = String(error);
+        if (message) message.textContent = state.agentModelFetchMessage;
       } finally {
         button.disabled = false;
         button.textContent = '获取模型';
       }
     });
-    form.querySelector('[data-test-api2-connection]')?.addEventListener('click', async (event) => {
+    form.querySelector('[data-test-agent-connection]')?.addEventListener('click', async (event) => {
       const button = event.currentTarget;
-      const message = form.querySelector('[data-settings-message]');
+      const message = form.querySelector('[data-agent-settings-message]');
       button.disabled = true;
       button.textContent = '测试中...';
-      state.settingsMessage = '';
+      state.agentSettingsMessage = '';
       if (message) message.textContent = '';
       try {
-        const response = await fetch('/api/v1/plugins/evolution-world/settings/test', {
+        const response = await fetch('/api/v1/plugins/evolution-world/settings/agent/test', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(buildApi2SettingsPayload(form)),
+          body: JSON.stringify(buildAgentSettingsPayload(form)),
         });
         if (!response.ok) throw new Error(await readErrorDetail(response, `连接测试失败：${response.status}`));
         const result = await response.json();
         if (!result.ok) throw new Error(result.error || '连接测试失败');
-        state.settingsMessage = `连接成功：${result.model || '当前模型'} · ${result.latency_ms}ms`;
+        state.agentSettingsMessage = `连接成功：${result.model || '当前模型'} · ${result.latency_ms}ms`;
       } catch (error) {
-        state.settingsMessage = String(error);
+        state.agentSettingsMessage = String(error);
       } finally {
         button.disabled = false;
         button.textContent = '测试连接';
-        if (message) message.textContent = state.settingsMessage;
+        if (message) message.textContent = state.agentSettingsMessage;
       }
     });
     form.addEventListener('submit', async (event) => {
       event.preventDefault();
       const button = form.querySelector('button[type="submit"]');
-      const message = form.querySelector('[data-settings-message]');
-      const payload = buildApi2SettingsPayload(form);
+      const message = form.querySelector('[data-agent-settings-message]');
+      const payload = buildAgentSettingsPayload(form);
       button.disabled = true;
       button.textContent = '保存中...';
       try {
@@ -717,36 +992,32 @@
         if (!response.ok) throw new Error(`Settings save failed: ${response.status}`);
         const saved = await response.json();
         state.lastPayload.settings = saved;
-        state.settingsMessage = '已保存。下一次上下文注入生效。';
+        state.agentSettingsMessage = '已保存。下一次上下文控制卡与审查固化生效。';
       } catch (error) {
-        state.settingsMessage = String(error);
+        state.agentSettingsMessage = String(error);
       } finally {
         button.disabled = false;
-        button.textContent = '保存设置';
-        message.textContent = state.settingsMessage;
-        window.setTimeout(() => {
-          state.settingsMessage = '';
-          if (message) message.textContent = '';
-        }, 3200);
+        button.textContent = '保存智能体 API';
+        if (message) message.textContent = state.agentSettingsMessage;
       }
     });
   }
 
-  function buildApi2SettingsPayload(form) {
+  function buildAgentSettingsPayload(form) {
     const mode = form.querySelector('input[name="provider_mode"]:checked')?.value || 'same_as_main';
     return {
-      api2_control_card: {
+      agent_api: {
         enabled: Boolean(form.elements.enabled?.checked),
         provider_mode: mode,
-        temperature: Number(form.elements.temperature?.value || 0.2),
-        max_tokens: Number(form.elements.max_tokens?.value || 1400),
+        temperature: Number(form.elements.temperature?.value || 0.1),
+        max_tokens: Number(form.elements.max_tokens?.value || 800),
         custom_profile: {
           protocol: form.elements.protocol?.value || 'openai',
           base_url: form.elements.base_url?.value || '',
           api_key: form.elements.api_key?.value || '',
           model: form.elements.model?.value || '',
-          temperature: Number(form.elements.temperature?.value || 0.2),
-          max_tokens: Number(form.elements.max_tokens?.value || 1400),
+          temperature: Number(form.elements.temperature?.value || 0.1),
+          max_tokens: Number(form.elements.max_tokens?.value || 800),
           timeout_seconds: Number(form.elements.timeout_seconds?.value || 180),
         },
       },
@@ -754,17 +1025,17 @@
     };
   }
 
-  function updateApi2ModelChoices(form, selectedModel) {
-    const datalist = form.querySelector('#ewa-api2-model-options');
-    const select = form.querySelector('[data-api2-model-select]');
-    const options = state.api2Models
+  function updateModelChoices(form, models, selectedModel, datalistSelector, selectSelector) {
+    const scopedDatalist = form.querySelector(datalistSelector);
+    const scopedSelect = form.querySelector(selectSelector);
+    const options = models
       .map((item) => item.id || item.name || item)
       .filter(Boolean);
-    if (datalist) {
-      datalist.innerHTML = options.map((modelId) => `<option value="${escapeAttr(modelId)}"></option>`).join('');
+    if (scopedDatalist) {
+      scopedDatalist.innerHTML = options.map((modelId) => `<option value="${escapeAttr(modelId)}"></option>`).join('');
     }
-    if (select) {
-      select.innerHTML = `
+    if (scopedSelect) {
+      scopedSelect.innerHTML = `
         <option value="">${options.length ? '选择已获取模型' : '暂无已获取模型'}</option>
         ${options.map((modelId) => `<option value="${escapeAttr(modelId)}" ${modelId === selectedModel ? 'selected' : ''}>${escapeHtml(modelId)}</option>`).join('')}
       `;
@@ -932,7 +1203,7 @@
   }
 
   function escapeHtml(value) {
-    return String(value || '').replace(/[&<>"]/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]));
+    return String(value == null ? '' : value).replace(/[&<>"]/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]));
   }
 
   function escapeAttr(value) {

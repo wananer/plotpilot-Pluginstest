@@ -11,9 +11,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
+import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import time
 from dataclasses import dataclass
@@ -29,10 +32,9 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from plugins.platform.job_registry import PluginJobRegistry
 from plugins.platform.plugin_storage import PluginStorage
+from plugins.loader import collect_manifest_frontend_scripts, collect_manifest_frontend_styles, list_plugin_manifests
 from plugins.world_evolution_core.continuity import analyze_chapter_transitions
 from plugins.world_evolution_core.service import EvolutionWorldAssistantService
-from domain.ai.services.llm_service import GenerationResult
-from domain.ai.value_objects.token_usage import TokenUsage
 
 
 ARTIFACT_ROOT = PROJECT_ROOT / ".omx" / "artifacts"
@@ -152,6 +154,7 @@ class ChapterResult:
     evolution_context_chars: int = 0
     raw_evolution_context_chars: int = 0
     api2_control_card_chars: int = 0
+    agent_control_card_chars: int = 0
     expansion_applied: bool = False
     llm_call_count: int = 0
     llm_input_tokens: int = 0
@@ -175,38 +178,303 @@ class ChapterResult:
         )
 
 
-class PressureTestApi2LLM:
-    """Adapter that lets the Evolution plugin own API2 compression during CLI pressure tests."""
-
-    def __init__(self, *, model: str, timeout: int, budget_usd: str | None, arm: str):
-        self.model = model
-        self.timeout = timeout
-        self.budget_usd = budget_usd
-        self.arm = arm
-        self.current_chapter_number = 0
-        self._calls: list[LLMCallResult] = []
-
-    async def generate(self, prompt, config) -> GenerationResult:
-        prompt_text = f"{getattr(prompt, 'system', '')}\n\n{getattr(prompt, 'user', '')}".strip()
-        call = _run_claude(prompt_text, model=self.model, timeout=self.timeout, budget_usd=self.budget_usd)
-        self._calls.append(call)
-        return GenerationResult(
-            content=call.content,
-            token_usage=TokenUsage(input_tokens=call.input_tokens, output_tokens=call.output_tokens),
-        )
-
-    async def stream_generate(self, prompt, config):
-        result = await self.generate(prompt, config)
-        yield result.content
-
-    def drain_calls(self) -> list[LLMCallResult]:
-        calls = list(self._calls)
-        self._calls.clear()
-        return calls
-
-
 def _now_slug() -> str:
     return datetime.now().strftime("%Y%m%d-%H%M%S")
+
+
+def _run_repo_command(args: list[str], *, timeout: int = 20) -> dict[str, Any]:
+    started = time.perf_counter()
+    try:
+        proc = subprocess.run(
+            args,
+            cwd=str(PROJECT_ROOT),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout,
+            check=False,
+        )
+    except Exception as exc:
+        return {
+            "ok": False,
+            "command": args,
+            "returncode": None,
+            "stdout": "",
+            "stderr": str(exc),
+            "duration_seconds": round(time.perf_counter() - started, 2),
+        }
+    return {
+        "ok": proc.returncode == 0,
+        "command": args,
+        "returncode": proc.returncode,
+        "stdout": proc.stdout,
+        "stderr": proc.stderr,
+        "duration_seconds": round(time.perf_counter() - started, 2),
+    }
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _write_json(path: Path, payload: dict[str, Any]) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    return path
+
+
+def _plugin_manifest_snapshot() -> dict[str, Any]:
+    items = list_plugin_manifests()
+    return {
+        "items": items,
+        "total": len(items),
+        "frontend_scripts": collect_manifest_frontend_scripts(items),
+        "frontend_styles": collect_manifest_frontend_styles(items),
+    }
+
+
+def _embedding_preflight_status() -> dict[str, Any]:
+    env_status = {
+        "vector_store_enabled": os.getenv("VECTOR_STORE_ENABLED", "true").lower() == "true",
+        "embedding_service_env": (os.getenv("EMBEDDING_SERVICE") or "").strip(),
+        "embedding_model_env_configured": bool((os.getenv("EMBEDDING_MODEL") or "").strip()),
+        "embedding_model_path_env_configured": bool(
+            (os.getenv("EMBEDDING_MODEL_PATH") or os.getenv("LOCAL_EMBEDDING_MODEL_PATH") or "").strip()
+        ),
+        "embedding_api_key_env_configured": bool((os.getenv("EMBEDDING_API_KEY") or os.getenv("OPENAI_API_KEY") or "").strip()),
+    }
+    db_status: dict[str, Any] = {"available": False}
+    try:
+        from application.paths import get_db_path
+
+        db_path = Path(get_db_path())
+        db_status["path"] = str(db_path)
+        if db_path.exists():
+            with sqlite3.connect(str(db_path)) as conn:
+                table = conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='embedding_config' LIMIT 1"
+                ).fetchone()
+                if table:
+                    row = conn.execute(
+                        "SELECT mode, api_key, base_url, model, model_path, use_gpu FROM embedding_config WHERE id = ? LIMIT 1",
+                        ("default",),
+                    ).fetchone()
+                    if row:
+                        db_status.update(
+                            {
+                                "available": True,
+                                "mode": row[0] or "",
+                                "api_key_configured": bool(row[1]),
+                                "base_url_configured": bool(row[2]),
+                                "model_configured": bool(row[3]),
+                                "model_path_configured": bool(row[4]),
+                                "use_gpu": bool(row[5]),
+                            }
+                        )
+                    else:
+                        db_status.update({"available": True, "row_present": False})
+                else:
+                    db_status.update({"available": False, "reason": "embedding_config_table_missing"})
+        else:
+            db_status.update({"reason": "database_missing"})
+    except Exception as exc:
+        db_status.update({"available": False, "reason": str(exc)})
+
+    configured_model_path = ""
+    try:
+        if db_status.get("available"):
+            from application.paths import get_db_path
+
+            db_path = Path(get_db_path())
+            with sqlite3.connect(str(db_path)) as conn:
+                row = conn.execute("SELECT model_path FROM embedding_config WHERE id = ? LIMIT 1", ("default",)).fetchone()
+                configured_model_path = str(row[0] or "") if row else ""
+    except Exception:
+        configured_model_path = ""
+    configured_model_path = configured_model_path or (
+        os.getenv("EMBEDDING_MODEL_PATH") or os.getenv("LOCAL_EMBEDDING_MODEL_PATH") or ""
+    ).strip()
+    local_path_status = _local_embedding_path_status(configured_model_path)
+
+    mode = str(db_status.get("mode") or env_status["embedding_service_env"] or "openai").lower()
+    if not env_status["vector_store_enabled"]:
+        ready = False
+        degraded_reason = "vector_store_disabled"
+    elif mode == "openai":
+        key_configured = bool(db_status.get("api_key_configured") or env_status["embedding_api_key_env_configured"])
+        model_configured = bool(db_status.get("model_configured") or env_status["embedding_model_env_configured"])
+        ready = key_configured and model_configured
+        degraded_reason = "" if ready else "openai_embedding_key_or_model_missing"
+    else:
+        path_configured = bool(db_status.get("model_path_configured") or env_status["embedding_model_path_env_configured"])
+        ready = path_configured and bool(local_path_status.get("exists"))
+        if ready:
+            degraded_reason = ""
+        elif path_configured:
+            degraded_reason = "local_embedding_model_path_unavailable_or_uncached"
+        else:
+            degraded_reason = "local_embedding_model_path_missing"
+
+    return {
+        "ready": ready,
+        "mode": mode,
+        "degraded_reason": degraded_reason,
+        "env": env_status,
+        "database": db_status,
+        "local_path_status": local_path_status,
+    }
+
+
+def _local_embedding_path_status(model_path: str) -> dict[str, Any]:
+    raw = str(model_path or "").strip()
+    if not raw:
+        return {"configured": False, "exists": False}
+    direct = Path(raw)
+    if not direct.is_absolute():
+        direct = (PROJECT_ROOT / raw).resolve()
+    fallback = (PROJECT_ROOT / ".models" / Path(raw).name).resolve()
+    return {
+        "configured": True,
+        "is_huggingface_id": "/" in raw and not Path(raw).is_absolute(),
+        "direct_exists": direct.exists(),
+        "fallback_exists": fallback.exists(),
+        "exists": direct.exists() or fallback.exists(),
+        "basename": Path(raw).name,
+    }
+
+
+def _build_preflight_snapshot(*, output_dir: Path, args: argparse.Namespace, started_at: str) -> dict[str, Any]:
+    git_status = _run_repo_command(["git", "status", "--short"])
+    git_diff_stat = _run_repo_command(["git", "diff", "--stat"])
+    script_path = Path(__file__).resolve()
+    plugin_control_path = PROJECT_ROOT / "data" / "plugin_platform" / "plugin_controls.json"
+    plugin_controls = {}
+    if plugin_control_path.exists():
+        try:
+            plugin_controls = json.loads(plugin_control_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            plugin_controls = {"error": "plugin_controls.json is not valid JSON"}
+    dirty_entries = [line for line in git_status["stdout"].splitlines() if line.strip()]
+    risks = [
+        {
+            "id": "dirty_worktree",
+            "severity": "warning" if dirty_entries else "info",
+            "status": "present" if dirty_entries else "clear",
+            "evidence": {"changed_entry_count": len(dirty_entries), "sample": dirty_entries[:30]},
+            "mitigation": "实验产物记录 git status/diff stat 和脚本 hash；结论绑定本次代码状态。",
+        },
+        {
+            "id": "plugin_state_drift",
+            "severity": "warning",
+            "status": "tracked",
+            "evidence": {"plugin_controls": plugin_controls},
+            "mitigation": "主实验脚本内对照组不实例化 Evolution service，实验组单独实例化并使用隔离 PluginStorage。",
+        },
+        {
+            "id": "legacy_api2_residue",
+            "severity": "info",
+            "status": "deprecated",
+            "evidence": {"use_api2_control_card": False, "replacement": "agent_api"},
+            "mitigation": "API2 已废弃且不再执行；请使用 Evolution Agent API 作为唯一二号模型入口。",
+        },
+        {
+            "id": "semantic_recall_undercoverage",
+            "severity": "info",
+            "status": "tracked",
+            "evidence": {"note": "脚本化压力测试不依赖宿主向量库；实验组 diagnostics 会记录召回命中情况。"},
+            "mitigation": "如需评估向量收益，另设带世界观/知识库/伏笔索引的专门实验。",
+        },
+        {
+            "id": "model_nondeterminism",
+            "severity": "info",
+            "status": "accepted",
+            "evidence": {"model": args.model, "seed_supported": False},
+            "mitigation": "固定题材、章纲、模型和参数；必要时后续扩展为多轮重复实验。",
+        },
+    ]
+    embedding_status = _embedding_preflight_status()
+    if not embedding_status["ready"]:
+        risks.append(
+            {
+                "id": "embedding_degraded",
+                "severity": "warning",
+                "status": "present",
+                "evidence": embedding_status,
+                "mitigation": "本轮 A/B 可继续，但结论不得声称已验证向量召回收益；配置 embedding key/model 或本地 model_path 后再做向量专项实验。",
+            }
+        )
+    return {
+        "schema_version": 1,
+        "started_at": started_at,
+        "output_dir": str(output_dir),
+        "project_root": str(PROJECT_ROOT),
+        "script": {
+            "path": str(script_path),
+            "sha256": _file_sha256(script_path),
+        },
+        "generation_parameters": {
+            "model": args.model,
+            "target_chars": args.target_chars,
+            "timeout": args.timeout,
+            "budget_usd_configured": bool(args.budget_usd),
+            "use_api2_control_card": False,
+            "agent_api_is_primary": True,
+            "expand_short_chapters": bool(args.expand_short_chapters),
+            "expansion_min_ratio": args.expansion_min_ratio,
+            "reuse_control_dir": str(args.reuse_control_dir or ""),
+        },
+        "git": {
+            "status_short": git_status,
+            "diff_stat": git_diff_stat,
+            "dirty_entry_count": len(dirty_entries),
+        },
+        "plugin_manifest_snapshot": _plugin_manifest_snapshot(),
+        "embedding_status": embedding_status,
+        "risk_register": risks,
+        "validity_rules": [
+            "control_off must have zero Evolution context chars and no agent assets.",
+            "experiment_on must record Evolution context selections or agent events.",
+            "both arms must export exactly 10 chapters.",
+            "generation and scoring usage must be present in llm_usage.json.",
+        ],
+    }
+
+
+def _write_experiment_protocol(output_dir: Path, preflight: dict[str, Any]) -> Path:
+    path = output_dir / "experiment_protocol.md"
+    params = preflight.get("generation_parameters") or {}
+    lines = [
+        "# Evolution A/B 对照实验协议",
+        "",
+        "## 分组",
+        "- Control: Evolution 关闭；不实例化 Evolution service；上下文注入必须为 0。",
+        "- Experiment: Evolution 开启；使用独立 PluginStorage；旧 API2 控制卡不可用，智能体 API 是唯一二号模型入口。",
+        "",
+        "## 固定变量",
+        f"- 模型：{params.get('model')}",
+        f"- 章节数：{EXPERIMENT_SPEC['target_chapters']}",
+        f"- 每章目标字数：{params.get('target_chars')}",
+        f"- 题材：{EXPERIMENT_SPEC['genre']}",
+        "- 两组共用同一 premise、角色、硬性规则和 chapter_outlines。",
+        "",
+        "## 实验产物",
+        "- control_off_export.md / experiment_on_export.md",
+        "- metrics.json / transition_conflicts.json",
+        "- llm_usage.json / scoring_llm_usage.json",
+        "- risk_preflight.json / leakage_acceptance.json / run_manifest.json",
+        "",
+        "## 无效实验条件",
+        "- 对照组出现 Evolution context、agent event、capsule/reflection/gene candidate。",
+        "- 实验组没有任何 Evolution context selection 或 after_commit/agent event。",
+        "- 任一组章节数不足 10，或导出/usage/metrics 缺失。",
+        "- 运行期间更换模型/API 配置但未记录。",
+    ]
+    path.write_text("\n".join(lines), encoding="utf-8")
+    return path
 
 
 def _clean_text(text: str) -> str:
@@ -503,6 +771,35 @@ def _usage_from_calls(calls: list[LLMCallResult]) -> dict[str, Any]:
     return _sum_llm_usage(calls)
 
 
+def _agent_api_usage_from_records(records: list[dict[str, Any]]) -> dict[str, Any]:
+    calls: list[dict[str, Any]] = []
+    for record in records:
+        if not isinstance(record, dict) or record.get("source") != "agent_api":
+            continue
+        usage = record.get("token_usage") if isinstance(record.get("token_usage"), dict) else {}
+        calls.append(
+            {
+                "call_count": 1,
+                "input_tokens": int(usage.get("input_tokens") or 0),
+                "output_tokens": int(usage.get("output_tokens") or 0),
+                "cache_creation_input_tokens": int(usage.get("cache_creation_input_tokens") or 0),
+                "cache_read_input_tokens": int(usage.get("cache_read_input_tokens") or 0),
+                "non_cache_tokens": int(usage.get("input_tokens") or 0) + int(usage.get("output_tokens") or 0),
+                "total_tokens": int(usage.get("total_tokens") or 0)
+                or int(usage.get("input_tokens") or 0)
+                + int(usage.get("output_tokens") or 0)
+                + int(usage.get("cache_creation_input_tokens") or 0)
+                + int(usage.get("cache_read_input_tokens") or 0),
+                "total_cost_usd": 0.0,
+                "duration_seconds": 0.0,
+                "usage_source": "agent_api_token_usage",
+            }
+        )
+    aggregate = _sum_usage_dicts(calls)
+    aggregate["phase"] = "evolution_agent_api"
+    return {"aggregate": aggregate, "calls": records}
+
+
 async def _generate_arm(
     *,
     arm: str,
@@ -512,7 +809,6 @@ async def _generate_arm(
     timeout: int,
     budget_usd: str | None,
     evolution_enabled: bool,
-    use_api2_control_card: bool = False,
     expand_short_chapters: bool = False,
     expansion_min_ratio: float = 0.9,
 ) -> tuple[list[ChapterResult], dict[str, Any]]:
@@ -520,27 +816,14 @@ async def _generate_arm(
     chapters: list[ChapterResult] = []
     evolution_meta: dict[str, Any] = {}
     llm_calls: list[dict[str, Any]] = []
-    api2_cards: list[dict[str, Any]] = []
+    review_records: list[dict[str, Any]] = []
     service: EvolutionWorldAssistantService | None = None
-    api2_llm: PressureTestApi2LLM | None = None
     novel_id = f"pressure-{arm}-{output_dir.name}"
+    evolution_meta["novel_id"] = novel_id
 
     if evolution_enabled:
         storage = PluginStorage(root=output_dir / "plugin_platform")
-        if use_api2_control_card:
-            api2_llm = PressureTestApi2LLM(model=model, timeout=timeout, budget_usd=budget_usd, arm=arm)
-        service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage), api2_llm_service=api2_llm)
-        if use_api2_control_card:
-            service.update_settings(
-                {
-                    "api2_control_card": {
-                        "enabled": True,
-                        "provider_mode": "same_as_main",
-                        "temperature": 0.2,
-                        "max_tokens": 1400,
-                    }
-                }
-            )
+        service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage))
         prehistory = await service.after_novel_created(
             {
                 "novel_id": novel_id,
@@ -565,11 +848,10 @@ async def _generate_arm(
         evolution_context = ""
         raw_evolution_context_chars = 0
         api2_control_card_chars = 0
+        agent_control_card_chars = 0
         chapter_call_results: list[LLMCallResult] = []
         if service is not None:
             context_parts: list[str] = []
-            if api2_llm is not None:
-                api2_llm.current_chapter_number = index
             if index == 1:
                 for block in evolution_meta.get("planning_context", {}).get("context_blocks", []):
                     context_parts.append(f"【{block.get('title')}】\n{block.get('content')}")
@@ -586,32 +868,12 @@ async def _generate_arm(
                 if metadata.get("api2_control_card_enabled"):
                     raw_evolution_context_chars = int(metadata.get("api2_raw_context_chars") or 0)
                     api2_control_card_chars = int(metadata.get("api2_control_card_chars") or 0)
+                if metadata.get("agent_control_card_enabled"):
+                    raw_evolution_context_chars = int(metadata.get("agent_raw_context_chars") or raw_evolution_context_chars or 0)
+                    agent_control_card_chars = int(metadata.get("agent_control_card_chars") or 0)
             evolution_context = "\n\n".join(part for part in context_parts if part.strip())
             if not raw_evolution_context_chars:
                 raw_evolution_context_chars = len(evolution_context)
-            if api2_llm is not None:
-                api2_calls = api2_llm.drain_calls()
-                card_dir = output_dir / "api2_control_cards"
-                if api2_calls and api2_control_card_chars:
-                    card_dir.mkdir(parents=True, exist_ok=True)
-                    card_path = card_dir / f"{arm}_chapter_{index:02d}.md"
-                    card_path.write_text(evolution_context, encoding="utf-8")
-                for card_call in api2_calls:
-                    card_payload = card_call.to_dict()
-                    card_payload.update({"arm": arm, "chapter_number": index, "phase": "api2_control_card"})
-                    llm_calls.append(card_payload)
-                    chapter_call_results.append(card_call)
-                if api2_calls and api2_control_card_chars:
-                    api2_cards.append(
-                        {
-                            "chapter_number": index,
-                            "raw_evolution_context_chars": raw_evolution_context_chars,
-                            "api2_control_card_chars": api2_control_card_chars,
-                            "compression_ratio": round(api2_control_card_chars / max(raw_evolution_context_chars, 1), 4),
-                            "path": str(card_dir / f"{arm}_chapter_{index:02d}.md"),
-                            "usage": api2_calls[-1].to_dict(),
-                        }
-                    )
 
         prompt = _build_generation_prompt(
             arm_label="实验组：Evolution 插件开启" if evolution_enabled else "对照组：Evolution 插件关闭",
@@ -655,7 +917,7 @@ async def _generate_arm(
         print(
             f"[{arm}] chapter {index}/10 done: chars={_chapter_char_count(content)} duration={chapter_usage['duration_seconds']:.1f}s "
             f"evo_context_chars={len(evolution_context)} raw_evo_chars={raw_evolution_context_chars} "
-            f"api2_card_chars={api2_control_card_chars} llm_calls={chapter_usage['call_count']} "
+            f"agent_card_chars={agent_control_card_chars} api2_card_chars={api2_control_card_chars} llm_calls={chapter_usage['call_count']} "
             f"llm_tokens={chapter_usage['total_tokens']} cost=${chapter_usage['total_cost_usd']:.4f}",
             flush=True,
         )
@@ -670,6 +932,7 @@ async def _generate_arm(
                 evolution_context_chars=len(evolution_context),
                 raw_evolution_context_chars=raw_evolution_context_chars,
                 api2_control_card_chars=api2_control_card_chars,
+                agent_control_card_chars=agent_control_card_chars,
                 expansion_applied=expansion_applied,
                 llm_call_count=int(chapter_usage["call_count"]),
                 llm_input_tokens=int(chapter_usage["input_tokens"]),
@@ -691,6 +954,37 @@ async def _generate_arm(
                     "payload": {"content": content},
                 }
             )
+            before_review = service.before_chapter_review(
+                {
+                    "novel_id": novel_id,
+                    "chapter_number": index,
+                    "payload": {"content": content},
+                }
+            )
+            review_result = service.review_chapter(
+                {
+                    "novel_id": novel_id,
+                    "chapter_number": index,
+                    "payload": {"content": content},
+                }
+            )
+            review_payload = review_result.get("data") if isinstance(review_result.get("data"), dict) else review_result
+            after_review = service.after_chapter_review(
+                {
+                    "novel_id": novel_id,
+                    "chapter_number": index,
+                    "source": "evolution_pressure_test",
+                    "payload": {"review_result": review_payload},
+                }
+            )
+            review_records.append(
+                {
+                    "chapter_number": index,
+                    "before_chapter_review": before_review,
+                    "review_chapter": review_result,
+                    "after_chapter_review": after_review,
+                }
+            )
 
     if service is not None:
         evolution_meta["characters"] = service.list_characters(novel_id)
@@ -699,8 +993,16 @@ async def _generate_arm(
         evolution_meta["runs"] = service.list_runs(novel_id, limit=100)
         evolution_meta["chapter_summaries"] = {"items": service.repository.list_chapter_summaries(novel_id, limit=200)}
         evolution_meta["volume_summaries"] = {"items": service.repository.list_volume_summaries(novel_id, limit=20)}
+        evolution_meta["review_records"] = {"items": review_records}
+        evolution_meta["route_map"] = service.get_global_route_map(novel_id)
+        evolution_meta["route_conflicts"] = service.list_route_conflicts(novel_id, limit=200)
+        evolution_meta["agent_status"] = service.get_agent_status(novel_id)
+        evolution_meta["diagnostics"] = service.get_diagnostics(novel_id)
+        control_cards = service.repository.list_context_control_card_records(novel_id, limit=500)
+        evolution_meta["context_control_cards"] = {"items": control_cards}
+        evolution_meta["agent_api_usage"] = _agent_api_usage_from_records(control_cards)
     evolution_meta["llm_calls"] = llm_calls
-    evolution_meta["api2_control_cards"] = api2_cards
+    evolution_meta["api2_control_cards"] = []
     evolution_meta["llm_usage"] = _sum_llm_usage(
         [
             LLMCallResult(
@@ -717,6 +1019,7 @@ async def _generate_arm(
             for item in llm_calls
         ]
     )
+    evolution_meta.setdefault("agent_api_usage", _agent_api_usage_from_records([]))
     return chapters, evolution_meta
 
 
@@ -760,6 +1063,7 @@ def _load_existing_arm(source_dir: Path, output_dir: Path, arm: str) -> tuple[li
                 evolution_context_chars=int(metric.get("evolution_context_chars") or 0),
                 raw_evolution_context_chars=int(metric.get("raw_evolution_context_chars") or 0),
                 api2_control_card_chars=int(metric.get("api2_control_card_chars") or 0),
+                agent_control_card_chars=int(metric.get("agent_control_card_chars") or 0),
                 expansion_applied=bool(metric.get("expansion_applied") or False),
                 llm_call_count=int(call_usage.get("call_count") or metric.get("llm_call_count") or 0),
                 llm_input_tokens=int(call_usage.get("input_tokens") or metric.get("llm_input_tokens") or 0),
@@ -809,6 +1113,7 @@ def _compute_metrics(chapters: list[ChapterResult], evolution_meta: dict[str, An
                 "evolution_context_chars": chapter.evolution_context_chars,
                 "raw_evolution_context_chars": chapter.raw_evolution_context_chars,
                 "api2_control_card_chars": chapter.api2_control_card_chars,
+                "agent_control_card_chars": chapter.agent_control_card_chars,
                 "expansion_applied": chapter.expansion_applied,
                 "llm_call_count": chapter.llm_call_count,
                 "llm_input_tokens": chapter.llm_input_tokens,
@@ -831,6 +1136,7 @@ def _compute_metrics(chapters: list[ChapterResult], evolution_meta: dict[str, An
     total_cost = sum(item["llm_total_cost_usd"] for item in chapter_metrics)
     total_chars = sum(item["char_count"] for item in chapter_metrics)
     repetitive_phrase_total = sum(item["repetitive_phrase_total"] for item in chapter_metrics)
+    agent_api_usage = (evolution_meta.get("agent_api_usage") or {}).get("aggregate") or {}
     return {
         "chapters": chapter_metrics,
         "aggregate": {
@@ -844,6 +1150,7 @@ def _compute_metrics(chapters: list[ChapterResult], evolution_meta: dict[str, An
             "avg_evolution_context_chars": round(sum(item["evolution_context_chars"] for item in chapter_metrics) / max(len(chapter_metrics), 1), 2),
             "avg_raw_evolution_context_chars": round(sum(item["raw_evolution_context_chars"] for item in chapter_metrics) / max(len(chapter_metrics), 1), 2),
             "avg_api2_control_card_chars": round(sum(item["api2_control_card_chars"] for item in chapter_metrics) / max(len(chapter_metrics), 1), 2),
+            "avg_agent_control_card_chars": round(sum(item["agent_control_card_chars"] for item in chapter_metrics) / max(len(chapter_metrics), 1), 2),
             "expansion_applied_count": sum(1 for item in chapter_metrics if item["expansion_applied"]),
             "repetitive_phrase_total": repetitive_phrase_total,
             "repetitive_phrase_per_10k_chars": round(repetitive_phrase_total / max(total_chars, 1) * 10000, 4),
@@ -862,6 +1169,10 @@ def _compute_metrics(chapters: list[ChapterResult], evolution_meta: dict[str, An
             "generation_llm_total_cost_usd": round(total_cost, 6),
             "generation_llm_avg_total_tokens_per_chapter": round(total_tokens / max(total_calls, 1), 2),
             "generation_llm_usage_sources": sorted({item["llm_usage_source"] for item in chapter_metrics if item["llm_usage_source"] != "none"}),
+            "evolution_agent_api_call_count": int(agent_api_usage.get("call_count") or 0),
+            "evolution_agent_api_input_tokens": int(agent_api_usage.get("input_tokens") or 0),
+            "evolution_agent_api_output_tokens": int(agent_api_usage.get("output_tokens") or 0),
+            "evolution_agent_api_total_tokens": int(agent_api_usage.get("total_tokens") or 0),
             "transition_conflict_count": transitions["aggregate"]["conflict_count"],
             "transition_hard_conflict_count": transitions["aggregate"]["hard_conflict_count"],
             "transition_warning_count": transitions["aggregate"]["warning_count"],
@@ -872,6 +1183,105 @@ def _compute_metrics(chapters: list[ChapterResult], evolution_meta: dict[str, An
             "evolution_volume_summary_count": len((evolution_meta.get("volume_summaries") or {}).get("items") or []),
         },
         "transition_analysis": transitions,
+    }
+
+
+def _agent_asset_counts(meta: dict[str, Any]) -> dict[str, int]:
+    status = meta.get("agent_status") if isinstance(meta.get("agent_status"), dict) else {}
+    counts = status.get("asset_counts") if isinstance(status.get("asset_counts"), dict) else {}
+    return {str(key): int(value or 0) for key, value in counts.items()}
+
+
+def _build_leakage_acceptance_report(
+    *,
+    control: list[ChapterResult],
+    control_meta: dict[str, Any],
+    experiment: list[ChapterResult],
+    experiment_meta: dict[str, Any],
+    metrics: dict[str, Any],
+) -> dict[str, Any]:
+    control_context_chars = sum(chapter.evolution_context_chars for chapter in control)
+    control_raw_context_chars = sum(chapter.raw_evolution_context_chars for chapter in control)
+    control_api2_chars = sum(chapter.api2_control_card_chars for chapter in control)
+    control_agent_counts = _agent_asset_counts(control_meta)
+    experiment_context_chars = sum(chapter.evolution_context_chars for chapter in experiment)
+    experiment_agent_counts = _agent_asset_counts(experiment_meta)
+    experiment_review_count = len(((experiment_meta.get("review_records") or {}).get("items") or []))
+    experiment_run_count = len(((experiment_meta.get("runs") or {}).get("items") or []))
+    control_checks = [
+        {
+            "id": "control_has_no_evolution_context",
+            "ok": control_context_chars == 0 and control_raw_context_chars == 0,
+            "evidence": {"evolution_context_chars": control_context_chars, "raw_evolution_context_chars": control_raw_context_chars},
+        },
+        {
+            "id": "control_has_no_api2_control_card",
+            "ok": control_api2_chars == 0,
+            "evidence": {"api2_control_card_chars": control_api2_chars},
+        },
+        {
+            "id": "control_has_no_agent_assets",
+            "ok": not any(control_agent_counts.values()),
+            "evidence": {"agent_asset_counts": control_agent_counts},
+        },
+        {
+            "id": "control_has_ten_chapters",
+            "ok": len(control) == EXPERIMENT_SPEC["target_chapters"],
+            "evidence": {"chapter_count": len(control)},
+        },
+    ]
+    experiment_checks = [
+        {
+            "id": "experiment_has_evolution_context",
+            "ok": experiment_context_chars > 0,
+            "evidence": {"evolution_context_chars": experiment_context_chars},
+        },
+        {
+            "id": "experiment_has_agent_events_or_runs",
+            "ok": int(experiment_agent_counts.get("events") or 0) > 0 or experiment_run_count > 0,
+            "evidence": {"agent_asset_counts": experiment_agent_counts, "run_count": experiment_run_count},
+        },
+        {
+            "id": "experiment_has_review_records",
+            "ok": experiment_review_count >= EXPERIMENT_SPEC["target_chapters"],
+            "evidence": {"review_record_count": experiment_review_count},
+        },
+        {
+            "id": "experiment_has_ten_chapters",
+            "ok": len(experiment) == EXPERIMENT_SPEC["target_chapters"],
+            "evidence": {"chapter_count": len(experiment)},
+        },
+    ]
+    usage_checks = []
+    for arm in ("control_off", "experiment_on"):
+        aggregate = ((metrics.get(arm) or {}).get("aggregate") or {})
+        usage_checks.append(
+            {
+                "id": f"{arm}_has_generation_usage",
+                "ok": int(aggregate.get("generation_llm_call_count") or 0) >= EXPERIMENT_SPEC["target_chapters"],
+                "evidence": {
+                    "generation_llm_call_count": aggregate.get("generation_llm_call_count"),
+                    "generation_llm_total_tokens": aggregate.get("generation_llm_total_tokens"),
+                },
+            }
+        )
+    all_checks = control_checks + experiment_checks + usage_checks
+    valid = all(check["ok"] for check in all_checks)
+    return {
+        "schema_version": 1,
+        "valid_experiment": valid,
+        "invalid_reasons": [check["id"] for check in all_checks if not check["ok"]],
+        "control_checks": control_checks,
+        "experiment_checks": experiment_checks,
+        "usage_checks": usage_checks,
+        "summary": {
+            "control_total_evolution_context_chars": control_context_chars,
+            "experiment_total_evolution_context_chars": experiment_context_chars,
+            "experiment_agent_asset_counts": experiment_agent_counts,
+            "experiment_review_record_count": experiment_review_count,
+            "control_transition_conflicts": ((metrics.get("control_off") or {}).get("aggregate") or {}).get("transition_conflict_count"),
+            "experiment_transition_conflicts": ((metrics.get("experiment_on") or {}).get("aggregate") or {}).get("transition_conflict_count"),
+        },
     }
 
 
@@ -942,12 +1352,12 @@ async def main() -> None:
     parser.add_argument("--timeout", type=int, default=420)
     parser.add_argument("--budget-usd", default=None)
     parser.add_argument("--skip-generation", action="store_true")
-    parser.add_argument("--output-dir", default="")
     parser.add_argument(
-        "--use-api2-control-card",
+        "--preflight-only",
         action="store_true",
-        help="Enable Evolution plugin API2 control-card compression before chapter generation.",
+        help="Write risk/preflight/protocol artifacts without calling generation or scoring models.",
     )
+    parser.add_argument("--output-dir", default="")
     parser.add_argument(
         "--expand-short-chapters",
         action="store_true",
@@ -964,10 +1374,30 @@ async def main() -> None:
     output_dir = Path(args.output_dir) if args.output_dir else ARTIFACT_ROOT / f"evolution-pressure-{_now_slug()}"
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    started_at = datetime.now().isoformat(timespec="seconds")
+    preflight = _build_preflight_snapshot(output_dir=output_dir, args=args, started_at=started_at)
+    preflight_path = _write_json(output_dir / "risk_preflight.json", preflight)
+    protocol_path = _write_experiment_protocol(output_dir, preflight)
+
+    if args.preflight_only:
+        print(
+            json.dumps(
+                {
+                    "ok": True,
+                    "mode": "preflight_only",
+                    "output_dir": str(output_dir),
+                    "risk_preflight": str(preflight_path),
+                    "experiment_protocol": str(protocol_path),
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return
+
     if args.skip_generation:
         raise SystemExit("--skip-generation is reserved for future reuse; generation outputs are required for this run")
 
-    started_at = datetime.now().isoformat(timespec="seconds")
     reused_control_dir = Path(args.reuse_control_dir).expanduser().resolve() if args.reuse_control_dir else None
     if reused_control_dir:
         print(f"[control_off] reusing existing chapters from {reused_control_dir}", flush=True)
@@ -981,7 +1411,6 @@ async def main() -> None:
             timeout=args.timeout,
             budget_usd=args.budget_usd,
             evolution_enabled=False,
-            use_api2_control_card=False,
             expand_short_chapters=False,
         )
     experiment, experiment_evo = await _generate_arm(
@@ -992,7 +1421,6 @@ async def main() -> None:
         timeout=args.timeout,
         budget_usd=args.budget_usd,
         evolution_enabled=True,
-        use_api2_control_card=args.use_api2_control_card,
         expand_short_chapters=args.expand_short_chapters,
         expansion_min_ratio=args.expansion_min_ratio,
     )
@@ -1007,6 +1435,14 @@ async def main() -> None:
     }
     metrics_path = output_dir / "metrics.json"
     metrics_path.write_text(json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8")
+    leakage_acceptance = _build_leakage_acceptance_report(
+        control=control,
+        control_meta=control_evo,
+        experiment=experiment,
+        experiment_meta=experiment_evo,
+        metrics=metrics,
+    )
+    leakage_acceptance_path = _write_json(output_dir / "leakage_acceptance.json", leakage_acceptance)
     transition_path = output_dir / "transition_conflicts.json"
     transition_path.write_text(
         json.dumps(
@@ -1044,11 +1480,16 @@ async def main() -> None:
             "calls": experiment_evo.get("llm_calls") or [],
         },
     }
+    agent_api_usage = {
+        "control_off": control_evo.get("agent_api_usage") or {"aggregate": _sum_usage_dicts([]), "calls": []},
+        "experiment_on": experiment_evo.get("agent_api_usage") or {"aggregate": _sum_usage_dicts([]), "calls": []},
+    }
     llm_usage_path = output_dir / "llm_usage.json"
     llm_usage_path.write_text(
         json.dumps(
             {
                 "generation": generation_usage,
+                "evolution_agent_api": agent_api_usage,
                 "generation_combined": _sum_usage_dicts(
                     [
                         generation_usage["control_off"]["aggregate"],
@@ -1056,10 +1497,27 @@ async def main() -> None:
                     ]
                 ),
                 "scoring": scoring_call.to_dict(),
-                "generation_plus_scoring": _sum_usage_dicts(
+                "phase_split": {
+                    "plotpilot_native_generation": _sum_usage_dicts(
+                        [
+                            generation_usage["control_off"]["aggregate"],
+                            generation_usage["experiment_on"]["aggregate"],
+                        ]
+                    ),
+                    "evolution_agent_api": _sum_usage_dicts(
+                        [
+                            agent_api_usage["control_off"]["aggregate"],
+                            agent_api_usage["experiment_on"]["aggregate"],
+                        ]
+                    ),
+                    "scoring": scoring_call.to_dict(),
+                },
+                "generation_plus_agent_plus_scoring": _sum_usage_dicts(
                     [
                         generation_usage["control_off"]["aggregate"],
                         generation_usage["experiment_on"]["aggregate"],
+                        agent_api_usage["control_off"]["aggregate"],
+                        agent_api_usage["experiment_on"]["aggregate"],
                         scoring_call.to_dict(),
                     ]
                 ),
@@ -1077,14 +1535,24 @@ async def main() -> None:
         "model": args.model,
         "target_chars": args.target_chars,
         "mode": "reuse_control_generate_experiment" if reused_control_dir else "generate_control_and_experiment",
-        "use_api2_control_card": args.use_api2_control_card,
+        "use_api2_control_card": False,
+        "agent_api_is_primary": True,
         "expand_short_chapters": args.expand_short_chapters,
         "expansion_min_ratio": args.expansion_min_ratio,
         "reused_control_dir": str(reused_control_dir) if reused_control_dir else "",
+        "risk_preflight_summary": {
+            "dirty_entry_count": preflight["git"]["dirty_entry_count"],
+            "risk_count": len(preflight["risk_register"]),
+        },
+        "valid_experiment": leakage_acceptance["valid_experiment"],
+        "invalid_reasons": leakage_acceptance["invalid_reasons"],
         "files": {
+            "risk_preflight": str(preflight_path),
+            "experiment_protocol": str(protocol_path),
             "control_export": str(control_export),
             "experiment_export": str(experiment_export),
             "metrics": str(metrics_path),
+            "leakage_acceptance": str(leakage_acceptance_path),
             "transition_conflicts": str(transition_path),
             "criteria": str(criteria_path),
             "evolution_state": str(evo_path),

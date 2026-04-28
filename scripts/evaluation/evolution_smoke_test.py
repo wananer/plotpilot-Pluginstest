@@ -27,12 +27,12 @@ class PaletteStructuredProvider:
     async def extract(self, request: dict[str, Any]) -> dict[str, Any]:
         chapter_number = int(request.get("chapter_number") or 0)
         return {
-            "summary": f"秋明月在第{chapter_number}章完成街头演出，红美玲仍是她的安全锚点。",
+            "summary": f"测试角色甲在第{chapter_number}章完成街头演出，测试角色乙仍是她的安全锚点。",
             "characters": [
                 {
-                    "name": "秋明月",
+                    "name": "测试角色甲",
                     "summary": "在街头舞台短暂恢复自我",
-                    "aliases": ["明月"],
+                    "aliases": ["角色甲"],
                     "locations": ["夜街", "舞台"],
                     "appearance": {
                         "summary": "黑色短发，舞台上常穿宽松外套和磨旧靴子。",
@@ -48,7 +48,7 @@ class PaletteStructuredProvider:
                         "schema_name": "现代校园摇滚",
                         "fields": [
                             {"category": "学校", "name": "校内伪装", "value": "优秀的大小姐"},
-                            {"category": "关系", "name": "核心依赖", "value": "红美玲"},
+                            {"category": "关系", "name": "核心依赖", "value": "测试角色乙"},
                         ],
                     },
                     "personality_palette": {
@@ -66,30 +66,30 @@ class PaletteStructuredProvider:
                             {
                                 "tone": "依赖",
                                 "title": "崩溃时靠近",
-                                "description": "压力过大时会抓住红美玲的衣角寻求依靠。",
+                                "description": "压力过大时会抓住测试角色乙的衣角寻求依靠。",
                                 "visibility": "只在两人或崩溃时显露",
                             },
                         ],
                     },
-                    "known_facts": ["红美玲会在台下等待她"],
+                    "known_facts": ["测试角色乙会在台下等待她"],
                     "unknowns": ["不知道后台机关的真正触发条件"],
                     "misbeliefs": ["误以为临时变奏不会影响队友节奏"],
                     "emotion": "热烈之后带着疲惫",
                     "inner_change": "在掌声里短暂卸下大小姐伪装",
                     "growth_stage": "从独自硬撑转向承认依赖",
-                    "growth_change": "开始允许红美玲看见自己的疲惫",
+                    "growth_change": "开始允许测试角色乙看见自己的疲惫",
                     "capability_limits": ["不能凭空破解后台机关"],
-                    "decision_biases": ["压力过大时会本能靠近红美玲"],
+                    "decision_biases": ["压力过大时会本能靠近测试角色乙"],
                 }
             ],
             "locations": ["夜街", "舞台"],
             "world_events": [
                 {
-                    "summary": f"秋明月在第{chapter_number}章于夜街舞台用吉他solo",
+                    "summary": f"测试角色甲在第{chapter_number}章于夜街舞台用吉他solo",
                     "event_type": "performance",
-                    "characters": ["秋明月"],
+                    "characters": ["测试角色甲"],
                     "locations": ["夜街"],
-                    "known_facts": ["红美玲会在台下等待她"],
+                    "known_facts": ["测试角色乙会在台下等待她"],
                     "unknowns": ["不知道后台机关的真正触发条件"],
                     "capability_limits": ["不能凭空破解后台机关"],
                 }
@@ -311,15 +311,15 @@ async def run_smoke() -> Path:
                         "chapter_number": chapter,
                         "payload": {
                             "content": (
-                                f"《秋明月》第{chapter}次在夜街舞台用吉他solo，红美玲在台下看着她。"
-                                "结尾时秋明月留在舞台边，后台机关仍未解开。"
+                                f"《测试角色甲》第{chapter}次在夜街舞台用吉他solo，测试角色乙在台下看着她。"
+                                "结尾时测试角色甲留在舞台边，后台机关仍未解开。"
                             )
                         },
                     }
                 ),
             )
 
-        card = runner.check("evolution.get_character", lambda: service.get_character(novel_id, "秋明月"))
+        card = runner.check("evolution.get_character", lambda: service.get_character(novel_id, "测试角色甲"))
         assert card is not None
         assert card["appearance"]["summary"].startswith("黑色短发")
         assert card["personality_palette"]["base"] == "叛逆"
@@ -327,7 +327,7 @@ async def run_smoke() -> Path:
         context = runner.check(
             "evolution.before_context_build",
             lambda: service.before_context_build(
-                {"novel_id": novel_id, "chapter_number": 11, "payload": {"outline": "秋明月追查后台机关，红美玲被迫介入。"}}
+                {"novel_id": novel_id, "chapter_number": 11, "payload": {"outline": "测试角色甲追查后台机关，测试角色乙被迫介入。"}}
             ),
         )
         assert context["ok"] is True
@@ -340,7 +340,7 @@ async def run_smoke() -> Path:
                 {
                     "novel_id": novel_id,
                     "chapter_number": 11,
-                    "payload": {"content": "秋明月一眼看穿后台机关的真正触发条件，并独自破解。"},
+                    "payload": {"content": "测试角色甲一眼看穿后台机关的真正触发条件，并独自破解。"},
                 }
             ),
         )
@@ -353,7 +353,7 @@ async def run_smoke() -> Path:
                 {
                     "novel_id": novel_id,
                     "chapter_number": 11,
-                    "payload": {"content": "秋明月一眼看穿后台机关的真正触发条件，并独自破解。"},
+                    "payload": {"content": "测试角色甲一眼看穿后台机关的真正触发条件，并独自破解。"},
                 }
             ),
         )
@@ -400,10 +400,10 @@ async def run_smoke() -> Path:
         runner.check("evolution.list_review_records", lambda: service.list_review_records(novel_id))
         runner.check("evolution.list_snapshots", lambda: service.list_snapshots(novel_id))
         runner.check("evolution.list_characters", lambda: service.list_characters(novel_id))
-        runner.check("evolution.list_character_timeline", lambda: service.list_character_timeline(novel_id, "秋明月"))
-        patch = runner.check("evolution.build_context_patch", lambda: service.build_context_patch(novel_id, 11, outline="秋明月追查后台机关。"))
+        runner.check("evolution.list_character_timeline", lambda: service.list_character_timeline(novel_id, "测试角色甲"))
+        patch = runner.check("evolution.build_context_patch", lambda: service.build_context_patch(novel_id, 11, outline="测试角色甲追查后台机关。"))
         assert patch["blocks"]
-        summary = runner.check("evolution.build_context_summary", lambda: service.build_context_summary(novel_id, 11, outline="秋明月追查后台机关。"))
+        summary = runner.check("evolution.build_context_summary", lambda: service.build_context_summary(novel_id, 11, outline="测试角色甲追查后台机关。"))
         assert "Evolution" in summary or "本章焦点角色" in summary
 
         rebuild = await runner.check_async(
@@ -519,7 +519,7 @@ async def run_smoke() -> Path:
             "evolution.http_rebuild",
             lambda: client.post(
                 "/api/v1/plugins/evolution-world/novels/smoke-http/rebuild",
-                json={"chapters": [{"number": 1, "content": "《秋明月》在夜街舞台演奏。"}]},
+                json={"chapters": [{"number": 1, "content": "《测试角色甲》在夜街舞台演奏。"}]},
             ),
         )
         assert http_rebuild.status_code == 200
@@ -528,15 +528,15 @@ async def run_smoke() -> Path:
             "evolution.http_rerun",
             lambda: client.post(
                 "/api/v1/plugins/evolution-world/novels/smoke-http/chapters/2/rerun",
-                json={"content": "秋明月回到舞台侧门，红美玲提醒她不要硬撑。"},
+                json={"content": "测试角色甲回到舞台侧门，测试角色乙提醒她不要硬撑。"},
             ),
         )
         assert http_rerun.status_code == 200
 
         route_checks = {
             "characters": "/api/v1/plugins/evolution-world/novels/smoke-http/characters",
-            "character": "/api/v1/plugins/evolution-world/novels/smoke-http/characters/秋明月",
-            "character_timeline": "/api/v1/plugins/evolution-world/novels/smoke-http/characters/秋明月/timeline",
+            "character": "/api/v1/plugins/evolution-world/novels/smoke-http/characters/测试角色甲",
+            "character_timeline": "/api/v1/plugins/evolution-world/novels/smoke-http/characters/测试角色甲/timeline",
             "imported_flows": "/api/v1/plugins/evolution-world/novels/smoke-rock-school/imported-flows",
             "runs": "/api/v1/plugins/evolution-world/novels/smoke-http/runs",
             "snapshots": "/api/v1/plugins/evolution-world/novels/smoke-http/snapshots",
@@ -566,7 +566,7 @@ async def run_smoke() -> Path:
             "evolution.http_review_chapter",
             lambda: client.post(
                 "/api/v1/plugins/evolution-world/novels/smoke-http/chapters/3/review",
-                json={"content": "秋明月一眼看穿后台机关并直接解决。"},
+                json={"content": "测试角色甲一眼看穿后台机关并直接解决。"},
             ),
         )
         assert http_review.status_code == 200

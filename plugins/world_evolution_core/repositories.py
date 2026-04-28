@@ -6,6 +6,7 @@ from typing import Any, Optional, Union, Tuple
 
 from plugins.platform.plugin_storage import PluginStorage
 
+from .agent_assets import default_genes, summarize_agent_status
 from .models import ChapterFactSnapshot, CharacterCard
 
 PLUGIN_NAME = "world_evolution_core"
@@ -127,6 +128,20 @@ class EvolutionWorldRepository:
         updates_by_name = {item.get("name"): item for item in (character_updates or []) if item.get("name")}
         updated = []
         for name in snapshot.characters:
+            if not _is_valid_character_entity(name):
+                self.write_character_card(
+                    novel_id,
+                    {
+                        "character_id": _slug(name),
+                        "name": name,
+                        "first_seen_chapter": snapshot.chapter_number,
+                        "last_seen_chapter": snapshot.chapter_number,
+                        "status": "invalid_entity",
+                        "entity_type": "non_person",
+                        "invalid_reason": "filtered_non_character_entity",
+                    },
+                )
+                continue
             current = self.get_character_card(novel_id, name) or CharacterCard(
                 character_id=_slug(name),
                 name=name,
@@ -137,6 +152,7 @@ class EvolutionWorldRepository:
             current["last_seen_chapter"] = max(int(current.get("last_seen_chapter") or 0), snapshot.chapter_number)
             current.setdefault("recent_events", [])
             update = updates_by_name.get(name) or {}
+            _merge_canonical_identity(current, update)
             _merge_character_life_state(current, update, snapshot.chapter_number)
             event_summary = _character_event_summary(name, snapshot)
             if event_summary:
@@ -164,6 +180,20 @@ class EvolutionWorldRepository:
         for fact in self.list_fact_snapshots(novel_id):
             snapshot = _snapshot_from_dict(fact)
             for name in snapshot.characters:
+                if not _is_valid_character_entity(name):
+                    invalid = _ensure_character_defaults(
+                        {
+                            "character_id": _slug(name),
+                            "name": name,
+                            "first_seen_chapter": snapshot.chapter_number,
+                            "last_seen_chapter": snapshot.chapter_number,
+                            "status": "invalid_entity",
+                            "entity_type": "non_person",
+                            "invalid_reason": "filtered_non_character_entity",
+                        }
+                    )
+                    by_name[name] = invalid
+                    continue
                 current = by_name.get(name) or _rebuild_seed_card(existing_by_name.get(name), name, snapshot.chapter_number)
                 current["first_seen_chapter"] = min(
                     int(current.get("first_seen_chapter") or snapshot.chapter_number),
@@ -190,7 +220,7 @@ class EvolutionWorldRepository:
         return next_cards
 
     def write_character_cards(self, novel_id: str, cards: list[dict[str, Any]]) -> None:
-        normalized = [_ensure_character_defaults(dict(card)) for card in cards]
+        normalized = [self._prepare_character_card(dict(card)) for card in cards]
         normalized.sort(key=lambda item: (item.get("first_seen_chapter") or 0, item.get("name") or ""))
         for card in normalized:
             self.write_character_card(novel_id, card)
@@ -210,12 +240,18 @@ class EvolutionWorldRepository:
         return prepared
 
     def list_character_cards(self, novel_id: str) -> dict[str, Any]:
+        return self._list_character_cards(novel_id, include_invalid=False)
+
+    def list_all_character_cards(self, novel_id: str) -> dict[str, Any]:
+        return self._list_character_cards(novel_id, include_invalid=True)
+
+    def _list_character_cards(self, novel_id: str, *, include_invalid: bool) -> dict[str, Any]:
         index = self.list_character_index(novel_id).get("items", [])
         if index:
             items = []
             for entry in index:
                 card = self.get_character_card(novel_id, str(entry.get("character_id") or entry.get("name") or ""))
-                if card:
+                if card and (include_invalid or not _is_invalid_character_entry(card)):
                     items.append(card)
             items.sort(key=lambda item: (item.get("first_seen_chapter") or 0, item.get("name") or ""))
             return {"items": items}
@@ -223,7 +259,13 @@ class EvolutionWorldRepository:
         items = legacy.get("items") if isinstance(legacy, dict) else []
         if isinstance(items, list) and items:
             self.write_character_cards(novel_id, [item for item in items if isinstance(item, dict)])
-            return {"items": [item for item in items if isinstance(item, dict)]}
+            return {
+                "items": [
+                    item
+                    for item in items
+                    if isinstance(item, dict) and (include_invalid or not _is_invalid_character_entry(item))
+                ]
+            }
         return {"items": []}
 
     def list_character_index(self, novel_id: str) -> dict[str, Any]:
@@ -239,6 +281,8 @@ class EvolutionWorldRepository:
         selected: list[dict[str, Any]] = []
         seen: set[str] = set()
         for entry in [*(entry for entry in index if text and _card_is_mentioned(entry, text)), *index[-limit:]]:
+            if _is_invalid_character_entry(entry):
+                continue
             key = str(entry.get("character_id") or entry.get("name") or "")
             if not key or key in seen:
                 continue
@@ -248,7 +292,7 @@ class EvolutionWorldRepository:
         items = []
         for entry in selected:
             card = self.get_character_card(novel_id, str(entry.get("character_id") or entry.get("name") or ""))
-            if card:
+            if card and not _is_invalid_character_entry(card):
                 items.append(card)
         return {"items": items}
 
@@ -480,6 +524,121 @@ class EvolutionWorldRepository:
         }
 
 
+    def list_agent_genes(self, novel_id: str) -> list[dict[str, Any]]:
+        data = self.storage.read_json(
+            PLUGIN_NAME,
+            ["novels", novel_id, "agent", "genes.json"],
+            default=None,
+        )
+        stored = data.get("items") if isinstance(data, dict) else None
+        by_id: dict[str, dict[str, Any]] = {str(gene.get("id") or ""): gene for gene in default_genes() if gene.get("id")}
+        for gene in stored or []:
+            if isinstance(gene, dict) and gene.get("id"):
+                by_id[str(gene["id"])] = gene
+        return sorted(by_id.values(), key=lambda item: (-int(item.get("priority") or 0), str(item.get("id") or "")))
+
+    def save_agent_genes(self, novel_id: str, genes: list[dict[str, Any]]) -> None:
+        self.storage.write_json(
+            PLUGIN_NAME,
+            ["novels", novel_id, "agent", "genes.json"],
+            {"schema_version": 1, "items": [item for item in genes if isinstance(item, dict)]},
+        )
+
+    def list_agent_capsules(self, novel_id: str, limit: int = 80) -> list[dict[str, Any]]:
+        records = self.storage.read_jsonl(PLUGIN_NAME, ["novels", novel_id, "agent", "capsules.jsonl"])
+        by_id: dict[str, dict[str, Any]] = {}
+        for capsule in records:
+            capsule_id = str(capsule.get("id") or "")
+            if capsule_id:
+                by_id[capsule_id] = capsule
+        items = [item for item in by_id.values() if not _is_invalid_capsule(item)]
+        items.sort(key=lambda item: (str(item.get("updated_at") or item.get("created_at") or ""), str(item.get("id") or "")))
+        return items[-limit:] if limit > 0 else items
+
+    def append_agent_capsule(self, novel_id: str, capsule: dict[str, Any]) -> None:
+        self.storage.append_jsonl(PLUGIN_NAME, ["novels", novel_id, "agent", "capsules.jsonl"], capsule)
+
+    def append_agent_reflection(self, novel_id: str, reflection: dict[str, Any]) -> None:
+        self.storage.append_jsonl(PLUGIN_NAME, ["novels", novel_id, "agent", "reflections.jsonl"], reflection)
+
+    def list_agent_reflections(self, novel_id: str, limit: int = 50) -> list[dict[str, Any]]:
+        return self.storage.read_jsonl(PLUGIN_NAME, ["novels", novel_id, "agent", "reflections.jsonl"], limit=limit)
+
+    def append_agent_gene_candidate(self, novel_id: str, candidate: dict[str, Any]) -> None:
+        self.storage.append_jsonl(PLUGIN_NAME, ["novels", novel_id, "agent", "gene_candidates.jsonl"], candidate)
+
+    def list_agent_gene_candidates(self, novel_id: str, limit: int = 50) -> list[dict[str, Any]]:
+        records = self.storage.read_jsonl(PLUGIN_NAME, ["novels", novel_id, "agent", "gene_candidates.jsonl"])
+        by_id: dict[str, dict[str, Any]] = {}
+        for candidate in records:
+            candidate_id = str(candidate.get("id") or "")
+            if candidate_id:
+                by_id[candidate_id] = candidate
+        items = list(by_id.values())
+        items.sort(key=lambda item: (str(item.get("updated_at") or item.get("created_at") or ""), str(item.get("id") or "")))
+        return items[-limit:] if limit > 0 else items
+
+    def save_agent_memory_index(self, novel_id: str, index: dict[str, Any]) -> None:
+        self.storage.write_json(PLUGIN_NAME, ["novels", novel_id, "agent", "memory_index.json"], index)
+
+    def get_agent_memory_index(self, novel_id: str) -> dict[str, Any]:
+        data = self.storage.read_json(PLUGIN_NAME, ["novels", novel_id, "agent", "memory_index.json"], default={})
+        return data if isinstance(data, dict) else {}
+
+    def save_style_repetition_state(self, novel_id: str, state: dict[str, Any]) -> None:
+        self.storage.write_json(PLUGIN_NAME, ["novels", novel_id, "style", "repetition_state.json"], state)
+
+    def get_style_repetition_state(self, novel_id: str) -> dict[str, Any]:
+        data = self.storage.read_json(PLUGIN_NAME, ["novels", novel_id, "style", "repetition_state.json"], default={})
+        return data if isinstance(data, dict) else {}
+
+    def save_host_context_summary(self, novel_id: str, summary: dict[str, Any]) -> None:
+        self.storage.write_json(PLUGIN_NAME, ["novels", novel_id, "agent", "host_context_summary.json"], summary)
+
+    def get_host_context_summary(self, novel_id: str) -> dict[str, Any]:
+        data = self.storage.read_json(PLUGIN_NAME, ["novels", novel_id, "agent", "host_context_summary.json"], default={})
+        return data if isinstance(data, dict) else {}
+
+    def save_semantic_recall_summary(self, novel_id: str, summary: dict[str, Any]) -> None:
+        self.storage.write_json(PLUGIN_NAME, ["novels", novel_id, "agent", "semantic_recall_summary.json"], summary)
+
+    def get_semantic_recall_summary(self, novel_id: str) -> dict[str, Any]:
+        data = self.storage.read_json(PLUGIN_NAME, ["novels", novel_id, "agent", "semantic_recall_summary.json"], default={})
+        return data if isinstance(data, dict) else {}
+
+    def append_agent_event(self, novel_id: str, event: dict[str, Any]) -> None:
+        self.storage.append_jsonl(PLUGIN_NAME, ["novels", novel_id, "agent", "events.jsonl"], event)
+
+    def list_agent_events(self, novel_id: str, limit: int = 80) -> list[dict[str, Any]]:
+        return self.storage.read_jsonl(PLUGIN_NAME, ["novels", novel_id, "agent", "events.jsonl"], limit=limit)
+
+    def append_agent_selection_record(self, novel_id: str, record: dict[str, Any]) -> None:
+        self.storage.append_jsonl(PLUGIN_NAME, ["novels", novel_id, "agent", "selection_records.jsonl"], record)
+
+    def list_agent_selection_records(self, novel_id: str, limit: int = 50) -> list[dict[str, Any]]:
+        return self.storage.read_jsonl(PLUGIN_NAME, ["novels", novel_id, "agent", "selection_records.jsonl"], limit=limit)
+
+    def get_agent_status(self, novel_id: str) -> dict[str, Any]:
+        return summarize_agent_status(
+            genes=self.list_agent_genes(novel_id),
+            capsules=self.list_agent_capsules(novel_id),
+            events=self.list_agent_events(novel_id),
+            selections=self.list_agent_selection_records(novel_id),
+            reflections=self.list_agent_reflections(novel_id),
+            candidates=self.list_agent_gene_candidates(novel_id),
+            memory_index=self.get_agent_memory_index(novel_id),
+            host_context_summary=self.get_host_context_summary(novel_id),
+            semantic_recall_summary=self.get_semantic_recall_summary(novel_id),
+        )
+
+    def save_diagnostics_snapshot(self, novel_id: str, snapshot: dict[str, Any]) -> None:
+        self.storage.write_json(PLUGIN_NAME, ["novels", novel_id, "diagnostics", "latest.json"], snapshot)
+        self.storage.append_jsonl(PLUGIN_NAME, ["novels", novel_id, "diagnostics", "history.jsonl"], snapshot)
+
+    def get_diagnostics_snapshot(self, novel_id: str) -> dict[str, Any]:
+        data = self.storage.read_json(PLUGIN_NAME, ["novels", novel_id, "diagnostics", "latest.json"], default={})
+        return data if isinstance(data, dict) else {}
+
     def save_imported_flows(self, novel_id: str, converted: dict[str, Any]) -> None:
         self.storage.write_json(PLUGIN_NAME, ["novels", novel_id, "imported_flows.json"], converted)
 
@@ -567,6 +726,10 @@ class EvolutionWorldRepository:
         name = str(prepared.get("name") or "").strip()
         prepared["name"] = name
         prepared["character_id"] = str(prepared.get("character_id") or _slug(name))
+        if not _is_valid_character_entity(name) and str(prepared.get("status") or "") != "invalid_entity":
+            prepared["status"] = "invalid_entity"
+            prepared["entity_type"] = "non_person"
+            prepared["invalid_reason"] = "filtered_non_character_entity"
         prepared["recent_events"] = sorted(prepared.get("recent_events") or [], key=lambda item: item.get("chapter_number") or 0)[-8:]
         return prepared
 
@@ -585,6 +748,7 @@ class EvolutionWorldRepository:
 
 
 def _ensure_character_defaults(card: dict[str, Any]) -> dict[str, Any]:
+    card.setdefault("aliases", [])
     card.setdefault("cognitive_state", {"known_facts": [], "unknowns": [], "misbeliefs": []})
     card.setdefault("emotional_arc", [])
     card.setdefault("growth_arc", {"stage": "未定", "changes": []})
@@ -595,6 +759,104 @@ def _ensure_character_defaults(card: dict[str, Any]) -> dict[str, Any]:
     card.setdefault("world_profile", {"schema_name": "通用角色档案", "fields": []})
     card.setdefault("personality_palette", _default_personality_palette())
     return card
+
+
+_NON_CHARACTER_NAMES = {
+    "金属牌",
+    "方向",
+    "查询记录",
+    "记录",
+    "编号",
+    "债务",
+    "契约",
+    "防火门",
+    "黑色书籍",
+    "书籍",
+    "访客卡",
+    "臂章",
+    "钥匙",
+    "黑匣子",
+    "章节标题",
+    "标题",
+    "线索",
+    "真相",
+    "秘密",
+    "记忆",
+    "沉默",
+    "黑塔主线",
+}
+
+_NON_CHARACTER_TOKENS = (
+    "记录",
+    "方向",
+    "信息",
+    "编号",
+    "防火门",
+    "金属",
+    "书籍",
+    "钥匙",
+    "教程",
+    "章节",
+    "标题",
+    "线索",
+    "真相",
+    "秘密",
+    "记忆",
+    "警报",
+)
+
+_NON_CHARACTER_SUFFIXES = ("之谜", "真相", "记录", "线索", "计划", "任务", "报告")
+
+
+def _is_valid_character_entity(name: str) -> bool:
+    value = str(name or "").strip()
+    if not value or value in _NON_CHARACTER_NAMES:
+        return False
+    if any(token in value for token in _NON_CHARACTER_TOKENS):
+        return False
+    if any(value.endswith(suffix) for suffix in _NON_CHARACTER_SUFFIXES):
+        return False
+    if value.startswith("第") and ("章" in value or "幕" in value):
+        return False
+    if 6 < len(value) and not any(token in value for token in ("·", "氏", "家", "队", "团")):
+        return False
+    return True
+
+
+def _is_invalid_character_entry(card: dict[str, Any]) -> bool:
+    return str(card.get("status") or "") == "invalid_entity" or str(card.get("entity_type") or "") == "non_person"
+
+
+def _is_invalid_capsule(capsule: dict[str, Any]) -> bool:
+    issue_type = str(capsule.get("source_issue_type") or "")
+    if not issue_type.startswith("evolution_route_"):
+        return False
+    text = " ".join(
+        [
+            str(capsule.get("summary") or ""),
+            str(capsule.get("guidance") or ""),
+            str(capsule.get("evidence") or ""),
+        ]
+    )
+    return any(fragment in text for fragment in ("个信息站", "但他咬牙站", "老板专门", "道防火门", "老板专门"))
+
+
+def _merge_canonical_identity(card: dict[str, Any], update: dict[str, Any]) -> None:
+    canonical_id = str(update.get("canonical_character_id") or "").strip()
+    if canonical_id:
+        card["canonical_character_id"] = canonical_id
+        if not str(card.get("character_id") or "").strip().startswith("c_"):
+            card["character_id"] = canonical_id
+    for key in ("canonical_source", "profile_source"):
+        value = str(update.get(key) or "").strip()
+        if value:
+            card[key] = value
+    aliases = [str(item).strip() for item in update.get("aliases") or [] if str(item).strip()]
+    if aliases:
+        card["aliases"] = _dedupe_strings([*(card.get("aliases") or []), *aliases])
+    summary = str(update.get("summary") or "").strip()
+    if summary and not str(card.get("summary") or "").strip():
+        card["summary"] = summary[:360]
 
 
 def _rebuild_seed_card(existing: Optional[dict[str, Any]], name: str, chapter_number: int) -> dict[str, Any]:
@@ -816,6 +1078,10 @@ def _character_index_entry(card: dict[str, Any]) -> dict[str, Any]:
         "first_seen_chapter": _int_or_none(card.get("first_seen_chapter")) or 0,
         "last_seen_chapter": _int_or_none(card.get("last_seen_chapter")) or 0,
         "status": str(card.get("status") or "active"),
+        "entity_type": str(card.get("entity_type") or "person"),
+        "invalid_reason": str(card.get("invalid_reason") or ""),
+        "canonical_character_id": str(card.get("canonical_character_id") or ""),
+        "canonical_source": str(card.get("canonical_source") or ""),
         "recent_events": list(card.get("recent_events") or [])[-3:],
     }
 
@@ -823,6 +1089,18 @@ def _character_index_entry(card: dict[str, Any]) -> dict[str, Any]:
 def _card_is_mentioned(card: dict[str, Any], text: str) -> bool:
     names = [card.get("name"), *(card.get("aliases") or [])]
     return any(str(name or "").strip() and str(name).strip() in text for name in names)
+
+
+def _dedupe_strings(items: list[Any]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for item in items:
+        value = str(item or "").strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
+    return result
 
 
 def _record_mentions(record: dict[str, Any], text: str) -> bool:

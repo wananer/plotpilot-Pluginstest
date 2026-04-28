@@ -1,10 +1,20 @@
+import json
+import sqlite3
+import time
+
 import pytest
 
 from domain.ai.services.llm_service import GenerationResult
 from domain.ai.value_objects.token_usage import TokenUsage
+from plugins.world_evolution_core.agent_assets import select_agent_assets
 from plugins.world_evolution_core.continuity import analyze_chapter_transitions
+from plugins.world_evolution_core.extractor import extract_chapter_facts
 from plugins.world_evolution_core import service as evolution_service_module
+from plugins.world_evolution_core.host_context import HostContextReader
 from plugins.world_evolution_core.service import EvolutionWorldAssistantService
+from plugins.world_evolution_core.local_semantic_memory import LocalSemanticMemory
+from plugins.world_evolution_core.structured_extractor import LLMStructuredExtractorProvider
+from plugins.platform.host_database import ReadOnlyHostDatabase
 from plugins.platform.job_registry import PluginJobRegistry
 from plugins.platform.plugin_storage import PluginStorage
 
@@ -25,7 +35,11 @@ class FakeControlCardLLM:
 
 
 class FakeConnectionLLM:
+    def __init__(self):
+        self.calls = []
+
     async def generate(self, prompt, config):
+        self.calls.append({"prompt": prompt, "config": config})
         return GenerationResult(
             content="OK",
             token_usage=TokenUsage(input_tokens=3, output_tokens=1),
@@ -33,6 +47,154 @@ class FakeConnectionLLM:
 
     async def stream_generate(self, prompt, config):
         yield "unused"
+
+
+class FakeSemanticMemory:
+    def __init__(self):
+        self.calls = []
+
+    def search(self, novel_id, query, *, before_chapter=None, limit=8):
+        self.calls.append(
+            {
+                "novel_id": novel_id,
+                "query": query,
+                "before_chapter": before_chapter,
+                "limit": limit,
+            }
+        )
+        return {
+            "source": "local_vector",
+            "vector_enabled": True,
+            "items": [
+                {
+                    "source_type": "triple_vector",
+                    "chapter_number": 1,
+                    "text": "林澈 —持有→ 黑色钥匙；钥匙只能响应黑塔密门",
+                    "score": 0.91,
+                }
+            ],
+        }
+
+
+class SlowHostContextReader:
+    def read(self, *_args, **_kwargs):
+        time.sleep(0.05)
+        return {"source": "too_slow"}
+
+    def summary(self, context):
+        return HostContextReader().summary(context)
+
+
+class SlowSemanticMemory:
+    def search(self, *_args, **_kwargs):
+        time.sleep(0.05)
+        return {"source": "too_slow", "vector_enabled": True, "items": [{"source_type": "slow"}]}
+
+
+class FakeEmbeddingService:
+    def get_dimension(self):
+        return 3
+
+    async def embed(self, text):
+        return [1.0, 0.0, 0.0]
+
+
+class FakeVectorStore:
+    def __init__(self):
+        self.calls = []
+
+    async def search(self, collection, query_vector, limit):
+        self.calls.append({"collection": collection, "query_vector": query_vector, "limit": limit})
+        if collection.endswith("_chunks"):
+            return [
+                {
+                    "score": 0.88,
+                    "payload": {
+                        "kind": "chapter_summary",
+                        "chapter_number": 1,
+                        "text": "上一章林澈把黑色钥匙带进黑塔。",
+                    },
+                }
+            ]
+        if collection.endswith("_triples"):
+            return [
+                {
+                    "score": 0.93,
+                    "payload": {
+                        "triple_id": "t-1",
+                        "subject": "黑色钥匙",
+                        "predicate": "开启",
+                        "object": "黑塔密门",
+                        "text": "黑色钥匙开启黑塔密门",
+                        "chapter_number": 1,
+                    },
+                }
+            ]
+        return []
+
+
+class FakePaletteLLM:
+    def __init__(self):
+        self.calls = []
+
+    async def generate(self, prompt, config):
+        self.calls.append({"prompt": prompt, "config": config})
+        return GenerationResult(
+            content=json.dumps(
+                {
+                    "summary": "测试角色甲拆开旧式门锁。",
+                    "characters": [
+                        {
+                            "name": "测试角色甲",
+                            "summary": "拆开旧式门锁时表现出谨慎和固执。",
+                            "personality_palette": {
+                                "metaphor": "人的性格像调色盘。",
+                                "base": "谨慎",
+                                "main_tones": ["固执"],
+                                "accents": ["好奇"],
+                                "derivatives": [
+                                    {
+                                        "tone": "固执",
+                                        "title": "反复验证",
+                                        "description": "遇到异常门锁时会反复验证，不轻易接受第一结论。",
+                                        "trigger": "线索不闭合时",
+                                    }
+                                ],
+                            },
+                        }
+                    ],
+                    "locations": ["C307"],
+                    "world_events": [{"summary": "测试角色甲拆开C307旧式门锁", "characters": ["测试角色甲"], "locations": ["C307"]}],
+                },
+                ensure_ascii=False,
+            ),
+            token_usage=TokenUsage(input_tokens=80, output_tokens=40),
+        )
+
+    async def stream_generate(self, prompt, config):
+        yield "unused"
+
+
+def test_local_semantic_memory_searches_chunk_and_triple_vectors():
+    vector_store = FakeVectorStore()
+    memory = LocalSemanticMemory(
+        vector_store=vector_store,
+        embedding_service=FakeEmbeddingService(),
+    )
+
+    result = memory.search("novel-semantic", "林澈打开黑塔密门", before_chapter=2, limit=4)
+
+    assert result["source"] == "local_vector"
+    assert result["vector_enabled"] is True
+    assert [call["collection"] for call in vector_store.calls][:2] == [
+        "novel_novel-semantic_chunks",
+        "novel_novel-semantic_triples",
+    ]
+    assert "novel_novel-semantic_world" in [call["collection"] for call in vector_store.calls]
+    assert "novel_novel-semantic_foreshadows" in [call["collection"] for call in vector_store.calls]
+    texts = [item["text"] for item in result["items"]]
+    assert "上一章林澈把黑色钥匙带进黑塔。" in texts
+    assert "黑色钥匙开启黑塔密门" in texts
 
 
 @pytest.mark.asyncio
@@ -80,6 +242,338 @@ async def test_after_commit_writes_facts_characters_and_context_block(tmp_path):
     assert patch["blocks"][2]["kind"] == "focus_character_state"
     assert "上一章小总结" in content
     assert "下一章开头必须承接上一章结尾" in content
+    assert service.repository.list_agent_events("novel-1")[-1]["intent"] == "inject"
+
+
+def test_agent_default_genes_are_available_and_isolated_by_novel(tmp_path):
+    storage = PluginStorage(root=tmp_path)
+    service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage))
+
+    genes_a = service.repository.list_agent_genes("novel-agent-a")
+    genes_b = service.repository.list_agent_genes("novel-agent-b")
+
+    assert {item["id"] for item in genes_a} >= {
+        "gene_chapter_bridge_continuity",
+        "gene_route_conflict_guard",
+        "gene_character_cognition_boundary",
+    }
+    service.repository.append_agent_capsule(
+        "novel-agent-a",
+        {
+            "type": "Capsule",
+            "id": "cap_local_only",
+            "signals": ["route_conflict"],
+            "guidance": "只属于 A 小说。",
+            "updated_at": "2026-04-27T00:00:00+00:00",
+        },
+    )
+    assert genes_b
+    assert service.repository.list_agent_capsules("novel-agent-b") == []
+    assert service.repository.list_agent_capsules("novel-agent-a")[0]["id"] == "cap_local_only"
+
+
+@pytest.mark.asyncio
+async def test_agent_selector_injects_strategy_block_from_signals(tmp_path):
+    storage = PluginStorage(root=tmp_path)
+    service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage))
+
+    await service.after_commit(
+        {
+            "novel_id": "novel-agent-context",
+            "chapter_number": 1,
+            "payload": {"content": "沈砚进入C307，结尾时仍在C307内部观察墙面划痕。"},
+        }
+    )
+    context = service.before_context_build(
+        {
+            "novel_id": "novel-agent-context",
+            "chapter_number": 2,
+            "payload": {"outline": "承接上一章，沈砚继续在C307调查，不要重复进入。"},
+        }
+    )
+
+    assert context["ok"] is True
+    agent_block = next(block for block in context["context_patch"]["blocks"] if block["id"] == "evolution_agent_strategy")
+    assert "章节承接" in agent_block["content"]
+    assert "gene_chapter_bridge_continuity" in agent_block["items"]["selected_gene_ids"]
+    status = service.get_agent_status("novel-agent-context")
+    assert status["asset_counts"]["events"] >= 2
+    assert status["latest_selection"]["selected_gene_ids"]
+
+
+def test_agent_solidifies_review_issues_conservatively_and_dedupes(tmp_path):
+    storage = PluginStorage(root=tmp_path)
+    service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage))
+    issue = {
+        "issue_type": "evolution_character_cognition",
+        "severity": "warning",
+        "description": "林澈不知道钥匙会消耗记忆，但本章直接利用了这个信息。",
+        "suggestion": "补充林澈如何得知或推断钥匙代价。",
+        "evidence": [{"event_id": "evt-1", "summary": "林澈并不知道钥匙会消耗记忆"}],
+    }
+
+    first = service.after_chapter_review(
+        {
+            "novel_id": "novel-agent-solidify",
+            "chapter_number": 2,
+            "payload": {"review_result": {"issues": [issue, {**issue, "severity": "suggestion"}]}},
+        }
+    )
+    second = service.after_chapter_review(
+        {
+            "novel_id": "novel-agent-solidify",
+            "chapter_number": 3,
+            "payload": {"review_result": {"issues": [issue]}},
+        }
+    )
+
+    assert len(first["data"]["solidified_capsules"]) == 1
+    assert len(second["data"]["solidified_capsules"]) == 1
+    capsules = service.repository.list_agent_capsules("novel-agent-solidify")
+    assert len(capsules) == 1
+    assert capsules[0]["success_count"] == 2
+    assert capsules[0]["signals"] == ["review_feedback", "character_cognition", "knowledge_boundary"]
+    assert service.get_agent_status("novel-agent-solidify")["latest_solidified"]
+
+
+def test_agent_evaluates_selected_strategy_after_review(tmp_path):
+    storage = PluginStorage(root=tmp_path)
+    service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage))
+    service.repository.append_agent_selection_record(
+        "novel-agent-eval",
+        {
+            "id": "sel-1",
+            "chapter_number": 2,
+            "selected_gene_ids": ["gene_route_conflict_guard"],
+            "selected_capsule_ids": [],
+        },
+    )
+    issue = {
+        "issue_type": "evolution_route_repeated_arrival",
+        "severity": "warning",
+        "description": "第2章重复进入C307。",
+        "suggestion": "补足离开和再次抵达。",
+        "evidence": [{"current_opening": "沈砚重新进入C307。"}],
+    }
+
+    service.after_chapter_review(
+        {
+            "novel_id": "novel-agent-eval",
+            "chapter_number": 2,
+            "payload": {"review_result": {"issues": [issue]}},
+        }
+    )
+
+    route_gene = next(item for item in service.repository.list_agent_genes("novel-agent-eval") if item["id"] == "gene_route_conflict_guard")
+    assert route_gene["hit_count"] == 1
+    assert route_gene["failure_count"] == 1
+    status = service.get_agent_status("novel-agent-eval")
+    assert any(event["intent"] == "evaluate" for event in status["latest_learning"])
+
+
+def test_agent_gene_positive_measurement_rewards_protection(tmp_path):
+    storage = PluginStorage(root=tmp_path)
+    service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage))
+    service.repository.append_agent_selection_record(
+        "novel-agent-positive",
+        {
+            "id": "sel-positive",
+            "chapter_number": 2,
+            "selected_gene_ids": ["gene_route_conflict_guard"],
+            "selected_capsule_ids": [],
+        },
+    )
+
+    service.after_chapter_review(
+        {
+            "novel_id": "novel-agent-positive",
+            "chapter_number": 2,
+            "payload": {"review_result": {"issues": []}},
+        }
+    )
+
+    route_gene = next(item for item in service.repository.list_agent_genes("novel-agent-positive") if item["id"] == "gene_route_conflict_guard")
+    assert route_gene["hit_count"] == 1
+    assert route_gene["protected_count"] == 1
+    assert route_gene["helpful_count"] == 1
+    assert route_gene["positive_score"] == 3
+    assert "有效保护" in route_gene["last_positive_reason"]
+    event = next(event for event in service.repository.list_agent_events("novel-agent-positive") if event["intent"] == "evaluate")
+    assert event["outcome"]["protected"] == ["gene_route_conflict_guard"]
+    assert event["outcome"]["helpful"] == ["gene_route_conflict_guard"]
+
+
+def test_agent_gene_single_failure_does_not_clear_positive_score(tmp_path):
+    storage = PluginStorage(root=tmp_path)
+    service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage))
+    service.repository.save_agent_genes(
+        "novel-agent-positive-failure",
+        [
+            {
+                "type": "Gene",
+                "id": "gene_route_conflict_guard",
+                "category": "route",
+                "title": "路线冲突守卫",
+                "signals_match": ["route_conflict", "location_jump", "repeat_entry"],
+                "strategy": ["移动必须有路线、时间消耗或明确省略。"],
+                "priority": 90,
+                "positive_score": 9,
+                "protected_count": 2,
+                "helpful_count": 1,
+            }
+        ],
+    )
+    service.repository.append_agent_selection_record(
+        "novel-agent-positive-failure",
+        {
+            "id": "sel-positive-failure",
+            "chapter_number": 2,
+            "selected_gene_ids": ["gene_route_conflict_guard"],
+            "selected_capsule_ids": [],
+        },
+    )
+    issue = {
+        "issue_type": "evolution_route_repeated_arrival",
+        "severity": "warning",
+        "description": "第2章重复进入C307。",
+        "suggestion": "补足离开和再次抵达。",
+        "evidence": [{"current_opening": "沈砚重新进入C307。"}],
+    }
+
+    service.after_chapter_review(
+        {
+            "novel_id": "novel-agent-positive-failure",
+            "chapter_number": 2,
+            "payload": {"review_result": {"issues": [issue]}},
+        }
+    )
+
+    route_gene = next(item for item in service.repository.list_agent_genes("novel-agent-positive-failure") if item["id"] == "gene_route_conflict_guard")
+    assert route_gene["failure_count"] == 1
+    assert route_gene["positive_score"] == 8
+    assert route_gene["protected_count"] == 2
+    assert "仍需增强" in route_gene["last_improvement_advice"]
+
+
+def test_agent_selector_prefers_positive_gene_over_single_failure():
+    genes = [
+        {
+            "id": "gene_a",
+            "title": "A",
+            "signals_match": ["route_conflict"],
+            "strategy": ["A"],
+            "priority": 50,
+            "failure_count": 1,
+            "positive_score": 6,
+            "protected_count": 2,
+            "helpful_count": 1,
+        },
+        {
+            "id": "gene_b",
+            "title": "B",
+            "signals_match": ["route_conflict"],
+            "strategy": ["B"],
+            "priority": 50,
+            "failure_count": 0,
+        },
+    ]
+
+    selection = select_agent_assets(
+        novel_id="novel-agent-selector-positive",
+        chapter_number=3,
+        signals=["route_conflict"],
+        genes=genes,
+        capsules=[],
+        max_genes=1,
+    )
+
+    assert selection["selected_gene_ids"] == ["gene_a"]
+
+
+def test_agent_reflections_and_candidates_are_isolated_by_novel(tmp_path):
+    storage = PluginStorage(root=tmp_path)
+    service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage))
+    service.repository.append_agent_reflection("novel-agent-a", {"id": "ref-a", "problem_pattern": "A"})
+    service.repository.append_agent_gene_candidate("novel-agent-a", {"id": "genc-a", "status": "pending_review"})
+
+    assert service.repository.list_agent_reflections("novel-agent-b") == []
+    assert service.repository.list_agent_gene_candidates("novel-agent-b") == []
+    assert service.repository.list_agent_reflections("novel-agent-a")[0]["id"] == "ref-a"
+    assert service.repository.list_agent_gene_candidates("novel-agent-a")[0]["id"] == "genc-a"
+
+
+def test_agent_review_writes_fallback_reflection_and_memory_index(tmp_path):
+    storage = PluginStorage(root=tmp_path)
+    service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage))
+    issue = {
+        "issue_type": "evolution_character_cognition",
+        "severity": "warning",
+        "description": "林澈不知道钥匙代价，但本章直接利用该信息。",
+        "suggestion": "补充林澈如何得知或推断。",
+        "evidence": [{"event_id": "evt-1", "summary": "林澈不知道钥匙代价"}],
+    }
+
+    result = service.after_chapter_review(
+        {
+            "novel_id": "novel-agent-reflection",
+            "chapter_number": 2,
+            "payload": {"review_result": {"issues": [issue]}},
+        }
+    )
+
+    reflection = result["data"]["reflection"]
+    assert reflection["type"] == "Reflection"
+    assert reflection["source"] == "deterministic_fallback"
+    assert reflection["next_chapter_constraints"]
+    reflections = service.repository.list_agent_reflections("novel-agent-reflection")
+    assert reflections[0]["id"] == reflection["id"]
+    memory_index = service.repository.get_agent_memory_index("novel-agent-reflection")
+    assert memory_index["summary"]["reflections"] == 1
+    status = service.get_agent_status("novel-agent-reflection")
+    assert status["asset_counts"]["reflections"] == 1
+    assert status["memory_layers"]["reflective"] == 1
+
+
+def test_repeated_capsules_generate_pending_gene_candidate(tmp_path):
+    storage = PluginStorage(root=tmp_path)
+    service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage))
+    issue = {
+        "issue_type": "evolution_route_repeated_arrival",
+        "severity": "warning",
+        "description": "第2章重复进入C307。",
+        "suggestion": "下一章必须承接上一章终点，若再次抵达必须补足离开过程。",
+        "evidence": [{"current_opening": "沈砚重新进入C307。"}],
+    }
+
+    service.after_chapter_review(
+        {
+            "novel_id": "novel-agent-candidate",
+            "chapter_number": 2,
+            "payload": {"review_result": {"issues": [issue]}},
+        }
+    )
+    first_candidates = service.repository.list_agent_gene_candidates("novel-agent-candidate")
+    assert first_candidates == []
+
+    result = service.after_chapter_review(
+        {
+            "novel_id": "novel-agent-candidate",
+            "chapter_number": 3,
+            "payload": {"review_result": {"issues": [issue]}},
+        }
+    )
+
+    candidates = service.repository.list_agent_gene_candidates("novel-agent-candidate")
+    assert len(candidates) == 1
+    assert candidates[0]["type"] == "GeneCandidate"
+    assert candidates[0]["status"] == "pending_review"
+    assert "chapter_bridge" in candidates[0]["signals_match"]
+    assert result["data"]["gene_candidates"][0]["id"] == candidates[0]["id"]
+    genes = service.repository.list_agent_genes("novel-agent-candidate")
+    assert all(gene["id"] != candidates[0]["id"] for gene in genes)
+    status = service.get_agent_status("novel-agent-candidate")
+    assert status["asset_counts"]["gene_candidates"] == 1
+    assert status["memory_index_summary"]["gene_candidates"] == 1
 
 
 @pytest.mark.asyncio
@@ -202,6 +696,39 @@ async def test_context_patch_records_capsule_audit(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_context_patch_injects_local_semantic_memory(tmp_path):
+    storage = PluginStorage(root=tmp_path)
+    semantic_memory = FakeSemanticMemory()
+    service = EvolutionWorldAssistantService(
+        storage=storage,
+        jobs=PluginJobRegistry(storage),
+        semantic_memory=semantic_memory,
+    )
+    await service.after_commit(
+        {
+            "novel_id": "novel-local-memory",
+            "chapter_number": 1,
+            "payload": {"content": "《林澈》进入黑塔，拿到黑色钥匙。"},
+        }
+    )
+
+    context = service.before_context_build(
+        {
+            "novel_id": "novel-local-memory",
+            "chapter_number": 2,
+            "payload": {"outline": "林澈用黑色钥匙尝试打开黑塔密门。"},
+        }
+    )
+
+    assert semantic_memory.calls[-1]["before_chapter"] == 2
+    block = next(block for block in context["context_patch"]["blocks"] if block["id"] == "local_semantic_memory")
+    assert block["kind"] == "local_semantic_memory"
+    assert "本地知识库/向量库" in block["content"]
+    assert "钥匙只能响应黑塔密门" in block["content"]
+    assert "本地语义记忆召回" in context["context_blocks"][0]["content"]
+
+
+@pytest.mark.asyncio
 async def test_context_patch_dedupes_stable_protocol_but_keeps_handoff(tmp_path):
     storage = PluginStorage(root=tmp_path)
     service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage))
@@ -275,17 +802,150 @@ async def test_extractor_does_not_include_motion_particles_in_names(tmp_path):
     assert "沈砚" in follow_up["data"]["facts"]["characters"]
     assert "沈砚留" not in follow_up["data"]["facts"]["characters"]
 
+    state_follow_up = await service.after_commit(
+        {
+            "novel_id": "novel-name-particles",
+            "chapter_number": 3,
+            "payload": {
+                "content": "结尾时沈砚仍站在C307门内，陆行舟已经抵达走廊，顾岚却没有说话。"
+            },
+        }
+    )
+    names = state_follow_up["data"]["facts"]["characters"]
+    assert "沈砚" in names
+    assert "陆行舟" in names
+    assert "顾岚" in names
+    assert "沈砚仍" not in names
+    assert "陆行舟已" not in names
+    assert "顾岚却" not in names
+
 
 @pytest.mark.asyncio
-async def test_api2_control_card_setting_compresses_context_inside_evolution(tmp_path):
+async def test_extractor_filters_phrase_and_title_noise_from_character_cards(tmp_path):
+    storage = PluginStorage(root=tmp_path)
+    service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage))
+
+    result = await service.after_commit(
+        {
+            "novel_id": "novel-name-noise",
+            "chapter_number": 1,
+            "payload": {
+                "content": (
+                    "《云海导航基础教程》被压在桌角，旁边写着《文字》两个字。"
+                    "云逸没说话，林晚星知道前哨站的暗号，阿铁点头，顾青崖拦住了门。"
+                    "旁白写道《很聪明》《也知道》《真正想》《说得对》都不是人物。"
+                )
+            },
+        }
+    )
+
+    names = result["data"]["facts"]["characters"]
+    assert set(names) == {"云逸", "林晚星", "阿铁", "顾青崖"}
+    cards = service.list_characters("novel-name-noise")["items"]
+    assert {card["name"] for card in cards} == {"云逸", "林晚星", "阿铁", "顾青崖"}
+
+
+@pytest.mark.asyncio
+async def test_character_pollution_is_marked_but_hidden_from_main_cards(tmp_path):
+    storage = PluginStorage(root=tmp_path)
+    service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage))
+
+    result = await service.after_commit(
+        {
+            "novel_id": "novel-pollution-hidden",
+            "chapter_number": 1,
+            "payload": {"content": "《沈砚》检查金属牌方向，章节标题写着记忆真相。"},
+        }
+    )
+
+    assert "沈砚" in result["data"]["facts"]["characters"]
+    assert "金属牌" not in result["data"]["facts"]["characters"]
+    assert "章节标题" not in result["data"]["facts"]["characters"]
+    service.repository.write_character_card(
+        "novel-pollution-hidden",
+        {"name": "查询记录", "status": "invalid_entity", "entity_type": "non_person", "last_seen_chapter": 1},
+    )
+
+    assert {card["name"] for card in service.list_characters("novel-pollution-hidden")["items"]} == {"沈砚"}
+    all_names = {card["name"] for card in service.repository.list_all_character_cards("novel-pollution-hidden")["items"]}
+    assert "查询记录" in all_names
+
+    diagnostics = service.get_diagnostics("novel-pollution-hidden")
+    pollution_risk = next(item for item in diagnostics["risks"] if item["affected_feature"] == "character_cards")
+    assert pollution_risk["evidence"]["invalid_entities"][0]["name"] == "查询记录"
+
+
+@pytest.mark.asyncio
+async def test_agent_api_control_card_setting_compresses_context_inside_evolution(tmp_path):
     storage = PluginStorage(root=tmp_path)
     fake_llm = FakeControlCardLLM()
     service = EvolutionWorldAssistantService(
         storage=storage,
         jobs=PluginJobRegistry(storage),
-        api2_llm_service=fake_llm,
+        agent_llm_service=fake_llm,
     )
     saved = service.update_settings(
+        {
+            "api2_control_card": {"enabled": True},
+            "agent_api": {
+                "enabled": True,
+                "provider_mode": "custom",
+                "custom_profile": {
+                    "protocol": "openai",
+                    "base_url": "https://api.example.test/v1",
+                    "api_key": "secret",
+                    "model": "agent-model",
+                    "temperature": 0.1,
+                    "max_tokens": 900,
+                },
+            },
+        }
+    )
+
+    assert saved["api2_control_card"]["enabled"] is True
+    assert saved["agent_api"]["enabled"] is True
+    assert saved["agent_api"]["custom_profile"]["api_key"] == ""
+    assert saved["agent_api"]["custom_profile"]["api_key_configured"] is True
+
+    await service.after_commit(
+        {
+            "novel_id": "novel-agent-control-card",
+            "chapter_number": 1,
+            "payload": {"content": "沈砚进入C307，拿起黑匣子。结尾时沈砚仍在C307内部观察墙面划痕。"},
+        }
+    )
+    context = service.before_context_build(
+        {
+            "novel_id": "novel-agent-control-card",
+            "chapter_number": 2,
+            "payload": {"outline": "沈砚继续调查C307内部的划痕。"},
+        }
+    )
+
+    block = context["context_blocks"][0]
+    assert block["title"] == "Evolution 智能体写作控制卡"
+    assert "沈砚已经在C307内部" in block["content"]
+    assert "不要重复进入C307" in block["content"]
+    assert block["metadata"]["api2_control_card_enabled"] is False
+    assert block["metadata"]["agent_control_card_enabled"] is True
+    assert block["metadata"]["agent_provider_mode"] == "custom"
+    assert fake_llm.calls
+    assert "智能体控制卡" in fake_llm.calls[0]["prompt"].user
+    records = service.repository.list_context_control_card_records("novel-agent-control-card")
+    assert records[-1]["provider_mode"] == "custom"
+    assert records[-1]["source"] == "agent_api"
+    assert records[-1]["token_usage"]["total_tokens"] == 168
+
+
+@pytest.mark.asyncio
+async def test_api2_control_card_setting_no_longer_compresses_context(tmp_path):
+    storage = PluginStorage(root=tmp_path)
+    fake_llm = FakeControlCardLLM()
+    service = EvolutionWorldAssistantService(
+        storage=storage,
+        jobs=PluginJobRegistry(storage),
+    )
+    service.update_settings(
         {
             "api2_control_card": {
                 "enabled": True,
@@ -298,13 +958,10 @@ async def test_api2_control_card_setting_compresses_context_inside_evolution(tmp
                     "temperature": 0.1,
                     "max_tokens": 900,
                 },
-            }
+            },
+            "agent_api": {"enabled": False},
         }
     )
-
-    assert saved["api2_control_card"]["enabled"] is True
-    assert saved["api2_control_card"]["custom_profile"]["api_key"] == ""
-    assert saved["api2_control_card"]["custom_profile"]["api_key_configured"] is True
 
     await service.after_commit(
         {
@@ -322,65 +979,16 @@ async def test_api2_control_card_setting_compresses_context_inside_evolution(tmp
     )
 
     block = context["context_blocks"][0]
-    assert block["title"] == "Evolution 写作控制卡"
-    assert "沈砚已经在C307内部" in block["content"]
-    assert "不要重复进入C307" in block["content"]
-    assert block["metadata"]["api2_control_card_enabled"] is True
-    assert block["metadata"]["api2_provider_mode"] == "custom"
-    assert fake_llm.calls
-    assert "只输出控制卡" in fake_llm.calls[0]["prompt"].user
+    assert block["title"] == "Evolution World State"
+    assert block["metadata"]["api2_control_card_enabled"] is False
+    assert block["metadata"]["agent_control_card_enabled"] is False
+    assert not fake_llm.calls
     records = service.repository.list_context_control_card_records("novel-api2")
-    assert records[-1]["provider_mode"] == "custom"
-    assert records[-1]["token_usage"]["total_tokens"] == 168
+    assert records == []
 
 
 @pytest.mark.asyncio
-async def test_api2_model_fetch_uses_saved_custom_key_without_exposing_it(tmp_path, monkeypatch):
-    storage = PluginStorage(root=tmp_path)
-    service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage))
-    service.update_settings(
-        {
-            "api2_control_card": {
-                "provider_mode": "custom",
-                "custom_profile": {
-                    "protocol": "openai",
-                    "base_url": "https://api.example.test/v1",
-                    "api_key": "stored-secret",
-                },
-            }
-        }
-    )
-    calls = []
-
-    async def fake_fetch_model_items(request):
-        calls.append(request)
-        return [
-            {"id": "model-a", "name": "model-a", "owned_by": "gateway"},
-            {"id": "model-b", "name": "model-b", "owned_by": "gateway"},
-        ]
-
-    monkeypatch.setattr(evolution_service_module, "_fetch_api2_model_items", fake_fetch_model_items)
-
-    result = await service.fetch_api2_models(
-        {
-            "provider_mode": "custom",
-            "custom_profile": {
-                "protocol": "openai",
-                "base_url": "https://api.example.test/v1",
-                "api_key": "",
-            },
-        }
-    )
-
-    assert result["ok"] is True
-    assert result["count"] == 2
-    assert [item["id"] for item in result["items"]] == ["model-a", "model-b"]
-    assert calls[0]["api_key"] == "stored-secret"
-    assert "stored-secret" not in str(result)
-
-
-@pytest.mark.asyncio
-async def test_api2_model_fetch_uses_current_form_values(tmp_path, monkeypatch):
+async def test_legacy_api2_model_fetch_is_deprecated_and_does_not_call_provider(tmp_path, monkeypatch):
     storage = PluginStorage(root=tmp_path)
     service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage))
     service.update_settings(
@@ -395,13 +1003,11 @@ async def test_api2_model_fetch_uses_current_form_values(tmp_path, monkeypatch):
             }
         }
     )
-    calls = []
 
     async def fake_fetch_model_items(request):
-        calls.append(request)
-        return [{"id": "deepseek-chat", "name": "deepseek-chat", "owned_by": "deepseek"}]
+        raise AssertionError("legacy API2 must not fetch models")
 
-    monkeypatch.setattr(evolution_service_module, "_fetch_api2_model_items", fake_fetch_model_items)
+    monkeypatch.setattr(evolution_service_module, "_fetch_model_list_items", fake_fetch_model_items)
 
     result = await service.fetch_api2_models(
         {
@@ -418,22 +1024,18 @@ async def test_api2_model_fetch_uses_current_form_values(tmp_path, monkeypatch):
         }
     )
 
-    assert result["ok"] is True
-    assert calls[0]["api_key"] == "typed-secret"
-    assert calls[0]["base_url"] == "https://api.deepseek.com/v1"
-    assert calls[0]["timeout_ms"] == 60000
+    assert result["ok"] is False
+    assert result["deprecated"] is True
+    assert result["replacement"] == "agent_api"
+    assert result["items"] == []
     assert "stored-secret" not in str(result)
     assert "typed-secret" not in str(result)
 
 
 @pytest.mark.asyncio
-async def test_api2_connection_test_uses_current_form_values(tmp_path):
+async def test_legacy_api2_connection_test_is_deprecated_and_does_not_call_llm(tmp_path):
     storage = PluginStorage(root=tmp_path)
-    service = EvolutionWorldAssistantService(
-        storage=storage,
-        jobs=PluginJobRegistry(storage),
-        api2_llm_service=FakeConnectionLLM(),
-    )
+    service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage))
 
     result = await service.test_api2_connection(
         {
@@ -449,9 +1051,9 @@ async def test_api2_connection_test_uses_current_form_values(tmp_path):
         }
     )
 
-    assert result["ok"] is True
-    assert result["model"] == "deepseek-test-model"
-    assert result["preview"] == "OK"
+    assert result["ok"] is False
+    assert result["deprecated"] is True
+    assert result["replacement"] == "agent_api"
     assert "typed-secret" not in str(result)
 
 
@@ -479,6 +1081,208 @@ def test_api2_settings_preserves_custom_key_when_update_leaves_key_blank(tmp_pat
     raw = service.get_settings(safe=False)
     assert raw["api2_control_card"]["custom_profile"]["api_key"] == "first-key"
     assert raw["api2_control_card"]["custom_profile"]["model"] == "api2-model-2"
+
+
+@pytest.mark.asyncio
+async def test_agent_api_connection_test_uses_separate_service_and_current_values(tmp_path):
+    storage = PluginStorage(root=tmp_path)
+    agent_llm = FakeConnectionLLM()
+    service = EvolutionWorldAssistantService(
+        storage=storage,
+        jobs=PluginJobRegistry(storage),
+        agent_llm_service=agent_llm,
+    )
+
+    result = await service.test_agent_connection(
+        {
+            "agent_api": {
+                "provider_mode": "custom",
+                "custom_profile": {
+                    "protocol": "openai",
+                    "base_url": "https://api.agent.example/v1",
+                    "api_key": "agent-secret",
+                    "model": "agent-reflection-model",
+                },
+            }
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["model"] == "agent-reflection-model"
+    assert result["preview"] == "OK"
+    assert agent_llm.calls
+    assert "agent-secret" not in str(result)
+
+
+def test_agent_api_settings_preserves_custom_key_and_redacts(tmp_path):
+    storage = PluginStorage(root=tmp_path)
+    service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage))
+    service.update_settings(
+        {
+            "agent_api": {
+                "provider_mode": "custom",
+                "custom_profile": {"api_key": "agent-key", "model": "agent-model"},
+            }
+        }
+    )
+    service.update_settings(
+        {
+            "agent_api": {
+                "enabled": True,
+                "provider_mode": "custom",
+                "custom_profile": {"api_key": "", "model": "agent-model-2"},
+            }
+        }
+    )
+
+    raw = service.get_settings(safe=False)
+    safe = service.get_settings(safe=True)
+    assert raw["agent_api"]["custom_profile"]["api_key"] == "agent-key"
+    assert raw["agent_api"]["custom_profile"]["model"] == "agent-model-2"
+    assert safe["agent_api"]["custom_profile"]["api_key"] == ""
+    assert safe["agent_api"]["custom_profile"]["api_key_configured"] is True
+
+
+def test_agent_api_reflection_runs_after_solidifying_capsules(tmp_path):
+    storage = PluginStorage(root=tmp_path)
+    agent_llm = FakeConnectionLLM()
+    service = EvolutionWorldAssistantService(
+        storage=storage,
+        jobs=PluginJobRegistry(storage),
+        agent_llm_service=agent_llm,
+    )
+    service.update_settings(
+        {
+            "agent_api": {
+                "enabled": True,
+                "provider_mode": "custom",
+                "custom_profile": {"api_key": "agent-key", "model": "agent-model"},
+            }
+        }
+    )
+    issue = {
+        "issue_type": "evolution_character_cognition",
+        "severity": "warning",
+        "description": "林澈不知道钥匙代价，但本章直接利用该信息。",
+        "suggestion": "补充林澈如何得知或推断。",
+        "evidence": [{"event_id": "evt-1", "summary": "林澈不知道钥匙代价"}],
+    }
+
+    result = service.after_chapter_review(
+        {
+            "novel_id": "novel-agent-api",
+            "chapter_number": 2,
+            "payload": {"review_result": {"issues": [issue]}},
+        }
+    )
+
+    assert result["data"]["agent_api_reflection"]["ok"] is True
+    assert result["data"]["agent_api_reflection"]["model"] == "agent-model"
+    assert result["data"]["reflection"]["source"] == "agent_api"
+    assert service.repository.list_agent_reflections("novel-agent-api")[0]["id"] == result["data"]["reflection"]["id"]
+    assert agent_llm.calls
+    assert "智能体的反思器" in agent_llm.calls[-1]["prompt"].system
+    assert any(event.get("intent") == "reflect" for event in service.repository.list_agent_events("novel-agent-api"))
+
+
+@pytest.mark.asyncio
+async def test_boundary_state_issue_solidifies_capsule(tmp_path):
+    storage = PluginStorage(root=tmp_path)
+    service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage))
+    await service.after_commit(
+        {
+            "novel_id": "novel-boundary",
+            "chapter_number": 1,
+            "payload": {"content": "《沈砚》进入C307。结尾时沈砚仍在C307，门外警报响起。"},
+        }
+    )
+
+    review = service.review_chapter(
+        {
+            "novel_id": "novel-boundary",
+            "chapter_number": 2,
+            "payload": {"content": "沈砚第一次找到C307，重新进入房间。"},
+        }
+    )
+    assert any(item["issue_type"] == "evolution_boundary_state" for item in review["data"]["issues"])
+
+    service.after_chapter_review(
+        {
+            "novel_id": "novel-boundary",
+            "chapter_number": 2,
+            "payload": {"review_result": {"issues": review["data"]["issues"]}},
+        }
+    )
+    capsules = service.repository.list_agent_capsules("novel-boundary")
+    assert any(capsule["category"] == "continuity" for capsule in capsules)
+
+
+def test_route_missing_transition_issue_solidifies_capsule(tmp_path):
+    storage = PluginStorage(root=tmp_path)
+    service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage))
+    service.repository.save_story_graph_chapter(
+        "novel-missing-transition",
+        2,
+        {
+            "schema_version": 1,
+            "novel_id": "novel-missing-transition",
+            "chapter_number": 2,
+            "entities": [],
+            "locations": [],
+            "events": [],
+            "route_edges": [],
+            "conflicts": [
+                {
+                    "type": "location_jump_without_bridge",
+                    "severity": "warning",
+                    "character": "沈砚",
+                    "chapter_previous": 1,
+                    "chapter_current": 2,
+                    "previous_location": "C307",
+                    "current_location": "档案馆",
+                    "message": "沈砚上一记录在C307，本章开头已在档案馆，缺少转场/移动桥段。",
+                    "evidence": "沈砚来到档案馆。",
+                }
+            ],
+            "vectors": [],
+        },
+    )
+
+    review = service.review_chapter(
+        {
+            "novel_id": "novel-missing-transition",
+            "chapter_number": 2,
+            "payload": {"content": "沈砚来到档案馆。"},
+        }
+    )
+
+    issues = review["data"]["issues"]
+    assert any(item["issue_type"] == "evolution_route_missing_transition" for item in issues)
+    service.after_chapter_review(
+        {
+            "novel_id": "novel-missing-transition",
+            "chapter_number": 2,
+            "payload": {"review_result": {"issues": issues}},
+        }
+    )
+    capsules = service.repository.list_agent_capsules("novel-missing-transition")
+    assert any("route_conflict" in capsule.get("signals", []) for capsule in capsules)
+
+
+def test_extractor_filters_non_characters_and_bad_location_fragments():
+    snapshot = extract_chapter_facts(
+        "novel-clean",
+        1,
+        "hash",
+        "金属牌说方向，查询记录显示但他咬牙站。沈砚进入信息站，随后穿过道防火门。",
+        "now",
+    )
+
+    assert "金属牌" not in snapshot.characters
+    assert "方向" not in snapshot.characters
+    assert "查询记录" not in snapshot.characters
+    assert "但他咬牙站" not in snapshot.locations
+    assert "道防火门" not in snapshot.locations
 
 
 @pytest.mark.asyncio
@@ -620,10 +1424,10 @@ class PaletteStructuredProvider:
         assert "world_profile" in character_schema
         assert "personality_palette" in character_schema
         return {
-            "summary": "秋明月在夜色里用吉他solo，红美玲在台下看着她。",
+            "summary": "测试角色甲在夜色里用吉他solo，测试角色乙在台下看着她。",
             "characters": [
                 {
-                    "name": "秋明月",
+                    "name": "测试角色甲",
                     "summary": "在街头舞台短暂恢复自我",
                     "appearance": {
                         "summary": "黑色短发，舞台上常穿宽松外套和磨旧靴子。",
@@ -639,7 +1443,7 @@ class PaletteStructuredProvider:
                         "schema_name": "现代校园摇滚",
                         "fields": [
                             {"category": "学校", "name": "校内伪装", "value": "优秀的大小姐"},
-                            {"category": "关系", "name": "核心依赖", "value": "红美玲"},
+                            {"category": "关系", "name": "核心依赖", "value": "测试角色乙"},
                         ],
                     },
                     "personality_palette": {
@@ -657,7 +1461,7 @@ class PaletteStructuredProvider:
                             {
                                 "tone": "依赖",
                                 "title": "崩溃时靠近",
-                                "description": "压力过大时会抓住红美玲的衣角寻求依靠。",
+                                "description": "压力过大时会抓住测试角色乙的衣角寻求依靠。",
                                 "visibility": "只在两人或崩溃时显露",
                             },
                         ],
@@ -665,8 +1469,554 @@ class PaletteStructuredProvider:
                 }
             ],
             "locations": ["夜街", "舞台"],
-            "world_events": [{"summary": "秋明月在夜街舞台用吉他solo", "characters": ["秋明月"], "locations": ["夜街"]}],
+            "world_events": [{"summary": "测试角色甲在夜街舞台用吉他solo", "characters": ["测试角色甲"], "locations": ["夜街"]}],
         }
+
+
+class NoisyCharacterStructuredProvider:
+    async def extract(self, request):
+        return {
+            "summary": "林渊、沈雨和小诺在C307整理资料。",
+            "characters": [
+                {"name": "林渊", "summary": "翻开旧教程"},
+                {"name": "沈雨", "summary": "记录设备读数"},
+                {"name": "小诺", "summary": "检查门禁"},
+                {"name": "云海导航基础教程", "summary": "误判成角色的书名"},
+                {"name": "很聪明", "summary": "误判成角色的短语"},
+            ],
+            "locations": ["C307"],
+            "world_events": [
+                {
+                    "summary": "小诺检查C307门禁",
+                    "characters": ["小诺", "很聪明"],
+                    "locations": ["C307"],
+                }
+            ],
+        }
+
+
+def _make_host_character_db(path):
+    conn = sqlite3.connect(path)
+    conn.execute(
+        """
+        CREATE TABLE bible_characters (
+            id TEXT PRIMARY KEY,
+            novel_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            mental_state TEXT DEFAULT 'NORMAL',
+            verbal_tic TEXT DEFAULT '',
+            idle_behavior TEXT DEFAULT ''
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE cast_snapshots (
+            novel_id TEXT PRIMARY KEY,
+            data TEXT NOT NULL,
+            version INTEGER DEFAULT 1
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE triples (
+            id TEXT PRIMARY KEY,
+            novel_id TEXT NOT NULL,
+            subject TEXT NOT NULL,
+            predicate TEXT NOT NULL,
+            object TEXT NOT NULL,
+            entity_type TEXT,
+            description TEXT,
+            confidence REAL,
+            subject_entity_id TEXT,
+            object_entity_id TEXT,
+            updated_at TEXT
+        )
+        """
+    )
+    for character_id, name, description in [
+        ("char-linyuan", "林渊", "主角，擅长分析异常数据。"),
+        ("char-shenyu", "沈雨", "工程师，负责记录设备读数。"),
+        ("char-anuo", "阿诺", "安保机器人维护员。"),
+    ]:
+        conn.execute(
+            "INSERT INTO bible_characters (id, novel_id, name, description) VALUES (?, ?, ?, ?)",
+            (character_id, "novel-canonical", name, description),
+        )
+    conn.execute(
+        "INSERT INTO cast_snapshots (novel_id, data) VALUES (?, ?)",
+        (
+            "novel-canonical",
+            json.dumps(
+                {
+                    "characters": [
+                        {
+                            "id": "char-anuo",
+                            "name": "阿诺",
+                            "aliases": ["小诺"],
+                            "role": "维护员",
+                        }
+                    ]
+                },
+                ensure_ascii=False,
+            ),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def _make_host_context_db(path):
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        """
+        CREATE TABLE bible_world_settings (
+            id TEXT PRIMARY KEY, novel_id TEXT, name TEXT, description TEXT, setting_type TEXT, updated_at TEXT
+        );
+        CREATE TABLE bible_characters (
+            id TEXT PRIMARY KEY, novel_id TEXT, name TEXT, description TEXT,
+            mental_state TEXT DEFAULT '', verbal_tic TEXT DEFAULT '', idle_behavior TEXT DEFAULT ''
+        );
+        CREATE TABLE bible_locations (
+            id TEXT PRIMARY KEY, novel_id TEXT, name TEXT, description TEXT, location_type TEXT, parent_id TEXT, updated_at TEXT
+        );
+        CREATE TABLE bible_timeline_notes (
+            id TEXT PRIMARY KEY, novel_id TEXT, event TEXT, time_point TEXT, description TEXT, sort_order INTEGER
+        );
+        CREATE TABLE knowledge (
+            id TEXT PRIMARY KEY, novel_id TEXT, version INTEGER, premise_lock TEXT
+        );
+        CREATE TABLE chapter_summaries (
+            id TEXT PRIMARY KEY, knowledge_id TEXT, chapter_number INTEGER, summary TEXT,
+            key_events TEXT, open_threads TEXT, consistency_note TEXT, beat_sections TEXT, micro_beats TEXT, sync_status TEXT
+        );
+        CREATE TABLE triples (
+            id TEXT PRIMARY KEY, novel_id TEXT, subject TEXT, predicate TEXT, object TEXT,
+            chapter_number INTEGER, note TEXT, entity_type TEXT, importance TEXT, location_type TEXT,
+            description TEXT, first_appearance INTEGER, confidence REAL, source_type TEXT,
+            subject_entity_id TEXT, object_entity_id TEXT, updated_at TEXT
+        );
+        CREATE TABLE storylines (
+            id TEXT PRIMARY KEY, novel_id TEXT, storyline_type TEXT, status TEXT,
+            estimated_chapter_start INTEGER, estimated_chapter_end INTEGER, current_milestone_index INTEGER,
+            name TEXT, description TEXT, last_active_chapter INTEGER, progress_summary TEXT, updated_at TEXT
+        );
+        CREATE TABLE storyline_milestones (
+            id TEXT PRIMARY KEY, storyline_id TEXT, milestone_order INTEGER, title TEXT, description TEXT,
+            target_chapter_start INTEGER, target_chapter_end INTEGER, prerequisite_list TEXT, milestone_triggers TEXT
+        );
+        CREATE TABLE timeline_registries (
+            novel_id TEXT PRIMARY KEY, data TEXT, updated_at TEXT
+        );
+        CREATE TABLE novel_foreshadow_registry (
+            novel_id TEXT PRIMARY KEY, payload TEXT, updated_at TEXT
+        );
+        CREATE TABLE novel_snapshots (
+            id TEXT PRIMARY KEY, novel_id TEXT, name TEXT, description TEXT, created_at TEXT
+        );
+        CREATE TABLE narrative_events (
+            event_id TEXT PRIMARY KEY, novel_id TEXT, chapter_number INTEGER, event_summary TEXT,
+            mutations TEXT, tags TEXT, timestamp_ts TEXT
+        );
+        CREATE TABLE memory_engine_states (
+            novel_id TEXT PRIMARY KEY, state_json TEXT, last_updated_chapter INTEGER
+        );
+        """
+    )
+    conn.execute(
+        "INSERT INTO bible_characters VALUES (?, ?, ?, ?, ?, ?, ?)",
+        ("bc-1", "novel-host", "林澈", "调查黑塔事故的主角。", "警惕", "我会查清", "反复检查钥匙"),
+    )
+    conn.execute(
+        "INSERT INTO bible_world_settings VALUES (?, ?, ?, ?, ?, ?)",
+        ("ws-1", "novel-host", "雾城禁令", "雾城夜晚禁止进入黑塔。", "rule", "2026-01-01"),
+    )
+    conn.execute(
+        "INSERT INTO bible_locations VALUES (?, ?, ?, ?, ?, ?, ?)",
+        ("loc-1", "novel-host", "黑塔", "雾城中央的封锁建筑。", "landmark", None, "2026-01-01"),
+    )
+    conn.execute(
+        "INSERT INTO bible_timeline_notes VALUES (?, ?, ?, ?, ?, ?)",
+        ("tn-1", "novel-host", "黑塔封锁", "开篇前十年", "黑塔在事故后被封锁。", 1),
+    )
+    conn.execute("INSERT INTO knowledge VALUES (?, ?, ?, ?)", ("k-1", "novel-host", 1, "雾城黑塔不能被公开解释"))
+    conn.execute(
+        "INSERT INTO chapter_summaries VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ("cs-1", "k-1", 1, "林澈抵达雾城。", "获得钥匙", "黑塔真相", "钥匙代价未知", "[]", "[]", "synced"),
+    )
+    conn.execute(
+        "INSERT INTO triples VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ("tri-1", "novel-host", "钥匙", "代价", "消耗记忆", 1, "", "prop", "high", "", "钥匙会消耗使用者记忆。", 1, 0.9, "chapter", "", "", "2026-01-01"),
+    )
+    conn.execute(
+        "INSERT INTO storylines VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ("sl-1", "novel-host", "main_plot", "active", 1, 10, 0, "黑塔主线", "调查黑塔事故真相。", 1, "钥匙已出现", "2026-01-01"),
+    )
+    conn.execute(
+        "INSERT INTO storyline_milestones VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ("slm-1", "sl-1", 1, "进入黑塔", "找到合法进入黑塔的方法。", 2, 3, "[]", "[]"),
+    )
+    conn.execute(
+        "INSERT INTO timeline_registries VALUES (?, ?, ?)",
+        (
+            "novel-host",
+            json.dumps({"events": [{"id": "tl-1", "chapter_number": 1, "event": "林澈得到钥匙", "timestamp": "第1章", "timestamp_type": "chapter"}]}, ensure_ascii=False),
+            "2026-01-01",
+        ),
+    )
+    conn.execute(
+        "INSERT INTO novel_foreshadow_registry VALUES (?, ?, ?)",
+        (
+            "novel-host",
+            json.dumps({"foreshadowings": [{"id": "fs-1", "description": "钥匙会消耗记忆", "status": "PLANTED", "chapter_planted": 1}]}, ensure_ascii=False),
+            "2026-01-01",
+        ),
+    )
+    conn.execute("INSERT INTO novel_snapshots VALUES (?, ?, ?, ?, ?)", ("snap-1", "novel-host", "首章快照", "林澈得到钥匙", "2026-01-01"))
+    conn.execute(
+        "INSERT INTO narrative_events VALUES (?, ?, ?, ?, ?, ?, ?)",
+        ("ne-1", "novel-host", 1, "林澈说他会查清黑塔。", "[]", json.dumps(["林澈：我会查清黑塔。"], ensure_ascii=False), "2026-01-01"),
+    )
+    conn.execute(
+        "INSERT INTO memory_engine_states VALUES (?, ?, ?)",
+        (
+            "novel-host",
+            json.dumps({"fact_lock": "林澈已经知道钥匙会消耗记忆", "completed_beats": ["抵达雾城"]}, ensure_ascii=False),
+            1,
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_host_context_reader_reads_plotpilot_sources(tmp_path):
+    db_path = tmp_path / "host-context.sqlite3"
+    _make_host_context_db(db_path)
+    reader = HostContextReader(ReadOnlyHostDatabase(db_path))
+
+    context = reader.read("novel-host", query="林澈调查黑塔钥匙", before_chapter=3)
+
+    assert context["counts"]["world"] >= 2
+    assert context["counts"]["bible"] >= 2
+    assert context["counts"]["knowledge"] >= 1
+    assert context["counts"]["story_knowledge"] >= 1
+    assert context["counts"]["storyline"] == 1
+    assert context["counts"]["timeline"] >= 2
+    assert context["counts"]["foreshadow"] == 1
+    assert context["counts"]["dialogue"] == 1
+    assert context["counts"]["memory_engine"] == 1
+    assert set(context["active_sources"]) >= {"bible", "world", "knowledge", "story_knowledge", "storyline", "timeline", "foreshadow", "dialogue", "triples", "memory_engine"}
+    assert context["plotpilot_context_usage"]["mode"] == "strategy_only"
+
+
+def test_host_context_reader_handles_base_storyline_schema_and_missing_sources(tmp_path):
+    db_path = tmp_path / "host-context-lite.sqlite3"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE storylines (
+            id TEXT PRIMARY KEY,
+            novel_id TEXT NOT NULL,
+            storyline_type TEXT NOT NULL,
+            status TEXT NOT NULL,
+            estimated_chapter_start INTEGER NOT NULL,
+            estimated_chapter_end INTEGER NOT NULL,
+            current_milestone_index INTEGER NOT NULL DEFAULT 0,
+            extensions TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT,
+            updated_at TEXT
+        );
+        CREATE TABLE storyline_milestones (
+            id TEXT PRIMARY KEY, storyline_id TEXT, milestone_order INTEGER, title TEXT, description TEXT,
+            target_chapter_start INTEGER, target_chapter_end INTEGER, prerequisite_list TEXT, milestone_triggers TEXT
+        );
+        """
+    )
+    conn.execute(
+        "INSERT INTO storylines VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ("sl-lite", "novel-lite", "main_plot", "active", 1, 8, 0, "{}", "2026-01-01", "2026-01-01"),
+    )
+    conn.execute(
+        "INSERT INTO storyline_milestones VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ("slm-lite", "sl-lite", 1, "抵达旧城", "主角进入旧城并发现第一条线索。", 1, 2, "[]", "[]"),
+    )
+    conn.commit()
+    conn.close()
+
+    reader = HostContextReader(ReadOnlyHostDatabase(db_path))
+    context = reader.read("novel-lite", query="旧城线索", before_chapter=2)
+
+    assert context["counts"]["storyline"] == 1
+    assert context["storyline"][0]["name"] == "main_plot"
+    assert "storyline" in context["active_sources"]
+    assert "world" in context["degraded_sources"]
+    assert "knowledge" in context["degraded_sources"]
+
+
+def test_host_context_reader_tolerates_minimal_native_schemas(tmp_path):
+    db_path = tmp_path / "host-context-minimal.sqlite3"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE bible_characters (
+            id TEXT PRIMARY KEY, novel_id TEXT, name TEXT, description TEXT
+        );
+        CREATE TABLE bible_locations (
+            id TEXT PRIMARY KEY, novel_id TEXT, name TEXT, description TEXT
+        );
+        CREATE TABLE knowledge (
+            id TEXT PRIMARY KEY, novel_id TEXT, version INTEGER, premise_lock TEXT
+        );
+        CREATE TABLE chapter_summaries (
+            id TEXT PRIMARY KEY, knowledge_id TEXT, chapter_number INTEGER, summary TEXT
+        );
+        CREATE TABLE memory_engine_state (
+            novel_id TEXT PRIMARY KEY, state_json TEXT, last_updated_chapter INTEGER
+        );
+        """
+    )
+    conn.execute("INSERT INTO bible_characters VALUES (?, ?, ?, ?)", ("char-1", "novel-min", "林澈", "调查员"))
+    conn.execute("INSERT INTO bible_locations VALUES (?, ?, ?, ?)", ("loc-1", "novel-min", "黑塔", "封锁建筑"))
+    conn.execute("INSERT INTO knowledge VALUES (?, ?, ?, ?)", ("k-1", "novel-min", 1, "黑塔不能公开解释"))
+    conn.execute("INSERT INTO chapter_summaries VALUES (?, ?, ?, ?)", ("cs-1", "k-1", 1, "林澈抵达黑塔"))
+    conn.execute(
+        "INSERT INTO memory_engine_state VALUES (?, ?, ?)",
+        ("novel-min", json.dumps({"completed_beats": ["抵达黑塔"]}, ensure_ascii=False), 1),
+    )
+    conn.commit()
+    conn.close()
+
+    context = HostContextReader(ReadOnlyHostDatabase(db_path)).read("novel-min", query="黑塔", before_chapter=2)
+
+    assert context["counts"]["bible"] == 2
+    assert context["counts"]["story_knowledge"] == 1
+    assert context["counts"]["memory_engine"] == 1
+    assert "bible" in context["active_sources"]
+    assert "story_knowledge" in context["active_sources"]
+
+
+def test_diagnostics_reports_risks_and_redacts_sensitive_settings(tmp_path):
+    storage = PluginStorage(root=tmp_path)
+    service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage))
+    service.update_settings(
+        {
+            "api2": {
+                "enabled": True,
+                "provider_mode": "custom",
+                "custom_profile": {"api_key": "api2-secret", "model": "api2-model"},
+            },
+            "agent_api": {
+                "enabled": True,
+                "provider_mode": "custom",
+                "custom_profile": {"api_key": "agent-secret", "model": "agent-model"},
+            },
+        }
+    )
+    service.repository.save_host_context_summary(
+        "novel-diagnostics",
+        {
+            "source": "plotpilot_host_readonly",
+            "active_sources": [],
+            "degraded_sources": ["world", "knowledge"],
+            "counts": {"world": 0, "knowledge": 0},
+            "plotpilot_context_usage": {"mode": "strategy_only", "long_context_duplicated": False},
+        },
+    )
+    service.repository.save_semantic_recall_summary(
+        "novel-diagnostics",
+        {
+            "source": "none",
+            "vector_enabled": False,
+            "item_count": 0,
+            "collection_status": {
+                "missing": ["novel_novel-diagnostics_world"],
+                "queried": ["novel_novel-diagnostics_chunks"],
+            },
+        },
+    )
+    service.repository.append_context_injection_record(
+        "novel-diagnostics",
+        {
+            "blocks": [
+                {"id": "duplicate", "token_budget": 4000},
+                {"id": "duplicate", "token_budget": 3000},
+            ]
+        },
+    )
+    service.repository.write_character_card(
+        "novel-diagnostics",
+        {"name": "金属牌", "status": "invalid_entity", "entity_type": "non_person"},
+    )
+
+    diagnostics = service.get_diagnostics("novel-diagnostics")
+
+    risk_sources = {item["source"] for item in diagnostics["risks"]}
+    assert "host_context" in risk_sources
+    assert "semantic_recall" in risk_sources
+    assert "context_injection" in risk_sources
+    assert "character_cards" in risk_sources
+    assert "settings" in risk_sources
+    assert diagnostics["summary"]["total"] >= 5
+    assert service.repository.get_diagnostics_snapshot("novel-diagnostics")["summary"]["total"] == diagnostics["summary"]["total"]
+    assert diagnostics["dependency_status"]
+    assert diagnostics["host_feature_alignment"]["mode"] == "strategy_only"
+    assert "source_status" in diagnostics["host_feature_alignment"]
+    assert "novel_novel-diagnostics_world" in json.dumps(diagnostics, ensure_ascii=False)
+    assert "api2-secret" not in json.dumps(diagnostics, ensure_ascii=False)
+    assert "agent-secret" not in json.dumps(diagnostics, ensure_ascii=False)
+
+
+def test_diagnostics_reports_plugin_disabled_without_hook_execution(tmp_path, monkeypatch):
+    storage = PluginStorage(root=tmp_path)
+    service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage))
+    monkeypatch.setattr("plugins.world_evolution_core.diagnostics._plugin_enabled", lambda: False)
+
+    diagnostics = service.get_diagnostics("novel-disabled")
+
+    assert any(item["source"] == "plugin_runtime" and item["severity"] == "warning" for item in diagnostics["risks"])
+    assert service.repository.list_agent_events("novel-disabled") == []
+
+
+def test_diagnostics_degrades_when_snapshot_write_fails(tmp_path, monkeypatch):
+    storage = PluginStorage(root=tmp_path)
+    service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage))
+
+    def fail_save(*_args, **_kwargs):
+        raise OSError("storage is readonly")
+
+    monkeypatch.setattr(service.repository, "save_diagnostics_snapshot", fail_save)
+
+    diagnostics = service.get_diagnostics("novel-diagnostics-write-fail")
+
+    assert any(item["source"] == "diagnostics" for item in diagnostics["risks"])
+    assert diagnostics["summary"]["warning"] >= 1
+    assert "storage is readonly" in json.dumps(diagnostics, ensure_ascii=False)
+
+
+def test_diagnostics_degrades_when_route_map_fails(tmp_path):
+    storage = PluginStorage(root=tmp_path)
+    service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage))
+
+    def fail_route_map(_novel_id):
+        raise RuntimeError("route graph corrupted")
+
+    service.diagnostics_service.route_map_provider = fail_route_map
+
+    diagnostics = service.get_diagnostics("novel-route-map-fail")
+
+    route_risks = [item for item in diagnostics["risks"] if item["source"] == "route_map"]
+    assert route_risks
+    assert route_risks[0]["affected_feature"] == "route_conflict"
+    assert "route graph corrupted" in json.dumps(route_risks, ensure_ascii=False)
+
+
+def test_context_patch_injects_host_context_blocks(tmp_path):
+    db_path = tmp_path / "host-context.sqlite3"
+    _make_host_context_db(db_path)
+    storage = PluginStorage(root=tmp_path / "plugin")
+    service = EvolutionWorldAssistantService(
+        storage=storage,
+        jobs=PluginJobRegistry(storage),
+        host_database=ReadOnlyHostDatabase(db_path),
+    )
+
+    context = service.before_context_build(
+        {
+            "novel_id": "novel-host",
+            "chapter_number": 3,
+            "payload": {"outline": "林澈准备用钥匙进入黑塔，调查雾城禁令。"},
+        }
+    )
+
+    block_ids = {block["id"] for block in context["context_patch"]["blocks"]}
+    assert "plotpilot_native_strategy" in block_ids
+    assert "host_world_context" not in block_ids
+    strategy = next(block for block in context["context_patch"]["blocks"] if block["id"] == "plotpilot_native_strategy")
+    assert "不重复注入全文资料" in strategy["content"]
+    assert "伏笔账本" in strategy["content"]
+    status = service.get_agent_status("novel-host")
+    assert status["host_context_summary"]["counts"]["world"] >= 2
+    assert status["plotpilot_context_usage"]["mode"] == "strategy_only"
+    assert status["semantic_recall_summary"]["item_count"] >= 1
+
+
+@pytest.mark.asyncio
+async def test_after_commit_marks_native_sync_usage_and_degraded_fallback(tmp_path):
+    db_path = tmp_path / "host-context.sqlite3"
+    _make_host_context_db(db_path)
+    storage = PluginStorage(root=tmp_path / "plugin")
+    service = EvolutionWorldAssistantService(
+        storage=storage,
+        jobs=PluginJobRegistry(storage),
+        host_database=ReadOnlyHostDatabase(db_path),
+    )
+
+    result = await service.after_commit(
+        {
+            "novel_id": "novel-host",
+            "chapter_number": 2,
+            "payload": {"content": "《林澈》带着钥匙靠近黑塔。"},
+        }
+    )
+
+    native = result["data"]["native_after_commit"]
+    assert native["has_native_sync"] is True
+    assert native["fallback_degraded"] is False
+    assert native["native_counts"]["story_knowledge"] >= 1
+    assert result["data"]["extraction"]["fallback_degraded"] is False
+
+
+def test_context_patch_degrades_slow_external_context_sources(tmp_path, monkeypatch):
+    storage = PluginStorage(root=tmp_path)
+    service = EvolutionWorldAssistantService(
+        storage=storage,
+        jobs=PluginJobRegistry(storage),
+        semantic_memory=SlowSemanticMemory(),
+    )
+    service.host_context_reader = SlowHostContextReader()
+    monkeypatch.setattr(evolution_service_module, "CONTEXT_EXTERNAL_TIMEOUT_SECONDS", 0.001)
+
+    result = service.before_context_build(
+        {
+            "novel_id": "novel-context-timeout",
+            "chapter_number": 2,
+            "payload": {"outline": "林澈调查黑塔。"},
+        }
+    )
+
+    assert result["ok"] is True
+    host_summary = service.repository.get_host_context_summary("novel-context-timeout")
+    semantic_summary = service.repository.get_semantic_recall_summary("novel-context-timeout")
+    assert "host_context_timeout" in host_summary["degraded_sources"]
+    assert semantic_summary["source"] == "semantic_recall_timeout"
+    assert semantic_summary["collection_status"]["degraded_reason"] == "semantic_recall_timeout"
+
+
+def test_review_chapter_uses_host_context_as_evidence(tmp_path):
+    db_path = tmp_path / "host-context.sqlite3"
+    _make_host_context_db(db_path)
+    storage = PluginStorage(root=tmp_path / "plugin")
+    service = EvolutionWorldAssistantService(
+        storage=storage,
+        jobs=PluginJobRegistry(storage),
+        host_database=ReadOnlyHostDatabase(db_path),
+    )
+
+    review = service.review_chapter(
+        {
+            "novel_id": "novel-host",
+            "chapter_number": 3,
+            "payload": {"content": "林澈拿着钥匙来到黑塔，低声说自己会查清雾城禁令。"},
+        }
+    )
+
+    issue_types = {item["issue_type"] for item in review["data"]["issues"]}
+    assert "evolution_worldbuilding_context" in issue_types
+    assert "evolution_triples_context" in issue_types
+    assert any(item.get("evidence") for item in review["data"]["issues"] if item["issue_type"].startswith("evolution_"))
+    assert all(item.get("source_plugin") == "world_evolution_core" for item in review["data"]["issues"] if item["issue_type"].startswith("evolution_"))
 
 
 @pytest.mark.asyncio
@@ -707,12 +2057,12 @@ async def test_structured_provider_persists_rich_character_profile(tmp_path):
         {
             "novel_id": "novel-rich",
             "chapter_number": 1,
-            "payload": {"content": "《秋明月》在夜街舞台用吉他solo，红美玲在台下看着她。"},
+            "payload": {"content": "《测试角色甲》在夜街舞台用吉他solo，测试角色乙在台下看着她。"},
         }
     )
 
     assert result["ok"] is True
-    card = service.get_character("novel-rich", "秋明月")
+    card = service.get_character("novel-rich", "测试角色甲")
     assert card is not None
     assert card["appearance"]["summary"].startswith("黑色短发")
     assert card["attributes"][0]["name"] == "身份"
@@ -722,12 +2072,82 @@ async def test_structured_provider_persists_rich_character_profile(tmp_path):
     assert card["personality_palette"]["derivatives"][1]["tone"] == "依赖"
 
     context = service.before_context_build(
-        {"novel_id": "novel-rich", "chapter_number": 2, "payload": {"outline": "秋明月结束演出后去找红美玲。"}}
+        {"novel_id": "novel-rich", "chapter_number": 2, "payload": {"outline": "测试角色甲结束演出后去找测试角色乙。"}}
     )
     content = context["context_blocks"][0]["content"]
     assert "外貌/出场识别" in content
     assert "性格调色盘" in content
     assert "底色=叛逆" in content
+
+
+@pytest.mark.asyncio
+async def test_llm_structured_extractor_provider_generates_palette(tmp_path):
+    fake_llm = FakePaletteLLM()
+    storage = PluginStorage(root=tmp_path)
+    service = EvolutionWorldAssistantService(
+        storage=storage,
+        jobs=PluginJobRegistry(storage),
+        extractor_provider=LLMStructuredExtractorProvider(fake_llm),
+    )
+
+    result = await service.after_commit(
+        {
+            "novel_id": "novel-llm-palette",
+            "chapter_number": 1,
+            "payload": {"content": "测试角色甲在C307拆开旧式门锁，确认门锁被人改造过。"},
+        }
+    )
+
+    assert result["data"]["extraction"]["source"] == "structured"
+    card = service.get_character("novel-llm-palette", "测试角色甲")
+    assert card["personality_palette"]["base"] == "谨慎"
+    assert card["personality_palette"]["main_tones"] == ["固执"]
+    assert card["personality_palette"]["derivatives"][0]["title"] == "反复验证"
+    assert fake_llm.calls
+    assert "性格调色盘不是标签列表" in fake_llm.calls[0]["prompt"].user
+
+
+@pytest.mark.asyncio
+async def test_canonical_host_characters_filter_noise_and_normalize_aliases(tmp_path):
+    db_path = tmp_path / "host.sqlite3"
+    _make_host_character_db(db_path)
+    storage = PluginStorage(root=tmp_path / "plugin")
+    service = EvolutionWorldAssistantService(
+        storage=storage,
+        jobs=PluginJobRegistry(storage),
+        extractor_provider=NoisyCharacterStructuredProvider(),
+        host_database=ReadOnlyHostDatabase(db_path),
+    )
+
+    result = await service.after_commit(
+        {
+            "novel_id": "novel-canonical",
+            "chapter_number": 1,
+            "payload": {
+                "content": (
+                    "林渊把《云海导航基础教程》压在桌角，沈雨记录C307设备读数，"
+                    "小诺检查门禁。旁白写道《很聪明》不是人物。"
+                )
+            },
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["data"]["facts"]["characters"] == ["林渊", "沈雨", "阿诺"]
+    assert "云海导航基础教程" in result["data"]["extraction"]["ignored_character_candidates"]
+    assert "很聪明" in result["data"]["extraction"]["ignored_character_candidates"]
+
+    cards = service.list_characters("novel-canonical")["items"]
+    assert {card["name"] for card in cards} == {"林渊", "沈雨", "阿诺"}
+    assert all(card.get("canonical_source") == "bible" for card in cards)
+    anuo = service.get_character("novel-canonical", "阿诺")
+    assert anuo is not None
+    assert "小诺" in anuo["aliases"]
+    assert anuo["canonical_character_id"] == "char-anuo"
+
+    timeline = service.list_timeline_events("novel-canonical")["items"]
+    assert timeline[0]["participants"] == ["阿诺"]
+    assert "很聪明" not in {card["name"] for card in cards}
 
 
 @pytest.mark.asyncio
@@ -1026,6 +2446,101 @@ def test_review_chapter_allows_explained_cognition_transition(tmp_path):
     issue_types = {item["issue_type"] for item in result["data"]["issues"]}
     assert "evolution_character_cognition" not in issue_types
     assert "evolution_character_capability" not in issue_types
+
+
+def test_review_chapter_flags_palette_missing_and_drift(tmp_path):
+    storage = PluginStorage(root=tmp_path)
+    service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage))
+    service.repository.write_character_cards(
+        "novel-palette-review",
+        [
+            {
+                "character_id": "shen-yan",
+                "name": "沈砚",
+                "first_seen_chapter": 1,
+                "last_seen_chapter": 1,
+                "status": "active",
+                "recent_events": [{"chapter_number": 1, "summary": "沈砚进入C307。"}],
+                "personality_palette": {"base": "", "main_tones": [], "accents": [], "derivatives": []},
+            },
+            {
+                "character_id": "gu-lan",
+                "name": "顾岚",
+                "first_seen_chapter": 1,
+                "last_seen_chapter": 1,
+                "status": "active",
+                "recent_events": [{"chapter_number": 1, "summary": "顾岚保持谨慎。"}],
+                "personality_palette": {
+                    "base": "谨慎",
+                    "main_tones": ["克制"],
+                    "accents": ["保护欲"],
+                    "derivatives": [{"tone": "克制", "description": "行动前会先确认风险。"}],
+                },
+            },
+        ],
+    )
+
+    missing_review = service.review_chapter(
+        {
+            "novel_id": "novel-palette-review",
+            "chapter_number": 2,
+            "payload": {"content": "沈砚站在C307门口，沈砚没有继续前进。"},
+        }
+    )
+    assert any(item["issue_type"] == "evolution_palette_missing" for item in missing_review["data"]["issues"])
+
+    drift_review = service.review_chapter(
+        {
+            "novel_id": "novel-palette-review",
+            "chapter_number": 2,
+            "payload": {"content": "顾岚突然变得像换了个人，毫无理由地冲进档案馆。"},
+        }
+    )
+    assert any(item["issue_type"] == "evolution_palette_drift" for item in drift_review["data"]["issues"])
+
+
+def test_review_chapter_reports_current_route_conflicts(tmp_path):
+    storage = PluginStorage(root=tmp_path)
+    service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage))
+    service.repository.save_story_graph_chapter(
+        "novel-route-review",
+        2,
+        {
+            "schema_version": 1,
+            "novel_id": "novel-route-review",
+            "chapter_number": 2,
+            "entities": [],
+            "locations": [],
+            "events": [],
+            "route_edges": [],
+            "conflicts": [
+                {
+                    "type": "repeated_arrival",
+                    "severity": "hard",
+                    "character": "沈砚",
+                    "chapter_previous": 1,
+                    "chapter_current": 2,
+                    "previous_location": "C307",
+                    "current_location": "C307",
+                    "message": "沈砚上一记录已在C307，本章开头又写成重新抵达/进入，像状态重置。",
+                    "evidence": "沈砚进入C307。",
+                }
+            ],
+            "vectors": [],
+        },
+    )
+
+    result = service.review_chapter(
+        {
+            "novel_id": "novel-route-review",
+            "chapter_number": 2,
+            "payload": {"content": "沈砚进入C307。"},
+        }
+    )
+
+    issues = result["data"]["issues"]
+    assert any(item["issue_type"] == "evolution_route_repeated_arrival" for item in issues)
+    assert any(item["severity"] == "critical" for item in issues)
 
 
 def test_transition_analysis_flags_repeated_arrival_time_and_object_conflicts():
