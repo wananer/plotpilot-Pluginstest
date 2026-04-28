@@ -668,7 +668,7 @@ class AutopilotDaemon:
                     # - 最终输出应接近 prompt 目标，略低于原始目标
                     max_tokens = int(beat.target_words * 1.1)
                     cfg = GenerationConfig(max_tokens=max_tokens, temperature=0.85)
-                    beat_content = await self._stream_llm_with_stop_watch(prompt, cfg, novel=novel)
+                    beat_content = await self._stream_llm_with_stop_watch(prompt, cfg, novel=novel, chapter_number=chapter_num)
                 else:
                     beat_content = await self._stream_one_beat(
                         outline,
@@ -720,7 +720,7 @@ class AutopilotDaemon:
                     voice_anchors=voice_anchors,
                 )
                 cfg = GenerationConfig(max_tokens=3000, temperature=0.85)
-                beat_content = await self._stream_llm_with_stop_watch(prompt, cfg, novel=novel)
+                beat_content = await self._stream_llm_with_stop_watch(prompt, cfg, novel=novel, chapter_number=chapter_num)
             else:
                 beat_content = await self._stream_one_beat(
                     outline, context, None, None, novel=novel, voice_anchors=voice_anchors
@@ -1296,7 +1296,7 @@ class AutopilotDaemon:
             return 5  # 解析失败，返回默认值
 
     async def _stream_llm_with_stop_watch(
-        self, prompt: Prompt, config: GenerationConfig, novel=None
+        self, prompt: Prompt, config: GenerationConfig, novel=None, chapter_number: int | None = None
     ) -> str:
         """与 workflow 共用同一套 Prompt + LLM；novel 传入时并行轮询 DB 是否已停止。
         
@@ -1323,7 +1323,7 @@ class AutopilotDaemon:
         try:
             with llm_audit_context(
                 novel_id=str(nid or ""),
-                chapter_number=getattr(novel, "current_chapter_number", None) if novel is not None else None,
+                chapter_number=chapter_number if chapter_number is not None else (getattr(novel, "current_chapter_number", None) if novel is not None else None),
                 phase="chapter_generation_beat",
                 source="autopilot_daemon._stream_llm_with_stop_watch",
             ):
@@ -1419,7 +1419,7 @@ class AutopilotDaemon:
         try:
             config = GenerationConfig(max_tokens=300, temperature=0.7)
             continuation = await self._stream_llm_with_stop_watch(
-                continuation_prompt, config, novel=novel
+                continuation_prompt, config, novel=novel, chapter_number=getattr(novel, "current_chapter_number", None)
             )
 
             if continuation and continuation.strip():
@@ -1479,7 +1479,7 @@ class AutopilotDaemon:
 
         prompt = Prompt(system=system, user="\n".join(user_parts))
         config = GenerationConfig(max_tokens=max_tokens, temperature=0.85)
-        return await self._stream_llm_with_stop_watch(prompt, config, novel=novel)
+        return await self._stream_llm_with_stop_watch(prompt, config, novel=novel, chapter_number=getattr(novel, "current_chapter_number", None))
 
     async def _upsert_chapter_content(self, novel, chapter_node, content: str, status: str):
         """最小事务：只更新章节内容，不涉及其他表

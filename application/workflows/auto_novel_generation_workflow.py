@@ -260,6 +260,8 @@ class AutoNovelGenerationWorkflow:
         scene_director: Optional[SceneDirectorAnalysis] = None,
     ) -> Dict[str, Any]:
         """生成正文后的统一后处理：俗套扫描、状态提取、一致性、冲突批注、StateUpdater、MemoryEngine回写。"""
+        self._current_novel_id = novel_id
+        self._current_chapter_number = chapter_number
         style_warnings = self._scan_cliches(content)
         chapter_state = await self._extract_chapter_state(content, chapter_number)
         consistency_report = self._check_consistency(chapter_state, novel_id)
