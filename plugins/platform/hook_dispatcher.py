@@ -43,6 +43,11 @@ def _plugin_is_enabled(plugin_name: str) -> bool:
         return True
 
 
+def has_enabled_hook(hook_name: str) -> bool:
+    """Return whether a hook has at least one currently enabled plugin handler."""
+    return any(_plugin_is_enabled(plugin_name) for plugin_name, _ in list(_HOOKS.get(hook_name, [])))
+
+
 async def dispatch_hook(hook_name: str, payload: Optional[PluginHookPayload] = None) -> list[PluginHookResult]:
     results: list[PluginHookResult] = []
     for plugin_name, handler in list(_HOOKS.get(hook_name, [])):
