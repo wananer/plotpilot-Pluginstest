@@ -4,10 +4,12 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import asdict, dataclass, field
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
-from domain.ai.services.llm_service import GenerationConfig, LLMService
-from domain.ai.value_objects.prompt import Prompt
+if TYPE_CHECKING:
+    from domain.ai.services.llm_service import LLMService
+else:
+    LLMService = Any
 
 from .extractor import extract_chapter_facts
 from .models import ChapterFactSnapshot
@@ -91,6 +93,8 @@ class LLMStructuredExtractorProvider:
         self.max_tokens = max_tokens
 
     async def extract(self, request: dict[str, Any]) -> dict[str, Any]:
+        from domain.ai.services.llm_service import GenerationConfig
+
         llm = self.llm_service or _create_active_llm_service()
         prompt = _build_structured_extraction_prompt(request)
         result = await llm.generate(
@@ -236,7 +240,9 @@ def _create_active_llm_service() -> LLMService:
     return LLMProviderFactory().create_active_provider()
 
 
-def _build_structured_extraction_prompt(request: dict[str, Any]) -> Prompt:
+def _build_structured_extraction_prompt(request: dict[str, Any]) -> Any:
+    from domain.ai.value_objects.prompt import Prompt
+
     schema = request.get("schema") or STRUCTURED_EXTRACTION_SCHEMA
     chapter_number = request.get("chapter_number")
     content = str(request.get("content") or "")

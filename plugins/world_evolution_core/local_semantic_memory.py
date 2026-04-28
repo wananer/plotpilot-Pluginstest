@@ -8,12 +8,18 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from application.ai.vector_retrieval_facade import VectorRetrievalFacade
-from domain.ai.services.embedding_service import EmbeddingService
-from domain.ai.services.vector_store import VectorStore
 from plugins.platform.host_database import ReadOnlyHostDatabase
+
+if TYPE_CHECKING:
+    from application.ai.vector_retrieval_facade import VectorRetrievalFacade
+    from domain.ai.services.embedding_service import EmbeddingService
+    from domain.ai.services.vector_store import VectorStore
+else:
+    VectorRetrievalFacade = Any
+    EmbeddingService = Any
+    VectorStore = Any
 
 logger = logging.getLogger(__name__)
 
@@ -195,7 +201,12 @@ class LocalSemanticMemory:
                 logger.debug("Evolution vector dependencies unavailable: %s", exc)
         if self.vector_store is None or self.embedding_service is None:
             return None
-        self._facade = VectorRetrievalFacade(self.vector_store, self.embedding_service)
+        try:
+            from application.ai.vector_retrieval_facade import VectorRetrievalFacade as RuntimeVectorRetrievalFacade
+        except Exception as exc:
+            logger.debug("Evolution vector retrieval facade unavailable: %s", exc)
+            return None
+        self._facade = RuntimeVectorRetrievalFacade(self.vector_store, self.embedding_service)
         return self._facade
 
 
