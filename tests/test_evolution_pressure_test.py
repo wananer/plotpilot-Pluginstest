@@ -12,8 +12,11 @@ from scripts.evaluation.evolution_pressure_test import (
     _compute_metrics,
     _repetitive_phrase_counts,
     _repetitive_phrase_total,
+    _seed_pressure_host_context,
+    _selected_chapter_outlines,
     _write_experiment_protocol,
 )
+from plugins.world_evolution_core.host_context import HostContextReader
 from plugins.world_evolution_core.service import _build_agent_control_card_prompt
 
 
@@ -124,6 +127,7 @@ def test_preflight_snapshot_records_risk_inputs_without_model_calls(tmp_path):
         expand_short_chapters=False,
         expansion_min_ratio=0.9,
         reuse_control_dir="",
+        chapter_limit=3,
     )
 
     snapshot = _build_preflight_snapshot(output_dir=tmp_path, args=args, started_at="2026-04-28T00:00:00")
@@ -131,17 +135,28 @@ def test_preflight_snapshot_records_risk_inputs_without_model_calls(tmp_path):
 
     assert snapshot["generation_parameters"]["use_api2_control_card"] is False
     assert snapshot["generation_parameters"]["agent_api_is_primary"] is True
+    assert snapshot["generation_parameters"]["chapter_limit"] == 3
+    assert snapshot["generation_parameters"]["expected_chapters"] == 3
+    assert snapshot["agent_api_config"]["enabled"] is True
+    assert snapshot["agent_api_config"]["api_key_copied_to_artifacts"] is False
+    assert snapshot["seeded_native_context"]["planned"] is True
     assert snapshot["script"]["sha256"]
     assert "head" in snapshot["git"]
     assert "branch" in snapshot["git"]
     assert "plugin_manifest_snapshot" in snapshot
     assert "embedding_status" in snapshot
+    assert "sk-" not in json.dumps(snapshot["agent_api_config"], ensure_ascii=False)
     assert {item["id"] for item in snapshot["risk_register"]} >= {
         "dirty_worktree",
         "plugin_state_drift",
         "legacy_api2_residue",
     }
     assert "Control: Evolution 关闭" in protocol_path.read_text(encoding="utf-8")
+
+
+def test_selected_chapter_outlines_supports_calibration_limit():
+    assert len(_selected_chapter_outlines(2)) == 2
+    assert len(_selected_chapter_outlines(999)) == EXPERIMENT_SPEC["target_chapters"]
 
 
 def test_embedding_preflight_status_reports_vector_store_disabled(monkeypatch):
@@ -208,7 +223,14 @@ def test_leakage_acceptance_fails_when_control_has_evolution_context():
     ]
     metrics = {
         "control_off": {"aggregate": {"generation_llm_call_count": 10, "generation_llm_total_tokens": 1000}},
-        "experiment_on": {"aggregate": {"generation_llm_call_count": 10, "generation_llm_total_tokens": 1200}},
+        "experiment_on": {
+            "aggregate": {
+                "generation_llm_call_count": 10,
+                "generation_llm_total_tokens": 1200,
+                "evolution_agent_api_call_count": 1,
+                "plotpilot_native_active_source_count": 2,
+            }
+        },
     }
 
     report = _build_leakage_acceptance_report(
@@ -238,7 +260,14 @@ def test_leakage_acceptance_passes_for_isolated_control_and_invoked_experiment()
     ]
     metrics = {
         "control_off": {"aggregate": {"generation_llm_call_count": 10, "generation_llm_total_tokens": 1000}},
-        "experiment_on": {"aggregate": {"generation_llm_call_count": 10, "generation_llm_total_tokens": 1200}},
+        "experiment_on": {
+            "aggregate": {
+                "generation_llm_call_count": 10,
+                "generation_llm_total_tokens": 1200,
+                "evolution_agent_api_call_count": 1,
+                "plotpilot_native_active_source_count": 2,
+            }
+        },
     }
 
     report = _build_leakage_acceptance_report(
@@ -255,3 +284,64 @@ def test_leakage_acceptance_passes_for_isolated_control_and_invoked_experiment()
 
     assert report["valid_experiment"] is True
     assert report["invalid_reasons"] == []
+
+
+def test_leakage_acceptance_requires_agent_api_and_native_context_participation():
+    control = [
+        ChapterResult("control_off", index, "outline", "正文", prompt_chars=10, duration_seconds=1.0)
+        for index in range(1, 4)
+    ]
+    experiment = [
+        ChapterResult("experiment_on", index, "outline", "正文", prompt_chars=10, duration_seconds=1.0, evolution_context_chars=10)
+        for index in range(1, 4)
+    ]
+    metrics = {
+        "control_off": {"aggregate": {"generation_llm_call_count": 3, "generation_llm_total_tokens": 1000}},
+        "experiment_on": {
+            "aggregate": {
+                "generation_llm_call_count": 3,
+                "generation_llm_total_tokens": 1200,
+                "evolution_agent_api_call_count": 0,
+                "plotpilot_native_active_source_count": 0,
+            }
+        },
+    }
+
+    report = _build_leakage_acceptance_report(
+        control=control,
+        control_meta={},
+        experiment=experiment,
+        experiment_meta={
+            "runs": {"items": [{"run_id": "run"}]},
+            "review_records": {"items": [{"chapter_number": index} for index in range(1, 4)]},
+            "agent_status": {"asset_counts": {"events": 10}},
+        },
+        metrics=metrics,
+        expected_chapters=3,
+    )
+
+    assert report["valid_experiment"] is False
+    assert "experiment_agent_api_participated" in report["invalid_reasons"]
+    assert "experiment_native_context_participated" in report["invalid_reasons"]
+
+
+def test_pressure_host_context_seed_is_readable_and_isolated(tmp_path):
+    host_database, seed = _seed_pressure_host_context(tmp_path, "pressure-experiment-test")
+
+    assert seed["active_sources"]
+    assert "bible" in seed["active_sources"]
+    assert "story_knowledge" in seed["active_sources"]
+    assert "foreshadow" in seed["active_sources"]
+
+    context = HostContextReader(host_database).read(
+        "pressure-experiment-test",
+        query="黑匣子 圣像 顾岚",
+        before_chapter=2,
+    )
+
+    assert context["counts"]["bible"] >= 2
+    assert context["counts"]["story_knowledge"] >= 1
+    assert context["counts"]["triples"] >= 1
+    assert context["plotpilot_context_usage"]["mode"] == "strategy_only"
+
+    assert "api_key" not in json.dumps(seed, ensure_ascii=False)

@@ -31,9 +31,11 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from plugins.platform.job_registry import PluginJobRegistry
+from plugins.platform.host_database import ReadOnlyHostDatabase
 from plugins.platform.plugin_storage import PluginStorage
 from plugins.loader import collect_manifest_frontend_scripts, collect_manifest_frontend_styles, list_plugin_manifests
 from plugins.world_evolution_core.continuity import analyze_chapter_transitions
+from plugins.world_evolution_core.host_context import HostContextReader
 from plugins.world_evolution_core.service import EvolutionWorldAssistantService
 
 
@@ -103,6 +105,20 @@ REPETITIVE_PHRASES: list[str] = [
     "沉默了很久",
     "沉默",
 ]
+
+NATIVE_SEED_SOURCES: tuple[str, ...] = (
+    "bible",
+    "world",
+    "knowledge",
+    "story_knowledge",
+    "storyline",
+    "timeline",
+    "chronicle",
+    "foreshadow",
+    "dialogue",
+    "triples",
+    "memory_engine",
+)
 
 
 @dataclass
@@ -219,6 +235,17 @@ def _file_sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _selected_chapter_outlines(chapter_limit: int | None = None) -> list[str]:
+    outlines = list(EXPERIMENT_SPEC["chapter_outlines"])
+    if chapter_limit is None:
+        return outlines
+    return outlines[: max(1, min(int(chapter_limit), len(outlines)))]
+
+
+def _expected_chapter_count(chapter_limit: int | None = None) -> int:
+    return len(_selected_chapter_outlines(chapter_limit))
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> Path:
@@ -347,6 +374,51 @@ def _local_embedding_path_status(model_path: str) -> dict[str, Any]:
     }
 
 
+def _agent_api_preflight_config() -> dict[str, Any]:
+    profile_summary: dict[str, Any] = {
+        "active_profile_available": False,
+        "api_key_configured": False,
+        "model_configured": False,
+        "protocol": "",
+        "source": "unavailable",
+    }
+    try:
+        from application.ai.llm_control_service import LLMControlService
+
+        active_profile = LLMControlService().get_active_profile()
+        if active_profile:
+            profile_summary.update(
+                {
+                    "active_profile_available": True,
+                    "api_key_configured": bool(str(active_profile.api_key or "").strip()),
+                    "model_configured": bool(str(active_profile.model or "").strip()),
+                    "protocol": str(active_profile.protocol or ""),
+                    "source": "same_as_main",
+                }
+            )
+        else:
+            profile_summary["source"] = "mock_fallback"
+    except Exception as exc:
+        profile_summary.update({"source": "mock_fallback", "degraded_reason": str(exc)[:160]})
+    return {
+        "enabled": True,
+        "provider_mode": "same_as_main",
+        "api_key_copied_to_artifacts": False,
+        "active_profile": profile_summary,
+        "fallback": "LLMProviderFactory returns MockProvider if the main profile is unavailable.",
+    }
+
+
+def _pressure_agent_api_settings() -> dict[str, Any]:
+    return {
+        "enabled": True,
+        "provider_mode": "same_as_main",
+        "model": "",
+        "temperature": 0.1,
+        "max_tokens": 800,
+    }
+
+
 def _build_preflight_snapshot(*, output_dir: Path, args: argparse.Namespace, started_at: str) -> dict[str, Any]:
     git_status = _run_repo_command(["git", "status", "--short"])
     git_diff_stat = _run_repo_command(["git", "diff", "--stat"])
@@ -421,6 +493,8 @@ def _build_preflight_snapshot(*, output_dir: Path, args: argparse.Namespace, sta
         "generation_parameters": {
             "model": args.model,
             "target_chars": args.target_chars,
+            "chapter_limit": args.chapter_limit,
+            "expected_chapters": _expected_chapter_count(args.chapter_limit),
             "timeout": args.timeout,
             "budget_usd_configured": bool(args.budget_usd),
             "use_api2_control_card": False,
@@ -428,6 +502,13 @@ def _build_preflight_snapshot(*, output_dir: Path, args: argparse.Namespace, sta
             "expand_short_chapters": bool(args.expand_short_chapters),
             "expansion_min_ratio": args.expansion_min_ratio,
             "reuse_control_dir": str(args.reuse_control_dir or ""),
+        },
+        "agent_api_config": _agent_api_preflight_config(),
+        "seeded_native_context": {
+            "planned": True,
+            "scope": "experiment_on_only",
+            "sources": list(NATIVE_SEED_SOURCES),
+            "storage": "isolated pressure-test host sqlite",
         },
         "git": {
             "head": (git_head.get("stdout") or "").strip(),
@@ -442,7 +523,9 @@ def _build_preflight_snapshot(*, output_dir: Path, args: argparse.Namespace, sta
         "validity_rules": [
             "control_off must have zero Evolution context chars and no agent assets.",
             "experiment_on must record Evolution context selections or agent events.",
-            "both arms must export exactly 10 chapters.",
+            "experiment_on must invoke Agent API or record an explicit degraded reason.",
+            "experiment_on must have at least one active PlotPilot native context source.",
+            "both arms must export exactly the configured chapter count.",
             "generation and scoring usage must be present in llm_usage.json.",
         ],
     }
@@ -460,10 +543,12 @@ def _write_experiment_protocol(output_dir: Path, preflight: dict[str, Any]) -> P
         "",
         "## 固定变量",
         f"- 模型：{params.get('model')}",
-        f"- 章节数：{EXPERIMENT_SPEC['target_chapters']}",
+        f"- 章节数：{params.get('expected_chapters') or EXPERIMENT_SPEC['target_chapters']}",
         f"- 每章目标字数：{params.get('target_chars')}",
         f"- 题材：{EXPERIMENT_SPEC['genre']}",
         "- 两组共用同一 premise、角色、硬性规则和 chapter_outlines。",
+        "- 实验组使用隔离宿主资料种子验证 PlotPilot 原生上下文读取，不复用旧 smoke 小说。",
+        "- 实验组显式启用 Evolution Agent API；API key 只记录 configured 布尔值，不进入产物。",
         "",
         "## 实验产物",
         "- control_off_export.md / experiment_on_export.md",
@@ -473,8 +558,9 @@ def _write_experiment_protocol(output_dir: Path, preflight: dict[str, Any]) -> P
         "",
         "## 无效实验条件",
         "- 对照组出现 Evolution context、agent event、capsule/reflection/gene candidate。",
-        "- 实验组没有任何 Evolution context selection 或 after_commit/agent event。",
-        "- 任一组章节数不足 10，或导出/usage/metrics 缺失。",
+        "- 实验组没有任何 Evolution context selection、after_commit/agent event、Agent API 调用或明确降级记录。",
+        "- 实验组原生资料 active source 为 0。",
+        "- 任一组章节数不足配置章节数，或导出/usage/metrics 缺失。",
         "- 运行期间更换模型/API 配置但未记录。",
     ]
     path.write_text("\n".join(lines), encoding="utf-8")
@@ -804,6 +890,226 @@ def _agent_api_usage_from_records(records: list[dict[str, Any]]) -> dict[str, An
     return {"aggregate": aggregate, "calls": records}
 
 
+def _seed_pressure_host_context(output_dir: Path, novel_id: str) -> tuple[ReadOnlyHostDatabase, dict[str, Any]]:
+    db_dir = output_dir / "host_context"
+    db_dir.mkdir(parents=True, exist_ok=True)
+    db_path = db_dir / f"{novel_id}.sqlite3"
+    if db_path.exists():
+        db_path.unlink()
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE bible_world_settings (
+                id TEXT PRIMARY KEY, novel_id TEXT, name TEXT, description TEXT, setting_type TEXT, updated_at TEXT
+            );
+            CREATE TABLE bible_characters (
+                id TEXT PRIMARY KEY, novel_id TEXT, name TEXT, description TEXT,
+                mental_state TEXT DEFAULT '', mental_state_reason TEXT DEFAULT '', verbal_tic TEXT DEFAULT '', idle_behavior TEXT DEFAULT ''
+            );
+            CREATE TABLE bible_locations (
+                id TEXT PRIMARY KEY, novel_id TEXT, name TEXT, description TEXT, location_type TEXT, parent_id TEXT, updated_at TEXT
+            );
+            CREATE TABLE bible_timeline_notes (
+                id TEXT PRIMARY KEY, novel_id TEXT, event TEXT, time_point TEXT, description TEXT, sort_order INTEGER
+            );
+            CREATE TABLE knowledge (
+                id TEXT PRIMARY KEY, novel_id TEXT, version INTEGER, premise_lock TEXT
+            );
+            CREATE TABLE chapter_summaries (
+                id TEXT PRIMARY KEY, knowledge_id TEXT, chapter_number INTEGER, summary TEXT,
+                key_events TEXT, open_threads TEXT, consistency_note TEXT, beat_sections TEXT, micro_beats TEXT, sync_status TEXT
+            );
+            CREATE TABLE triples (
+                id TEXT PRIMARY KEY, novel_id TEXT, subject TEXT, predicate TEXT, object TEXT,
+                chapter_number INTEGER, note TEXT, entity_type TEXT, importance TEXT, location_type TEXT,
+                description TEXT, first_appearance INTEGER, confidence REAL, source_type TEXT,
+                subject_entity_id TEXT, object_entity_id TEXT, updated_at TEXT
+            );
+            CREATE TABLE storylines (
+                id TEXT PRIMARY KEY, novel_id TEXT, storyline_type TEXT, status TEXT,
+                estimated_chapter_start INTEGER, estimated_chapter_end INTEGER, current_milestone_index INTEGER,
+                name TEXT, description TEXT, last_active_chapter INTEGER, progress_summary TEXT, updated_at TEXT
+            );
+            CREATE TABLE storyline_milestones (
+                id TEXT PRIMARY KEY, storyline_id TEXT, milestone_order INTEGER, title TEXT, description TEXT,
+                target_chapter_start INTEGER, target_chapter_end INTEGER, prerequisite_list TEXT, milestone_triggers TEXT
+            );
+            CREATE TABLE timeline_registries (
+                novel_id TEXT PRIMARY KEY, data TEXT, updated_at TEXT
+            );
+            CREATE TABLE novel_foreshadow_registry (
+                novel_id TEXT PRIMARY KEY, payload TEXT, updated_at TEXT
+            );
+            CREATE TABLE novel_snapshots (
+                id TEXT PRIMARY KEY, novel_id TEXT, name TEXT, description TEXT, created_at TEXT
+            );
+            CREATE TABLE narrative_events (
+                event_id TEXT PRIMARY KEY, novel_id TEXT, chapter_number INTEGER, event_summary TEXT,
+                mutations TEXT, tags TEXT, timestamp_ts TEXT
+            );
+            CREATE TABLE memory_engine_states (
+                novel_id TEXT PRIMARY KEY, state_json TEXT, last_updated_chapter INTEGER
+            );
+            """
+        )
+        now = datetime.now().isoformat(timespec="seconds")
+        for character_id, name, description, mental_state, verbal_tic, idle_behavior in [
+            ("bc-shenyan", "沈砚", "退学调查员，害怕深水，正在追查沈澜坠塔旧案。", "警惕且急迫", "先看证据", "反复确认黑匣子状态"),
+            ("bc-gulan", "顾岚", "财阀学院优等生，暗中改装旧时代机械，保护顾珩。", "表面顺从、内里叛逆", "别把它交给学院", "摸袖口里的工具"),
+            ("bc-luxingzhou", "陆行舟", "学院监察官，维护秩序但怀疑档案被篡改。", "克制动摇", "按规程来", "检查访客权限记录"),
+        ]:
+            conn.execute(
+                "INSERT INTO bible_characters VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (character_id, novel_id, name, description, mental_state, "压力测试角色边界", verbal_tic, idle_behavior),
+            )
+        for location_id, name, description, location_type in [
+            ("loc-dorm", "沈澜旧宿舍", "封存十年的旧宿舍，黑匣子第一段噪声记录在此被发现。", "dormitory"),
+            ("loc-c307", "C307礼堂后台", "继承人演讲后的监控盲区，圣像旧徽章会触发黑匣子发热。", "checkpoint"),
+            ("loc-tower", "塔顶水箱", "第八章后才能接近的旧服务器藏匿点。", "restricted"),
+        ]:
+            conn.execute(
+                "INSERT INTO bible_locations VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (location_id, novel_id, name, description, location_type, None, now),
+            )
+        for setting_id, name, description, setting_type in [
+            ("ws-ai", "圣像边界", "第6章前只能怀疑旧AI未彻底关闭，不能确认圣像仍活着。", "fact_lock"),
+            ("ws-box", "黑匣子规则", "黑匣子每章只解锁一段，不能提前给出最终真相。", "foreshadow_rule"),
+        ]:
+            conn.execute(
+                "INSERT INTO bible_world_settings VALUES (?, ?, ?, ?, ?, ?)",
+                (setting_id, novel_id, name, description, setting_type, now),
+            )
+        for note_id, event, time_point, description, sort_order in [
+            ("tn-1", "沈澜坠塔事故", "十年前", "官方记录称沈澜从塔顶坠落，但塔顶未必是真正坠落点。", 1),
+            ("tn-2", "沈砚回到学院", "第1章", "沈砚以临时访客身份返回雾港学院。", 2),
+        ]:
+            conn.execute(
+                "INSERT INTO bible_timeline_notes VALUES (?, ?, ?, ?, ?, ?)",
+                (note_id, novel_id, event, time_point, description, sort_order),
+            )
+        conn.execute("INSERT INTO knowledge VALUES (?, ?, ?, ?)", ("k-pressure", novel_id, 1, EXPERIMENT_SPEC["premise"]))
+        conn.execute(
+            "INSERT INTO chapter_summaries VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "cs-prehistory",
+                "k-pressure",
+                0,
+                "压力测试预置：沈砚即将回到雾港学院，黑匣子、坠塔旧案和圣像复苏是同一主线。",
+                "黑匣子尚未解锁；沈砚只知道姐姐留下线索",
+                "沈澜坠塔真相；圣像是否仍活着；顾岚为何警告沈砚",
+                "不要重复进入已抵达地点；上一章终点优先作为下一章起点。",
+                json.dumps(["回到学院", "寻找黑匣子", "建立三人互不信任关系"], ensure_ascii=False),
+                json.dumps(["访客权限", "旧徽章", "电梯井"], ensure_ascii=False),
+                "seeded",
+            ),
+        )
+        for triple_id, subject, predicate, obj, description, chapter_number in [
+            ("tri-box", "黑匣子", "解锁规则", "每章一段", "黑匣子每章只解锁一段，不得提前给出最终真相。", 0),
+            ("tri-ai", "圣像", "信息边界", "第6章前不可确认存活", "第6章前角色只能怀疑旧AI未彻底关闭。", 0),
+            ("tri-gulan", "顾岚", "秘密", "第5章前不公开承认改装电梯", "顾岚的机械能力必须逐步暴露。", 0),
+        ]:
+            conn.execute(
+                "INSERT INTO triples VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (triple_id, novel_id, subject, predicate, obj, chapter_number, "", "fact", "high", "", description, 0, 0.95, "pressure_seed", "", "", now),
+            )
+        conn.execute(
+            "INSERT INTO storylines VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ("sl-main", novel_id, "main_plot", "active", 1, 10, 0, "坠塔旧案与圣像复苏", "三人围绕黑匣子逐章推进旧案真相。", 0, "开局必须建立黑匣子、学院和三人关系。", now),
+        )
+        for index, title, description in [
+            (1, "取得黑匣子第一段", "沈砚回到学院并拿到第一段噪声记录。"),
+            (2, "礼堂旧徽章触发", "圣像旧徽章让黑匣子发热，但不能确认圣像存活。"),
+            (3, "电梯井建立移动桥段", "顾岚带沈砚进入废弃电梯井，陆行舟选择不上报。"),
+        ]:
+            conn.execute(
+                "INSERT INTO storyline_milestones VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (f"slm-{index}", "sl-main", index, title, description, index, index + 1, "[]", "[]"),
+            )
+        conn.execute(
+            "INSERT INTO timeline_registries VALUES (?, ?, ?)",
+            (
+                novel_id,
+                json.dumps(
+                    {
+                        "events": [
+                            {"id": "tl-1", "chapter_number": 0, "event": "沈砚取得临时访客权限", "timestamp": "第1章前"},
+                            {"id": "tl-2", "chapter_number": 0, "event": "沈澜旧宿舍仍处封存状态", "timestamp": "第1章前"},
+                        ]
+                    },
+                    ensure_ascii=False,
+                ),
+                now,
+            ),
+        )
+        conn.execute(
+            "INSERT INTO novel_foreshadow_registry VALUES (?, ?, ?)",
+            (
+                novel_id,
+                json.dumps(
+                    {
+                        "foreshadowings": [
+                            {"id": "fs-box-noise", "description": "黑匣子第一段噪声隐藏沈澜的坐标暗号", "status": "PLANTED", "chapter_planted": 1},
+                            {"id": "fs-old-badge", "description": "圣像旧徽章会触发黑匣子发热", "status": "PLANNED", "chapter_planted": 2},
+                        ]
+                    },
+                    ensure_ascii=False,
+                ),
+                now,
+            ),
+        )
+        conn.execute(
+            "INSERT INTO novel_snapshots VALUES (?, ?, ?, ?, ?)",
+            ("snap-seed", novel_id, "压力测试初始快照", "沈砚尚未进入学院，黑匣子线索即将启动。", now),
+        )
+        conn.execute(
+            "INSERT INTO narrative_events VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                "ne-dialogue-seed",
+                novel_id,
+                0,
+                "沈砚说先看证据，顾岚提醒别交给学院。",
+                "[]",
+                json.dumps(["沈砚：先看证据。", "顾岚：别把它交给学院。", "陆行舟：按规程来。"], ensure_ascii=False),
+                now,
+            ),
+        )
+        conn.execute(
+            "INSERT INTO memory_engine_states VALUES (?, ?, ?)",
+            (
+                novel_id,
+                json.dumps(
+                    {
+                        "fact_locks": [
+                            "沈砚第1章只有临时访客权限",
+                            "第6章前不能确认圣像仍活着",
+                            "黑匣子每章只解锁一段",
+                        ],
+                        "completed_beats": [],
+                    },
+                    ensure_ascii=False,
+                ),
+                0,
+            ),
+        )
+        conn.commit()
+
+    host_database = ReadOnlyHostDatabase(db_path)
+    context = HostContextReader(host_database).read(
+        novel_id,
+        query="黑匣子 圣像 顾岚 沈砚 坠塔",
+        before_chapter=1,
+        limit=6,
+    )
+    summary = HostContextReader(host_database).summary(context)
+    return host_database, {
+        "db_path": str(db_path),
+        "sources": list(NATIVE_SEED_SOURCES),
+        "host_context_summary": summary,
+        "active_sources": summary.get("active_sources") or [],
+        "counts": summary.get("counts") or {},
+    }
+
+
 async def _generate_arm(
     *,
     arm: str,
@@ -813,6 +1119,7 @@ async def _generate_arm(
     timeout: int,
     budget_usd: str | None,
     evolution_enabled: bool,
+    chapter_limit: int | None = None,
     expand_short_chapters: bool = False,
     expansion_min_ratio: float = 0.9,
 ) -> tuple[list[ChapterResult], dict[str, Any]]:
@@ -827,7 +1134,15 @@ async def _generate_arm(
 
     if evolution_enabled:
         storage = PluginStorage(root=output_dir / "plugin_platform")
-        service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage))
+        host_database, native_seed = _seed_pressure_host_context(output_dir, novel_id)
+        service = EvolutionWorldAssistantService(
+            storage=storage,
+            jobs=PluginJobRegistry(storage),
+            host_database=host_database,
+        )
+        service.update_settings({"agent_api": _pressure_agent_api_settings()})
+        evolution_meta["agent_api_config"] = service.get_settings(safe=True).get("agent_api") or {}
+        evolution_meta["seeded_native_context"] = native_seed
         prehistory = await service.after_novel_created(
             {
                 "novel_id": novel_id,
@@ -847,8 +1162,11 @@ async def _generate_arm(
         evolution_meta["prehistory"] = prehistory
         evolution_meta["planning_context"] = planning
 
-    for index, outline in enumerate(EXPERIMENT_SPEC["chapter_outlines"], start=1):
-        print(f"[{arm}] generating chapter {index}/10 (evolution={evolution_enabled})", flush=True)
+    chapter_outlines = _selected_chapter_outlines(chapter_limit)
+    expected_chapters = len(chapter_outlines)
+    evolution_meta["expected_chapters"] = expected_chapters
+    for index, outline in enumerate(chapter_outlines, start=1):
+        print(f"[{arm}] generating chapter {index}/{expected_chapters} (evolution={evolution_enabled})", flush=True)
         evolution_context = ""
         raw_evolution_context_chars = 0
         api2_control_card_chars = 0
@@ -919,7 +1237,7 @@ async def _generate_arm(
             llm_calls.append(expansion_payload)
         chapter_usage = _usage_from_calls(chapter_call_results)
         print(
-            f"[{arm}] chapter {index}/10 done: chars={_chapter_char_count(content)} duration={chapter_usage['duration_seconds']:.1f}s "
+            f"[{arm}] chapter {index}/{expected_chapters} done: chars={_chapter_char_count(content)} duration={chapter_usage['duration_seconds']:.1f}s "
             f"evo_context_chars={len(evolution_context)} raw_evo_chars={raw_evolution_context_chars} "
             f"agent_card_chars={agent_control_card_chars} api2_card_chars={api2_control_card_chars} llm_calls={chapter_usage['call_count']} "
             f"llm_tokens={chapter_usage['total_tokens']} cost=${chapter_usage['total_cost_usd']:.4f}",
@@ -1037,7 +1355,7 @@ def _export_arm(output_dir: Path, arm: str, chapters: list[ChapterResult]) -> Pa
     return path
 
 
-def _load_existing_arm(source_dir: Path, output_dir: Path, arm: str) -> tuple[list[ChapterResult], dict[str, Any]]:
+def _load_existing_arm(source_dir: Path, output_dir: Path, arm: str, *, chapter_limit: int | None = None) -> tuple[list[ChapterResult], dict[str, Any]]:
     chapters: list[ChapterResult] = []
     reused_meta = _load_reused_arm_meta(source_dir, arm)
     reused_metrics = _load_reused_chapter_metrics(source_dir, arm)
@@ -1046,7 +1364,7 @@ def _load_existing_arm(source_dir: Path, output_dir: Path, arm: str) -> tuple[li
         if not isinstance(call, dict) or call.get("chapter_number") is None:
             continue
         calls_by_chapter.setdefault(int(call["chapter_number"]), []).append(call)
-    for index, outline in enumerate(EXPERIMENT_SPEC["chapter_outlines"], start=1):
+    for index, outline in enumerate(_selected_chapter_outlines(chapter_limit), start=1):
         source_path = source_dir / f"{arm}_chapter_{index:02d}.md"
         if not source_path.exists():
             raise FileNotFoundError(f"Missing reused chapter file: {source_path}")
@@ -1083,6 +1401,7 @@ def _load_existing_arm(source_dir: Path, output_dir: Path, arm: str) -> tuple[li
                 or str(metric.get("llm_usage_source") or "none"),
             )
         )
+    reused_meta["expected_chapters"] = len(chapters)
     return chapters, reused_meta
 
 
@@ -1212,15 +1531,24 @@ def _build_leakage_acceptance_report(
     experiment: list[ChapterResult],
     experiment_meta: dict[str, Any],
     metrics: dict[str, Any],
+    expected_chapters: int | None = None,
 ) -> dict[str, Any]:
+    expected_chapters = expected_chapters or EXPERIMENT_SPEC["target_chapters"]
     control_context_chars = sum(chapter.evolution_context_chars for chapter in control)
     control_raw_context_chars = sum(chapter.raw_evolution_context_chars for chapter in control)
     control_api2_chars = sum(chapter.api2_control_card_chars for chapter in control)
+    control_agent_chars = sum(chapter.agent_control_card_chars for chapter in control)
     control_agent_counts = _agent_asset_counts(control_meta)
     experiment_context_chars = sum(chapter.evolution_context_chars for chapter in experiment)
     experiment_agent_counts = _agent_asset_counts(experiment_meta)
     experiment_review_count = len(((experiment_meta.get("review_records") or {}).get("items") or []))
     experiment_run_count = len(((experiment_meta.get("runs") or {}).get("items") or []))
+    experiment_aggregate = ((metrics.get("experiment_on") or {}).get("aggregate") or {})
+    experiment_agent_api_calls = int(experiment_aggregate.get("evolution_agent_api_call_count") or 0)
+    experiment_agent_card_chars = sum(chapter.agent_control_card_chars for chapter in experiment)
+    experiment_native_active_sources = int(experiment_aggregate.get("plotpilot_native_active_source_count") or 0)
+    diagnostics = experiment_meta.get("diagnostics") if isinstance(experiment_meta.get("diagnostics"), dict) else {}
+    agent_api_degraded = _agent_api_degraded_reason(experiment_meta, diagnostics)
     control_checks = [
         {
             "id": "control_has_no_evolution_context",
@@ -1233,14 +1561,19 @@ def _build_leakage_acceptance_report(
             "evidence": {"api2_control_card_chars": control_api2_chars},
         },
         {
+            "id": "control_has_no_agent_control_card",
+            "ok": control_agent_chars == 0,
+            "evidence": {"agent_control_card_chars": control_agent_chars},
+        },
+        {
             "id": "control_has_no_agent_assets",
             "ok": not any(control_agent_counts.values()),
             "evidence": {"agent_asset_counts": control_agent_counts},
         },
         {
             "id": "control_has_ten_chapters",
-            "ok": len(control) == EXPERIMENT_SPEC["target_chapters"],
-            "evidence": {"chapter_count": len(control)},
+            "ok": len(control) == expected_chapters,
+            "evidence": {"chapter_count": len(control), "expected_chapters": expected_chapters},
         },
     ]
     experiment_checks = [
@@ -1256,13 +1589,27 @@ def _build_leakage_acceptance_report(
         },
         {
             "id": "experiment_has_review_records",
-            "ok": experiment_review_count >= EXPERIMENT_SPEC["target_chapters"],
-            "evidence": {"review_record_count": experiment_review_count},
+            "ok": experiment_review_count >= expected_chapters,
+            "evidence": {"review_record_count": experiment_review_count, "expected_chapters": expected_chapters},
+        },
+        {
+            "id": "experiment_agent_api_participated",
+            "ok": experiment_agent_api_calls > 0 or bool(agent_api_degraded),
+            "evidence": {
+                "call_count": experiment_agent_api_calls,
+                "agent_control_card_chars": experiment_agent_card_chars,
+                "degraded_reason": agent_api_degraded,
+            },
+        },
+        {
+            "id": "experiment_native_context_participated",
+            "ok": experiment_native_active_sources > 0,
+            "evidence": {"active_source_count": experiment_native_active_sources},
         },
         {
             "id": "experiment_has_ten_chapters",
-            "ok": len(experiment) == EXPERIMENT_SPEC["target_chapters"],
-            "evidence": {"chapter_count": len(experiment)},
+            "ok": len(experiment) == expected_chapters,
+            "evidence": {"chapter_count": len(experiment), "expected_chapters": expected_chapters},
         },
     ]
     usage_checks = []
@@ -1271,10 +1618,11 @@ def _build_leakage_acceptance_report(
         usage_checks.append(
             {
                 "id": f"{arm}_has_generation_usage",
-                "ok": int(aggregate.get("generation_llm_call_count") or 0) >= EXPERIMENT_SPEC["target_chapters"],
+                "ok": int(aggregate.get("generation_llm_call_count") or 0) >= expected_chapters,
                 "evidence": {
                     "generation_llm_call_count": aggregate.get("generation_llm_call_count"),
                     "generation_llm_total_tokens": aggregate.get("generation_llm_total_tokens"),
+                    "expected_chapters": expected_chapters,
                 },
             }
         )
@@ -1290,12 +1638,31 @@ def _build_leakage_acceptance_report(
         "summary": {
             "control_total_evolution_context_chars": control_context_chars,
             "experiment_total_evolution_context_chars": experiment_context_chars,
+            "experiment_agent_api_call_count": experiment_agent_api_calls,
+            "experiment_agent_control_card_chars": experiment_agent_card_chars,
+            "experiment_native_active_source_count": experiment_native_active_sources,
             "experiment_agent_asset_counts": experiment_agent_counts,
             "experiment_review_record_count": experiment_review_count,
             "control_transition_conflicts": ((metrics.get("control_off") or {}).get("aggregate") or {}).get("transition_conflict_count"),
             "experiment_transition_conflicts": ((metrics.get("experiment_on") or {}).get("aggregate") or {}).get("transition_conflict_count"),
         },
     }
+
+
+def _agent_api_degraded_reason(experiment_meta: dict[str, Any], diagnostics: dict[str, Any]) -> str:
+    for record in ((experiment_meta.get("context_control_cards") or {}).get("items") or []):
+        if isinstance(record, dict) and record.get("source") == "agent_api" and record.get("error"):
+            return str(record.get("error") or "")[:240]
+    for event in (((experiment_meta.get("agent_status") or {}).get("latest_events") or [])):
+        if isinstance(event, dict) and event.get("intent") == "control_card":
+            outcome = event.get("outcome") if isinstance(event.get("outcome"), dict) else {}
+            if outcome.get("status") == "failed":
+                return str(outcome.get("error") or "agent_api_failed")[:240]
+    risks = diagnostics.get("risks") if isinstance(diagnostics.get("risks"), list) else []
+    for risk in risks:
+        if isinstance(risk, dict) and str(risk.get("source") or "").startswith("agent_api"):
+            return str(risk.get("evidence") or risk.get("suggestion") or "agent_api_degraded")[:240]
+    return ""
 
 
 def _write_evaluation_criteria(output_dir: Path) -> Path:
@@ -1307,17 +1674,19 @@ def _write_evaluation_criteria(output_dir: Path) -> Path:
     return path
 
 
-def _build_claude_scoring_prompt(output_dir: Path, metrics: dict[str, Any]) -> str:
+def _build_claude_scoring_prompt(output_dir: Path, metrics: dict[str, Any], *, expected_chapters: int) -> str:
     control = (output_dir / "control_off_export.md").read_text(encoding="utf-8")
     experiment = (output_dir / "experiment_on_export.md").read_text(encoding="utf-8")
     criteria = (output_dir / "evaluation_criteria.md").read_text(encoding="utf-8")
     metrics_json = json.dumps(metrics, ensure_ascii=False, indent=2)
-    return f"""你是小说工程化评测员。请参照评价指标，对同题材、同章纲的两组10章小说进行打分。
+    transition_pairs = "、".join(f"{index}->{index + 1}" for index in range(1, expected_chapters))
+    transition_instruction = transition_pairs or "单章校准样本无相邻章节对；请重点检查章内状态连续性"
+    return f"""你是小说工程化评测员。请参照评价指标，对同题材、同章纲的两组{expected_chapters}章小说进行打分。
 
 要求：
 1. 每个指标按10分制分别给“对照组”和“实验组”评分。
 2. 计算加权总分（满分10）。
-3. 评分前必须先输出“相邻章节连续性表”，逐对检查 1->2、2->3 ... 9->10；若自动指标已有 transition_conflicts，请逐条复核。
+3. 评分前必须先输出“相邻章节连续性表”，逐对检查 {transition_instruction}；若自动指标已有 transition_conflicts，请逐条复核。
 4. 对重复抵达、时间回退、物件瞬移、权限状态重置、已知信息回滚等硬冲突，必须扣“相邻章节状态连续性”和“跨章连续性”分。
 5. 对“没有说话”“没有回答”“沉默了几秒”等沉默套话做频率复核；即使自动 n-gram 重复率良好，也要在“冗余与重复控制”里扣除高频套话。
 6. 明确指出 Evolution 插件开启后对连续性、伏笔、信息边界、人物状态的正负影响。
@@ -1361,6 +1730,12 @@ def _write_claude_artifact(output_dir: Path, prompt: str, output: str) -> Path:
 async def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--target-chars", type=int, default=2500)
+    parser.add_argument(
+        "--chapter-limit",
+        type=int,
+        default=EXPERIMENT_SPEC["target_chapters"],
+        help="Run only the first N chapter outlines. Use 2-3 for calibration; default runs the full A/B.",
+    )
     parser.add_argument("--model", default="sonnet")
     parser.add_argument("--timeout", type=int, default=420)
     parser.add_argument("--budget-usd", default=None)
@@ -1383,6 +1758,7 @@ async def main() -> None:
         help="Reuse an existing pressure-test directory for control_off chapters and generate only experiment_on.",
     )
     args = parser.parse_args()
+    args.chapter_limit = _expected_chapter_count(args.chapter_limit)
 
     output_dir = Path(args.output_dir) if args.output_dir else ARTIFACT_ROOT / f"evolution-pressure-{_now_slug()}"
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -1414,7 +1790,7 @@ async def main() -> None:
     reused_control_dir = Path(args.reuse_control_dir).expanduser().resolve() if args.reuse_control_dir else None
     if reused_control_dir:
         print(f"[control_off] reusing existing chapters from {reused_control_dir}", flush=True)
-        control, control_evo = _load_existing_arm(reused_control_dir, output_dir, "control_off")
+        control, control_evo = _load_existing_arm(reused_control_dir, output_dir, "control_off", chapter_limit=args.chapter_limit)
     else:
         control, control_evo = await _generate_arm(
             arm="control_off",
@@ -1424,6 +1800,7 @@ async def main() -> None:
             timeout=args.timeout,
             budget_usd=args.budget_usd,
             evolution_enabled=False,
+            chapter_limit=args.chapter_limit,
             expand_short_chapters=False,
         )
     experiment, experiment_evo = await _generate_arm(
@@ -1434,6 +1811,7 @@ async def main() -> None:
         timeout=args.timeout,
         budget_usd=args.budget_usd,
         evolution_enabled=True,
+        chapter_limit=args.chapter_limit,
         expand_short_chapters=args.expand_short_chapters,
         expansion_min_ratio=args.expansion_min_ratio,
     )
@@ -1454,6 +1832,7 @@ async def main() -> None:
         experiment=experiment,
         experiment_meta=experiment_evo,
         metrics=metrics,
+        expected_chapters=args.chapter_limit,
     )
     leakage_acceptance_path = _write_json(output_dir / "leakage_acceptance.json", leakage_acceptance)
     transition_path = output_dir / "transition_conflicts.json"
@@ -1472,7 +1851,7 @@ async def main() -> None:
     evo_path = output_dir / "evolution_state.json"
     evo_path.write_text(json.dumps(experiment_evo, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    scoring_prompt = _build_claude_scoring_prompt(output_dir, metrics)
+    scoring_prompt = _build_claude_scoring_prompt(output_dir, metrics, expected_chapters=args.chapter_limit)
     scoring_prompt_path = output_dir / "claude_scoring_prompt.md"
     scoring_prompt_path.write_text(scoring_prompt, encoding="utf-8")
     print("[scoring] calling Claude Code for metric-based evaluation", flush=True)
@@ -1549,6 +1928,7 @@ async def main() -> None:
         "spec": EXPERIMENT_SPEC,
         "model": args.model,
         "target_chars": args.target_chars,
+        "chapter_limit": args.chapter_limit,
         "mode": "reuse_control_generate_experiment" if reused_control_dir else "generate_control_and_experiment",
         "use_api2_control_card": False,
         "agent_api_is_primary": True,
