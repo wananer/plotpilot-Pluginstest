@@ -29,6 +29,7 @@ from application.ai.structured_json_pipeline import (
     parse_and_repair_json,
     sanitize_llm_output,
 )
+from application.ai.llm_audit import llm_audit_context
 
 logger = logging.getLogger(__name__)
 
@@ -151,6 +152,7 @@ async def llm_chapter_extract_bundle(
     chapter_content: str,
     chapter_number: int,
     pending_foreshadows: Optional[List[str]] = None,
+    novel_id: str = "",
 ) -> dict:
     """一次 LLM 调用：叙事摘要 + 关键事件/埋线 + 人物关系三元组 + 伏笔线索 + 伏笔消费检测 + 故事线进展 + 张力值 + 对话提取（避免多次调用）。
     
@@ -208,7 +210,13 @@ async def llm_chapter_extract_bundle(
     prompt = Prompt(system=system, user=user)
     config = GenerationConfig(max_tokens=4096, temperature=0.45)
 
-    result = await llm.generate(prompt, config)
+    with llm_audit_context(
+        novel_id=novel_id,
+        chapter_number=chapter_number,
+        phase="chapter_narrative_sync",
+        source="chapter_narrative_sync.llm_chapter_extract_bundle",
+    ):
+        result = await llm.generate(prompt, config)
     raw = result.content if hasattr(result, "content") else str(result)
     data = _extract_json_object(raw)
 
@@ -1052,7 +1060,8 @@ async def sync_chapter_narrative_after_save(
     try:
         bundle = await llm_chapter_extract_bundle(
             llm_service, content, chapter_number,
-            pending_foreshadows=pending_foreshadow_descs if pending_foreshadow_descs else None
+            pending_foreshadows=pending_foreshadow_descs if pending_foreshadow_descs else None,
+            novel_id=novel_id,
         )
         summary = bundle.get("summary") or ""
         key_events = bundle.get("key_events") or ""

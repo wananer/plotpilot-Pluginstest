@@ -13,6 +13,7 @@ from hashlib import sha256
 from typing import Any, Optional, Union, Tuple
 from urllib.parse import urlparse, urlunparse
 
+from application.ai.llm_audit import audit_generate_call
 from plugins.platform.job_registry import PluginJobRecord, PluginJobRegistry
 from plugins.platform.host_database import ReadOnlyHostDatabase, create_default_readonly_host_database
 from plugins.platform.plugin_storage import PluginStorage
@@ -533,14 +534,22 @@ class EvolutionWorldAssistantService:
                 outline=outline,
                 raw_context=raw_context,
             )
+            config = _make_generation_config(
+                model=str(settings.get("model") or ""),
+                max_tokens=_clamp_int(settings.get("max_tokens"), 256, 4096, 1200),
+                temperature=_clamp_float(settings.get("temperature"), 0.0, 2.0, 0.1),
+            )
             result = _run_async_blocking(
-                llm_service.generate(
-                    prompt,
-                    _make_generation_config(
-                        model=str(settings.get("model") or ""),
-                        max_tokens=_clamp_int(settings.get("max_tokens"), 256, 4096, 1200),
-                        temperature=_clamp_float(settings.get("temperature"), 0.0, 2.0, 0.1),
-                    ),
+                audit_generate_call(
+                    lambda: llm_service.generate(prompt, config),
+                    prompt=prompt,
+                    config=config,
+                    metadata={
+                        "novel_id": novel_id,
+                        "chapter_number": chapter_number,
+                        "phase": "evolution_agent_control_card",
+                        "source": "world_evolution_core._build_agent_control_card",
+                    },
                 )
             )
             content = _clean_control_card(result.content)
@@ -1158,14 +1167,22 @@ class EvolutionWorldAssistantService:
         try:
             llm_service = self._resolve_agent_llm_service(settings)
             prompt = _build_agent_reflection_prompt(chapter_number=chapter_number, capsules=capsules, issues=issues)
+            config = _make_generation_config(
+                model=str(settings.get("model") or ""),
+                max_tokens=_clamp_int(settings.get("max_tokens"), 128, 2048, 800),
+                temperature=_clamp_float(settings.get("temperature"), 0.0, 2.0, 0.1),
+            )
             result = _run_async_blocking(
-                llm_service.generate(
-                    prompt,
-                    _make_generation_config(
-                        model=str(settings.get("model") or ""),
-                        max_tokens=_clamp_int(settings.get("max_tokens"), 128, 2048, 800),
-                        temperature=_clamp_float(settings.get("temperature"), 0.0, 2.0, 0.1),
-                    ),
+                audit_generate_call(
+                    lambda: llm_service.generate(prompt, config),
+                    prompt=prompt,
+                    config=config,
+                    metadata={
+                        "novel_id": novel_id,
+                        "chapter_number": chapter_number,
+                        "phase": "evolution_agent_reflection",
+                        "source": "world_evolution_core._build_agent_reflection",
+                    },
                 )
             )
             content = str(result.content or "").strip()[:1200]

@@ -23,6 +23,7 @@ from domain.novel.value_objects.consistency_context import ConsistencyContext
 from domain.novel.value_objects.novel_id import NovelId
 from domain.ai.services.llm_service import LLMService, GenerationConfig
 from domain.ai.value_objects.prompt import Prompt
+from application.ai.llm_audit import llm_audit_context
 from application.ai.llm_output_sanitize import strip_reasoning_artifacts
 from application.workflows.beat_continuation import format_prior_draft_for_prompt
 
@@ -378,7 +379,15 @@ class AutoNovelGenerationWorkflow:
                     chapter_draft_so_far=prior_draft,
                 )
                 
-                llm_result = await self.llm_service.generate(prompt, config)
+                with llm_audit_context(
+                    novel_id=novel_id,
+                    chapter_number=chapter_number,
+                    phase="chapter_generation_beat",
+                    beat_index=i,
+                    total_beats=len(beats),
+                    source="auto_novel_generation_workflow.generate_chapter",
+                ):
+                    llm_result = await self.llm_service.generate(prompt, config)
                 beat_content = llm_result.content
                 content_parts.append(beat_content)
             
@@ -395,7 +404,13 @@ class AutoNovelGenerationWorkflow:
                 voice_anchors=bundle.get("voice_anchors") or "",
             )
             logger.info(f"  → 发送请求到 LLM (max_tokens={config.max_tokens}, temperature={config.temperature})")
-            llm_result = await self.llm_service.generate(prompt, config)
+            with llm_audit_context(
+                novel_id=novel_id,
+                chapter_number=chapter_number,
+                phase="chapter_generation_beat",
+                source="auto_novel_generation_workflow.generate_chapter",
+            ):
+                llm_result = await self.llm_service.generate(prompt, config)
             content = strip_reasoning_artifacts(llm_result.content or "")
             logger.info(f"  ✓ LLM 响应已接收: {len(content)} 字符")
         
@@ -520,15 +535,24 @@ class AutoNovelGenerationWorkflow:
                     )
                     
                     beat_content = ""
-                    async for piece in self.llm_service.stream_generate(prompt, config):
-                        chunk_count += 1
-                        beat_content += piece
-                        yield {
-                            "type": "chunk", 
-                            "text": piece,
-                            "beat_index": i,
-                            "beat_focus": beat.focus
-                        }
+                    with llm_audit_context(
+                        novel_id=novel_id,
+                        chapter_number=chapter_number,
+                        phase="chapter_generation_beat",
+                        beat_index=i,
+                        total_beats=len(beats),
+                        source="auto_novel_generation_workflow.generate_chapter_stream",
+                    ):
+                        stream = self.llm_service.stream_generate(prompt, config)
+                        async for piece in stream:
+                            chunk_count += 1
+                            beat_content += piece
+                            yield {
+                                "type": "chunk", 
+                                "text": piece,
+                                "beat_index": i,
+                                "beat_focus": beat.focus
+                            }
                     
                     content_parts.append(beat_content)
                     yield {"type": "beat_done", "beat_index": i, "beat_content_length": len(beat_content)}
@@ -548,21 +572,28 @@ class AutoNovelGenerationWorkflow:
                 logger.info(f"  → 发送流式请求到 LLM")
                 parts: list[str] = []
                 total_chars = 0
-                async for piece in self.llm_service.stream_generate(prompt, config):
-                    parts.append(piece)
-                    chunk_count += 1
-                    total_chars += len(piece)
-                    # 增强事件：包含累计字数和预估 token（中文约 1.5 字/token，英文约 4 字/token）
-                    estimated_tokens = int(total_chars / 1.5)  # 简化估算
-                    yield {
-                        "type": "chunk", 
-                        "text": piece,
-                        "stats": {
-                            "chars": total_chars,
-                            "chunks": chunk_count,
-                            "estimated_tokens": estimated_tokens,
+                with llm_audit_context(
+                    novel_id=novel_id,
+                    chapter_number=chapter_number,
+                    phase="chapter_generation_stream",
+                    source="auto_novel_generation_workflow.generate_chapter_stream",
+                ):
+                    stream = self.llm_service.stream_generate(prompt, config)
+                    async for piece in stream:
+                        parts.append(piece)
+                        chunk_count += 1
+                        total_chars += len(piece)
+                        # 增强事件：包含累计字数和预估 token（中文约 1.5 字/token，英文约 4 字/token）
+                        estimated_tokens = int(total_chars / 1.5)  # 简化估算
+                        yield {
+                            "type": "chunk", 
+                            "text": piece,
+                            "stats": {
+                                "chars": total_chars,
+                                "chunks": chunk_count,
+                                "estimated_tokens": estimated_tokens,
+                            }
                         }
-                    }
 
                 content = strip_reasoning_artifacts("".join(parts))
             logger.info(f"  ✓ LLM 流式响应完成: {chunk_count} 个块, {len(content)} 字符")
@@ -641,7 +672,13 @@ class AutoNovelGenerationWorkflow:
                 ),
             )
             cfg = GenerationConfig(max_tokens=1024, temperature=0.7)
-            out = await self.llm_service.generate(outline_prompt, cfg)
+            with llm_audit_context(
+                novel_id=novel_id,
+                chapter_number=chapter_number,
+                phase="chapter_outline_suggestion",
+                source="auto_novel_generation_workflow.suggest_outline",
+            ):
+                out = await self.llm_service.generate(outline_prompt, cfg)
             text = strip_reasoning_artifacts((out.content or "").strip())
             if text:
                 return text

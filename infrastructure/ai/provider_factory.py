@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from typing import AsyncIterator
+from typing import AsyncIterator, Optional
 
+from application.ai.llm_audit import audit_generate_call, audit_stream_call
 from application.ai.llm_control_service import LLMControlService, LLMProfile
 from domain.ai.services.llm_service import GenerationConfig, GenerationResult, LLMService
 from domain.ai.value_objects.prompt import Prompt
@@ -101,10 +102,18 @@ class DynamicLLMService(LLMService):
     async def generate(self, prompt: Prompt, config: GenerationConfig) -> GenerationResult:
         provider = self._resolve_provider()
         effective_config = self._merge_config(config, provider)
-        return await provider.generate(prompt, effective_config)
+        return await audit_generate_call(
+            lambda: provider.generate(prompt, effective_config),
+            prompt=prompt,
+            config=effective_config,
+        )
 
     async def stream_generate(self, prompt: Prompt, config: GenerationConfig) -> AsyncIterator[str]:
         provider = self._resolve_provider()
         effective_config = self._merge_config(config, provider)
-        async for chunk in provider.stream_generate(prompt, effective_config):
+        async for chunk in audit_stream_call(
+            lambda: provider.stream_generate(prompt, effective_config),
+            prompt=prompt,
+            config=effective_config,
+        ):
             yield chunk

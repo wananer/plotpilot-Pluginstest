@@ -21,6 +21,7 @@ from domain.cast.repositories.cast_repository import CastRepository
 from domain.novel.repositories.timeline_repository import TimelineRepository
 from domain.novel.repositories.storyline_repository import StorylineRepository
 from domain.novel.repositories.foreshadowing_repository import ForeshadowingRepository
+from application.ai.llm_audit import llm_audit_context
 from application.ai.llm_json_extract import parse_llm_json_to_dict
 from domain.ai.services.llm_service import LLMService, GenerationConfig
 from domain.ai.value_objects.prompt import Prompt
@@ -297,7 +298,14 @@ class ChapterReviewService:
                 temperature=self._DEFAULT_TEMPERATURE
             )
 
-            result = await self.llm_service.generate(prompt, config)
+            with llm_audit_context(
+                novel_id=novel_id,
+                chapter_number=chapter.chapter_number,
+                phase="chapter_review_character",
+                character_name=char_name,
+                source="chapter_review_service._check_character_consistency",
+            ):
+                result = await self.llm_service.generate(prompt, config)
             data, errs = parse_llm_json_to_dict(result.content)
 
             if data:
@@ -351,7 +359,13 @@ class ChapterReviewService:
                 temperature=self._DEFAULT_TEMPERATURE
             )
 
-            result = await self.llm_service.generate(prompt, config)
+            with llm_audit_context(
+                novel_id=novel_id,
+                chapter_number=chapter.chapter_number,
+                phase="chapter_review_timeline",
+                source="chapter_review_service._check_timeline_consistency",
+            ):
+                result = await self.llm_service.generate(prompt, config)
             data, errs = parse_llm_json_to_dict(result.content)
 
             if data:
@@ -398,7 +412,13 @@ class ChapterReviewService:
             temperature=self._DEFAULT_TEMPERATURE
         )
 
-        result = await self.llm_service.generate(prompt, config)
+        with llm_audit_context(
+            novel_id=novel_id,
+            chapter_number=chapter.chapter_number,
+            phase="chapter_review_storyline",
+            source="chapter_review_service._check_storyline_consistency",
+        ):
+            result = await self.llm_service.generate(prompt, config)
         data, errs = parse_llm_json_to_dict(result.content)
 
         if data:
@@ -452,7 +472,13 @@ class ChapterReviewService:
                 temperature=self._DEFAULT_TEMPERATURE
             )
 
-            result = await self.llm_service.generate(prompt, config)
+            with llm_audit_context(
+                novel_id=novel_id,
+                chapter_number=chapter.chapter_number,
+                phase="chapter_review_foreshadow",
+                source="chapter_review_service._check_foreshadowing_usage",
+            ):
+                result = await self.llm_service.generate(prompt, config)
             data, errs = parse_llm_json_to_dict(result.content)
 
             if data:
@@ -499,7 +525,14 @@ class ChapterReviewService:
                 temperature=self._DEFAULT_TEMPERATURE
             )
 
-            result = await self.llm_service.generate(prompt, config)
+            with llm_audit_context(
+                novel_id=getattr(chapter, "novel_id", ""),
+                chapter_number=chapter.chapter_number,
+                phase="chapter_review_storyline",
+                review_subphase="improvement_suggestions",
+                source="chapter_review_service._generate_improvement_suggestions",
+            ):
+                result = await self.llm_service.generate(prompt, config)
             data, errs = parse_llm_json_to_dict(result.content)
 
             if data:
