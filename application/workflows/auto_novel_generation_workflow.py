@@ -476,6 +476,8 @@ class AutoNovelGenerationWorkflow:
             logger.info(f"========================================")
             logger.info(f"开始流式生成章节: 小说={novel_id}, 章节={chapter_number}")
             logger.info(f"========================================")
+            self._current_novel_id = novel_id
+            self._current_chapter_number = chapter_number
 
             yield {"type": "phase", "phase": "planning"}
             yield {"type": "phase", "phase": "context"}
@@ -964,7 +966,13 @@ class AutoNovelGenerationWorkflow:
         if self.state_extractor:
             try:
                 logger.info(f"Extracting chapter state using StateExtractor for chapter {chapter_number}")
-                return await self.state_extractor.extract_chapter_state(content)
+                with llm_audit_context(
+                    novel_id=self._current_novel_id,
+                    chapter_number=chapter_number,
+                    phase="chapter_narrative_sync",
+                    source="auto_novel_generation_workflow._extract_chapter_state",
+                ):
+                    return await self.state_extractor.extract_chapter_state(content)
             except Exception as e:
                 logger.warning(f"StateExtractor failed: {e}, returning empty state")
 

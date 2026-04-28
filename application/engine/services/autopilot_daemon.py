@@ -25,6 +25,7 @@ from application.engine.services.background_task_service import BackgroundTaskSe
 from application.workflows.auto_novel_generation_workflow import AutoNovelGenerationWorkflow
 from application.engine.services.chapter_aftermath_pipeline import ChapterAftermathPipeline
 from application.engine.services.style_constraint_builder import build_style_summary
+from application.ai.llm_audit import llm_audit_context
 from application.ai.llm_output_sanitize import strip_reasoning_artifacts
 from application.ai.llm_retry_policy import LLM_MAX_TOTAL_ATTEMPTS
 from application.workflows.beat_continuation import format_prior_draft_for_prompt
@@ -860,7 +861,7 @@ class AutopilotDaemon:
         novel.audit_progress = "tension_scoring"
         self._flush_novel(novel)
 
-        tension = await self._score_tension(content)
+        tension = await self._score_tension(content, novel_id=novel.novel_id.value, chapter_number=chapter_num)
         novel.last_chapter_tension = tension
         # 保存张力值到章节（用于张力曲线图）
         chapter.update_tension_score(tension * 10)  # 转换为 0-100 范围
@@ -1060,7 +1061,14 @@ class AutopilotDaemon:
             temperature=0.35,
         )
         try:
-            result = await self.llm_service.generate(prompt, config)
+            with llm_audit_context(
+                novel_id=getattr(novel.novel_id, "value", str(novel.novel_id)),
+                chapter_number=getattr(chapter, "number", None),
+                phase="chapter_generation_beat",
+                rewrite_attempt=attempt,
+                source="autopilot_daemon._rewrite_chapter_for_voice",
+            ):
+                result = await self.llm_service.generate(prompt, config)
         except Exception as e:
             logger.warning("[%s] 文风定向修文失败（attempt=%d）：%s", novel.novel_id, attempt, e)
             return None
@@ -1257,7 +1265,7 @@ class AutopilotDaemon:
         except Exception as e:
             logger.warning(f"[{novel_id}] 宏观诊断后台任务失败: {e}", exc_info=True)
 
-    async def _score_tension(self, content: str) -> int:
+    async def _score_tension(self, content: str, *, novel_id: str = "", chapter_number: int | None = None) -> int:
         """给章节打张力分（1-10），用于判断是否插入缓冲章"""
         if not content or len(content) < 200:
             return 5  # 默认中等张力
@@ -1274,7 +1282,13 @@ class AutopilotDaemon:
 张力分（只输出数字）："""
             )
             config = GenerationConfig(max_tokens=5, temperature=0.1)
-            result = await self.llm_service.generate(prompt, config)
+            with llm_audit_context(
+                novel_id=novel_id,
+                chapter_number=chapter_number,
+                phase="chapter_narrative_sync",
+                source="autopilot_daemon._score_tension",
+            ):
+                result = await self.llm_service.generate(prompt, config)
             raw = result.content.strip() if hasattr(result, "content") else str(result).strip()
             score = int(''.join(filter(str.isdigit, raw[:3])))
             return max(1, min(10, score))
@@ -1307,17 +1321,24 @@ class AutopilotDaemon:
             watch_task = asyncio.create_task(_watch_stop_from_db())
 
         try:
-            async for chunk in self.llm_service.stream_generate(prompt, config):
-                if novel is not None and stop_detected.is_set():
-                    break
-                content += chunk
-                
-                # 实时推送增量文字到全局流式队列
-                if novel is not None and chunk:
-                    await self._push_streaming_chunk(novel.novel_id.value, chunk)
-                
-                if novel is not None and stop_detected.is_set():
-                    break
+            with llm_audit_context(
+                novel_id=str(nid or ""),
+                chapter_number=getattr(novel, "current_chapter_number", None) if novel is not None else None,
+                phase="chapter_generation_beat",
+                source="autopilot_daemon._stream_llm_with_stop_watch",
+            ):
+                stream = self.llm_service.stream_generate(prompt, config)
+                async for chunk in stream:
+                    if novel is not None and stop_detected.is_set():
+                        break
+                    content += chunk
+                    
+                    # 实时推送增量文字到全局流式队列
+                    if novel is not None and chunk:
+                        await self._push_streaming_chunk(novel.novel_id.value, chunk)
+                    
+                    if novel is not None and stop_detected.is_set():
+                        break
         finally:
             stop_detected.set()
             if watch_task is not None:

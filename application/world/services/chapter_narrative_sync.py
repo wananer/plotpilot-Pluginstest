@@ -1088,11 +1088,17 @@ async def sync_chapter_narrative_after_save(
                 pass
 
         tension_svc = TensionScoringService(llm_service)
-        tension_dimensions = await tension_svc.score_chapter(
-            chapter_content=content,
+        with llm_audit_context(
+            novel_id=novel_id,
             chapter_number=chapter_number,
-            prev_chapter_tension=prev_tension,
-        )
+            phase="chapter_narrative_sync",
+            source="chapter_narrative_sync.tension_scoring",
+        ):
+            tension_dimensions = await tension_svc.score_chapter(
+                chapter_content=content,
+                chapter_number=chapter_number,
+                prev_chapter_tension=prev_tension,
+            )
         logger.info(
             "独立张力评分完成 novel=%s ch=%s composite=%.1f plot=%.0f emotional=%.0f pacing=%.0f",
             novel_id, chapter_number,

@@ -21,6 +21,7 @@ from infrastructure.persistence.database.story_node_repository import StoryNodeR
 from infrastructure.persistence.database.chapter_element_repository import ChapterElementRepository
 from domain.ai.services.llm_service import LLMService, GenerationConfig
 from domain.ai.value_objects.prompt import Prompt
+from application.ai.llm_audit import llm_audit_context
 from application.audit.services.macro_merge_engine import MacroMergeEngine, MergePlan, MergeConflictException
 from plugins.platform.host_integration import collect_story_planning_context_with_plugins
 
@@ -328,7 +329,12 @@ class ContinuousPlanningService:
 
                 # 调用 LLM 生成规划
                 config = GenerationConfig(max_tokens=4096, temperature=0.7)
-                response = await self.llm_service.generate(prompt, config)
+                with llm_audit_context(
+                    novel_id=novel_id,
+                    phase="chapter_outline_suggestion",
+                    source="continuous_planning_service.generate_macro_plan",
+                ):
+                    response = await self.llm_service.generate(prompt, config)
                 structure = self._parse_llm_response(response)
             else:
                 structure = await self._generate_precise_macro_plan(
@@ -398,7 +404,12 @@ class ContinuousPlanningService:
             max_tokens=self._calculate_precise_max_tokens(structure_preference),
             temperature=0.7,
         )
-        response = await self.llm_service.generate(prompt, config)
+        with llm_audit_context(
+            novel_id=novel_id,
+            phase="chapter_outline_suggestion",
+            source="continuous_planning_service._generate_precise_macro_plan",
+        ):
+            response = await self.llm_service.generate(prompt, config)
         updates = self._parse_llm_response(response)
         self._merge_precise_structure_updates(
             skeleton=skeleton,
@@ -426,7 +437,13 @@ class ContinuousPlanningService:
                 max_tokens=self._calculate_precise_repair_max_tokens(incomplete_acts),
                 temperature=0.5,
             )
-            repair_response = await self.llm_service.generate(repair_prompt, repair_config)
+            with llm_audit_context(
+                novel_id=novel_id,
+                phase="chapter_outline_suggestion",
+                planning_subphase="macro_repair",
+                source="continuous_planning_service._generate_precise_macro_plan",
+            ):
+                repair_response = await self.llm_service.generate(repair_prompt, repair_config)
             repair_updates = self._parse_llm_response(repair_response)
             self._merge_precise_structure_updates(
                 skeleton=skeleton,
@@ -1069,9 +1086,14 @@ class ContinuousPlanningService:
         )
 
         try:
-            response = await self.llm_service.generate(
-                prompt, GenerationConfig(max_tokens=4096, temperature=0.7)
-            )
+            with llm_audit_context(
+                novel_id=str(getattr(act_node.novel_id, "value", act_node.novel_id)),
+                phase="chapter_outline_suggestion",
+                source="continuous_planning_service.generate_chapters_for_act",
+            ):
+                response = await self.llm_service.generate(
+                    prompt, GenerationConfig(max_tokens=4096, temperature=0.7)
+                )
         except Exception as e:
             logger.warning(f"幕级规划 LLM 调用失败 act={act_id}: {e}")
             return {"success": False, "act_id": act_id, "chapters": [], "error": str(e)}
@@ -2291,7 +2313,12 @@ class ContinuousPlanningService:
         prompt = self._build_next_act_prompt_with_dual_track(current_act, dual_track_context)
         
         try:
-            response = await self.llm_service.generate(prompt, GenerationConfig(max_tokens=4096, temperature=0.7))
+            with llm_audit_context(
+                novel_id=novel_id,
+                phase="chapter_outline_suggestion",
+                source="continuous_planning_service.create_next_act_auto",
+            ):
+                response = await self.llm_service.generate(prompt, GenerationConfig(max_tokens=4096, temperature=0.7))
             result = self._parse_llm_response(response)
             
             # 确保返回必要的字段

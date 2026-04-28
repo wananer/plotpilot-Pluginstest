@@ -277,7 +277,7 @@ def _estimate_tokens(text: str) -> int:
 
 
 def _infer_phase() -> str:
-    for frame in inspect.stack()[2:12]:
+    for frame in inspect.stack()[2:40]:
         filename = frame.filename.replace("\\", "/")
         function = frame.function
         if "auto_novel_generation_workflow.py" in filename:
@@ -298,6 +298,12 @@ def _infer_phase() -> str:
                 return "chapter_review_storyline"
             if "foreshadow" in function:
                 return "chapter_review_foreshadow"
+        if "continuous_planning_service.py" in filename:
+            return "chapter_outline_suggestion"
+        if "autopilot_daemon.py" in filename:
+            if "tension" in function or "audit" in function:
+                return "chapter_narrative_sync"
+            return "chapter_generation_beat"
     return "unknown"
 
 
