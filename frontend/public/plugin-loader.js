@@ -303,13 +303,15 @@
     return runtime;
   }
 
-  function loadScript(runtime, src) {
+  async function loadScript(runtime, src) {
     if (!src || typeof src !== 'string') return;
     if (runtime.scripts.has(src)) return;
     if (document.querySelector(`script[data-plugin-src="${src}"]`)) {
       runtime.scripts.mark(src);
       return;
     }
+    const valid = await validatePluginScript(runtime, src);
+    if (!valid) return;
 
     const script = document.createElement('script');
     script.dataset.pluginSrc = src;
@@ -324,6 +326,30 @@
       runtime.events.emit('script:error', { src });
     });
     document.body.appendChild(script);
+  }
+
+  async function validatePluginScript(runtime, src) {
+    try {
+      const response = await fetch(src, {
+        credentials: 'same-origin',
+        headers: { Accept: 'application/javascript,text/javascript,*/*;q=0.1' },
+      });
+      if (!response.ok) {
+        runtime.events.emit('script:error', { src, status: response.status });
+        return false;
+      }
+      const contentType = String(response.headers.get('content-type') || '').toLowerCase();
+      if (contentType.includes('text/html')) {
+        runtime.events.emit('script:error', { src, status: response.status, reason: 'html-response' });
+        console.warn('[PlotPilot] plugin script skipped because it returned HTML:', src);
+        return false;
+      }
+      return true;
+    } catch (error) {
+      runtime.events.emit('script:error', { src, error: String(error) });
+      console.warn('[PlotPilot] plugin script validation failed:', src, error);
+      return false;
+    }
   }
 
   function loadStyle(runtime, href) {
