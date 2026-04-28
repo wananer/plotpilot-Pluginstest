@@ -935,6 +935,9 @@ async def test_agent_api_control_card_setting_compresses_context_inside_evolutio
     assert records[-1]["provider_mode"] == "custom"
     assert records[-1]["source"] == "agent_api"
     assert records[-1]["token_usage"]["total_tokens"] == 168
+    status = service.get_agent_status("novel-agent-control-card")
+    assert status["agent_api_usage"]["aggregate"]["call_count"] == 1
+    assert status["agent_api_usage"]["aggregate"]["total_tokens"] == 168
 
 
 @pytest.mark.asyncio
@@ -1797,6 +1800,40 @@ def test_host_context_reader_tolerates_minimal_native_schemas(tmp_path):
     assert "story_knowledge" in context["active_sources"]
 
 
+def test_host_context_reader_reports_field_missing_without_confusing_knowledge_and_triples(tmp_path):
+    db_path = tmp_path / "host-context-partial.sqlite3"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE knowledge (
+            id TEXT PRIMARY KEY,
+            novel_id TEXT NOT NULL,
+            premise_lock TEXT
+        );
+        CREATE TABLE triples (
+            id TEXT PRIMARY KEY,
+            novel_id TEXT NOT NULL,
+            subject TEXT,
+            predicate TEXT
+        );
+        """
+    )
+    conn.execute("INSERT INTO knowledge VALUES (?, ?, ?)", ("k-1", "novel-partial", "黑塔不能公开解释"))
+    conn.execute("INSERT INTO triples VALUES (?, ?, ?, ?)", ("t-1", "novel-partial", "黑塔", "封锁"))
+    conn.commit()
+    conn.close()
+
+    context = HostContextReader(ReadOnlyHostDatabase(db_path)).read("novel-partial", query="黑塔", before_chapter=2)
+
+    assert context["counts"]["knowledge"] == 1
+    assert "knowledge" in context["active_sources"]
+    assert "knowledge" not in context["degraded_sources"]
+    assert "triples" in context["field_missing_sources"]
+    assert context["source_status"]["triples"]["status"] == "partial"
+    assert context["source_status"]["triples"]["missing_fields"] == {"triples": ["object"]}
+    assert "triples" in context["plotpilot_context_usage"]["field_missing_sources"]
+
+
 def test_diagnostics_reports_risks_and_redacts_sensitive_settings(tmp_path):
     storage = PluginStorage(root=tmp_path)
     service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage))
@@ -1863,6 +1900,12 @@ def test_diagnostics_reports_risks_and_redacts_sensitive_settings(tmp_path):
     assert diagnostics["dependency_status"]
     assert diagnostics["host_feature_alignment"]["mode"] == "strategy_only"
     assert "source_status" in diagnostics["host_feature_alignment"]
+    assert diagnostics["degraded_sources"] == ["world", "knowledge"]
+    assert "empty_sources" in diagnostics
+    assert "plugin_leakage_check" in diagnostics
+    assert diagnostics["plugin_leakage_check"]["has_evolution_activity"] is True
+    assert diagnostics["context_budget_summary"]["duplicate_block_ids"] == ["duplicate"]
+    assert diagnostics["context_budget_summary"]["token_budget"] == 7000
     assert "novel_novel-diagnostics_world" in json.dumps(diagnostics, ensure_ascii=False)
     assert "api2-secret" not in json.dumps(diagnostics, ensure_ascii=False)
     assert "agent-secret" not in json.dumps(diagnostics, ensure_ascii=False)

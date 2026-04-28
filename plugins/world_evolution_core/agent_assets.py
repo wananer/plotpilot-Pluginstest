@@ -663,6 +663,7 @@ def summarize_agent_status(
     memory_index: Optional[dict[str, Any]] = None,
     host_context_summary: Optional[dict[str, Any]] = None,
     semantic_recall_summary: Optional[dict[str, Any]] = None,
+    agent_api_usage: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     reflections = reflections or []
     candidates = candidates or []
@@ -690,6 +691,7 @@ def summarize_agent_status(
         "host_context_summary": host_context_summary or {},
         "plotpilot_context_usage": (host_context_summary or {}).get("plotpilot_context_usage") or {},
         "semantic_recall_summary": semantic_recall_summary or {},
+        "agent_api_usage": agent_api_usage or {"aggregate": {}, "calls": []},
         "recent_events": events[-10:],
         "recent_selections": selections[-5:],
         "latest_selection": latest_selection,

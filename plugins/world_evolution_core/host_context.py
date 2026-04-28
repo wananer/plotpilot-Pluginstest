@@ -58,9 +58,15 @@ class HostContextReader:
         empty_sources = [
             source
             for source, status in (source_status.get("sources") or {}).items()
-            if status.get("status") == "present" and not int(counts.get(source) or 0)
+            if status.get("status") in {"present", "partial"} and not int(counts.get(source) or 0)
         ]
-        usage = _build_plotpilot_context_usage(counts, degraded, empty_sources=empty_sources)
+        field_missing_sources = list(source_status.get("field_missing_sources") or [])
+        usage = _build_plotpilot_context_usage(
+            counts,
+            degraded,
+            empty_sources=empty_sources,
+            field_missing_sources=field_missing_sources,
+        )
         return {
             "schema_version": 1,
             "novel_id": novel_id,
@@ -72,6 +78,7 @@ class HostContextReader:
             "counts": counts,
             "source_status": source_status.get("sources") or {},
             "empty_sources": empty_sources,
+            "field_missing_sources": field_missing_sources,
             "plotpilot_context_usage": usage,
             **sections,
         }
@@ -86,6 +93,7 @@ class HostContextReader:
             "counts": dict(context.get("counts") or {}),
             "source_status": dict(context.get("source_status") or {}),
             "empty_sources": list(context.get("empty_sources") or []),
+            "field_missing_sources": list(context.get("field_missing_sources") or []),
             "before_chapter": context.get("before_chapter"),
             "plotpilot_context_usage": dict(context.get("plotpilot_context_usage") or {}),
         }
@@ -364,11 +372,11 @@ class HostContextReader:
 
     def _source_table_status(self) -> dict[str, Any]:
         if self.host_database is None:
-            return {"sources": {}, "missing_sources": []}
+            return {"sources": {}, "missing_sources": [], "field_missing_sources": []}
         source_tables = {
             "bible": ("bible_characters", "bible_locations"),
             "world": ("bible_world_settings", "bible_locations", "bible_timeline_notes"),
-            "knowledge": ("triples",),
+            "knowledge": ("knowledge",),
             "story_knowledge": ("knowledge", "chapter_summaries"),
             "storyline": ("storylines", "storyline_milestones"),
             "timeline": ("timeline_registries", "bible_timeline_notes", "novel_snapshots"),
@@ -388,14 +396,35 @@ class HostContextReader:
         except Exception:
             return {
                 "sources": {
-                    source: {"status": "unknown", "required_tables": list(tables), "present_tables": [], "missing_tables": list(tables)}
+                    source: {
+                        "status": "unknown",
+                        "required_tables": list(tables),
+                        "present_tables": [],
+                        "missing_tables": list(tables),
+                        "missing_fields": {},
+                    }
                     for source, tables in source_tables.items()
                 },
                 "missing_sources": list(source_tables),
+                "field_missing_sources": [],
             }
         existing = {str(row.get("name") or "") for row in rows}
+        field_requirements = {
+            "bible": {"bible_characters": ("novel_id", "name"), "bible_locations": ("novel_id", "name")},
+            "world": {"bible_world_settings": ("novel_id",), "bible_locations": ("novel_id",), "bible_timeline_notes": ("novel_id",)},
+            "knowledge": {"knowledge": ("novel_id",)},
+            "story_knowledge": {"knowledge": ("id", "novel_id"), "chapter_summaries": ("knowledge_id", "chapter_number")},
+            "storyline": {"storylines": ("novel_id",), "storyline_milestones": ("storyline_id",)},
+            "timeline": {"timeline_registries": ("novel_id",), "bible_timeline_notes": ("novel_id",), "novel_snapshots": ("novel_id",)},
+            "chronicle": {"timeline_registries": ("novel_id",), "bible_timeline_notes": ("novel_id",), "novel_snapshots": ("novel_id",)},
+            "foreshadow": {"novel_foreshadow_registry": ("novel_id",)},
+            "dialogue": {"narrative_events": ("novel_id", "chapter_number")},
+            "triples": {"triples": ("novel_id", "subject", "predicate", "object")},
+            "memory_engine": {"memory_engine_state": ("novel_id",), "memory_engine_states": ("novel_id",)},
+        }
         sources: dict[str, dict[str, Any]] = {}
         missing_sources = []
+        field_missing_sources = []
         for source, tables in source_tables.items():
             present = [table for table in tables if table in existing]
             missing = [table for table in tables if table not in existing]
@@ -403,6 +432,18 @@ class HostContextReader:
                 status = "present" if present else "missing"
             else:
                 status = "present" if not missing else "missing"
+            missing_fields: dict[str, list[str]] = {}
+            for table in present:
+                required_fields = field_requirements.get(source, {}).get(table, ())
+                if not required_fields:
+                    continue
+                columns = _table_columns(self.host_database, table)
+                absent = [field for field in required_fields if field not in columns]
+                if absent:
+                    missing_fields[table] = absent
+            if status == "present" and missing_fields:
+                status = "partial"
+                field_missing_sources.append(source)
             if status == "missing":
                 missing_sources.append(source)
             sources[source] = {
@@ -410,8 +451,9 @@ class HostContextReader:
                 "required_tables": list(tables),
                 "present_tables": present,
                 "missing_tables": missing,
+                "missing_fields": missing_fields,
             }
-        return {"sources": sources, "missing_sources": missing_sources}
+        return {"sources": sources, "missing_sources": missing_sources, "field_missing_sources": field_missing_sources}
 
     def _read_chronicles(self, novel_id: str, before_chapter: int | None, limit: int) -> list[dict[str, Any]]:
         items = []
@@ -727,7 +769,13 @@ def _memory_state_brief(value: Any) -> str:
     return "；".join(parts) or json.dumps(data, ensure_ascii=False)[:260]
 
 
-def _build_plotpilot_context_usage(counts: dict[str, int], degraded: list[str], *, empty_sources: list[str] | None = None) -> dict[str, Any]:
+def _build_plotpilot_context_usage(
+    counts: dict[str, int],
+    degraded: list[str],
+    *,
+    empty_sources: list[str] | None = None,
+    field_missing_sources: list[str] | None = None,
+) -> dict[str, Any]:
     source_tiers = {
         "t0_fact_locks": ["bible", "timeline", "foreshadow", "memory_engine"],
         "t1_story_graph": ["storyline", "triples", "story_knowledge"],
@@ -744,6 +792,7 @@ def _build_plotpilot_context_usage(counts: dict[str, int], degraded: list[str], 
         },
         "degraded_sources": list(degraded),
         "empty_sources": list(empty_sources or []),
+        "field_missing_sources": list(field_missing_sources or []),
         "long_context_duplicated": False,
     }
 
@@ -829,6 +878,9 @@ def _empty_context(novel_id: str, *, reason: str) -> dict[str, Any]:
         "active_sources": [],
         "degraded_sources": [reason],
         "counts": {key: 0 for key in HOST_CONTEXT_SOURCES},
+        "source_status": {},
+        "empty_sources": [],
+        "field_missing_sources": [],
         "plotpilot_context_usage": _build_plotpilot_context_usage({key: 0 for key in HOST_CONTEXT_SOURCES}, [reason]),
         **{key: [] for key in HOST_CONTEXT_SOURCES},
     }

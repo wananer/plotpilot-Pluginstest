@@ -455,6 +455,8 @@
     const hostContext = agent.host_context_summary || {};
     const plotpilotUsage = agent.plotpilot_context_usage || hostContext.plotpilot_context_usage || {};
     const semanticRecall = agent.semantic_recall_summary || {};
+    const agentApiUsage = agent.agent_api_usage || {};
+    const agentApiAggregate = agentApiUsage.aggregate || {};
     const diagnostics = payload.diagnostics || {};
     const diagnosticRisks = Array.isArray(diagnostics.risks) ? diagnostics.risks : [];
     const degradedRisks = diagnosticRisks.filter((item) => item.source === 'host_context' || item.source === 'semantic_recall' || item.source === 'agent_events').slice(0, 4);
@@ -522,6 +524,18 @@
             </li>
           `).join('') || '<li><p>暂无降级或失败风险。</p></li>'}
         </ol>
+      </section>
+      <section class="ewa-section">
+        <div class="ewa-section-head">
+          <h3>Agent API 成本</h3>
+          <p>Evolution 额外模型调用，与正文生成分开统计</p>
+        </div>
+        <dl class="ewa-status-list">
+          <div><dt>调用</dt><dd>${escapeHtml(agentApiAggregate.call_count || 0)}</dd></div>
+          <div><dt>输入</dt><dd>${escapeHtml(agentApiAggregate.input_tokens || 0)}</dd></div>
+          <div><dt>输出</dt><dd>${escapeHtml(agentApiAggregate.output_tokens || 0)}</dd></div>
+          <div><dt>总 token</dt><dd>${escapeHtml(agentApiAggregate.total_tokens || 0)}</dd></div>
+        </dl>
       </section>
       <section class="ewa-section">
         <div class="ewa-section-head">
@@ -644,6 +658,8 @@
     const semanticRecall = diagnostics.semantic_recall_summary || {};
     const dependencies = diagnostics.dependency_status || {};
     const counts = diagnostics.agent_asset_counts || {};
+    const leakage = diagnostics.plugin_leakage_check || {};
+    const budget = diagnostics.context_budget_summary || {};
     content.innerHTML = `
       <section class="ewa-summary-grid">
         <article><b>${escapeHtml(summary.critical || 0)}</b><span>Critical</span></article>
@@ -671,6 +687,7 @@
         <dl class="ewa-status-list">
           <div><dt>外部命中</dt><dd>${escapeHtml((hostContext.active_sources || []).join('、') || '无')}</dd></div>
           <div><dt>外部降级</dt><dd>${escapeHtml((hostContext.degraded_sources || []).join('、') || '无')}</dd></div>
+          <div><dt>字段缺失</dt><dd>${escapeHtml((hostContext.field_missing_sources || []).join('、') || '无')}</dd></div>
           <div><dt>向量</dt><dd>${semanticRecall.vector_enabled ? '启用' : '未启用'} · ${escapeHtml(semanticRecall.item_count || 0)} 条</dd></div>
           <div><dt>向量依赖</dt><dd>${escapeHtml(formatDependencyStatus(dependencies))}</dd></div>
           <div><dt>Agent资产</dt><dd>Gene ${escapeHtml(counts.genes || 0)} · Capsule ${escapeHtml(counts.capsules || 0)} · Event ${escapeHtml(counts.events || 0)}</dd></div>
@@ -685,7 +702,22 @@
           ${Object.entries(alignment.native_sources || {}).map(([key, value]) => `<div><dt>${escapeHtml(key)}</dt><dd>${escapeHtml(value)}</dd></div>`).join('') || '<div><dt>状态</dt><dd>暂无摘要</dd></div>'}
           <div><dt>模式</dt><dd>${escapeHtml(alignment.mode || 'strategy_only')}</dd></div>
           <div><dt>空源</dt><dd>${escapeHtml((alignment.empty_sources || []).join('、') || '无')}</dd></div>
+          <div><dt>字段缺失</dt><dd>${escapeHtml((alignment.field_missing_sources || []).join('、') || '无')}</dd></div>
           <div><dt>降级</dt><dd>${escapeHtml((alignment.degraded_sources || []).join('、') || '无')}</dd></div>
+        </dl>
+      </section>
+      <section class="ewa-section">
+        <div class="ewa-section-head">
+          <h3>实验护栏</h3>
+          <p>泄露检查与上下文预算摘要</p>
+        </div>
+        <dl class="ewa-status-list">
+          <div><dt>Evolution 活动</dt><dd>${leakage.has_evolution_activity ? '有' : '无'}</dd></div>
+          <div><dt>注入记录</dt><dd>${escapeHtml(leakage.context_injection_records || 0)}</dd></div>
+          <div><dt>学习资产</dt><dd>${escapeHtml(leakage.agent_learning_assets || 0)}</dd></div>
+          <div><dt>上下文块</dt><dd>${escapeHtml(budget.block_count || 0)} · budget ${escapeHtml(budget.token_budget || 0)}</dd></div>
+          <div><dt>重复块</dt><dd>${escapeHtml((budget.duplicate_block_ids || []).join('、') || '无')}</dd></div>
+          <div><dt>短策略模式</dt><dd>${budget.strategy_only ? '是' : '否'}</dd></div>
         </dl>
       </section>
       <section class="ewa-section ewa-run-section">

@@ -166,13 +166,33 @@ def test_agent_api_usage_is_split_from_generation_metrics():
     chapters = [
         ChapterResult("experiment_on", 1, "outline", "沈砚继续调查。", prompt_chars=10, duration_seconds=1.0, llm_call_count=1, llm_input_tokens=100, llm_output_tokens=50)
     ]
-    metrics = _compute_metrics(chapters, {"agent_api_usage": usage})
+    metrics = _compute_metrics(
+        chapters,
+        {
+            "agent_api_usage": usage,
+            "diagnostics": {
+                "host_context_summary": {
+                    "active_sources": ["bible", "story_knowledge"],
+                    "degraded_sources": ["foreshadow"],
+                    "empty_sources": ["dialogue"],
+                    "plotpilot_context_usage": {"mode": "strategy_only"},
+                },
+                "semantic_recall_summary": {"item_count": 3, "vector_enabled": True},
+            },
+        },
+    )
 
     assert usage["aggregate"]["call_count"] == 1
     assert usage["aggregate"]["total_tokens"] == 42
     assert metrics["aggregate"]["generation_llm_call_count"] == 1
     assert metrics["aggregate"]["evolution_agent_api_call_count"] == 1
     assert metrics["aggregate"]["evolution_agent_api_total_tokens"] == 42
+    assert metrics["aggregate"]["plotpilot_native_context_mode"] == "strategy_only"
+    assert metrics["aggregate"]["plotpilot_native_active_source_count"] == 2
+    assert metrics["aggregate"]["plotpilot_native_degraded_source_count"] == 1
+    assert metrics["aggregate"]["plotpilot_native_empty_source_count"] == 1
+    assert metrics["aggregate"]["semantic_recall_item_count"] == 3
+    assert metrics["aggregate"]["semantic_recall_vector_enabled"] is True
 
 
 def test_leakage_acceptance_fails_when_control_has_evolution_context():

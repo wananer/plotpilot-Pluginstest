@@ -629,6 +629,7 @@ class EvolutionWorldRepository:
             memory_index=self.get_agent_memory_index(novel_id),
             host_context_summary=self.get_host_context_summary(novel_id),
             semantic_recall_summary=self.get_semantic_recall_summary(novel_id),
+            agent_api_usage=_agent_api_usage_from_control_cards(self.list_context_control_card_records(novel_id, limit=500)),
         )
 
     def save_diagnostics_snapshot(self, novel_id: str, snapshot: dict[str, Any]) -> None:
@@ -1061,6 +1062,43 @@ def _int_or_none(value: Any) -> Optional[int]:
     except (TypeError, ValueError):
         return None
     return number if number > 0 else None
+
+
+def _agent_api_usage_from_control_cards(records: list[dict[str, Any]]) -> dict[str, Any]:
+    calls = []
+    totals = {
+        "call_count": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "total_tokens": 0,
+        "total_cost_usd": 0.0,
+    }
+    for record in records:
+        if not isinstance(record, dict) or record.get("source") != "agent_api":
+            continue
+        usage = record.get("token_usage") if isinstance(record.get("token_usage"), dict) else {}
+        call = {
+            "chapter_number": _int_or_none(record.get("chapter_number")),
+            "provider_mode": str(record.get("provider_mode") or ""),
+            "model": str(record.get("model") or ""),
+            "input_tokens": int(usage.get("input_tokens") or 0),
+            "output_tokens": int(usage.get("output_tokens") or 0),
+            "cache_creation_input_tokens": int(usage.get("cache_creation_input_tokens") or 0),
+            "cache_read_input_tokens": int(usage.get("cache_read_input_tokens") or 0),
+            "total_tokens": int(usage.get("total_tokens") or 0),
+            "total_cost_usd": float(usage.get("total_cost_usd") or 0.0),
+            "control_card_chars": int(record.get("control_card_chars") or 0),
+            "created_at": str(record.get("created_at") or ""),
+        }
+        calls.append(call)
+        totals["call_count"] += 1
+        for key in ("input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "total_tokens"):
+            totals[key] += int(call.get(key) or 0)
+        totals["total_cost_usd"] += float(call.get("total_cost_usd") or 0.0)
+    totals["total_cost_usd"] = round(totals["total_cost_usd"], 6)
+    return {"aggregate": totals, "calls": calls[-20:]}
 
 
 def _slug(value: str) -> str:

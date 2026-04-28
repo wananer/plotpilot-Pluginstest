@@ -1137,6 +1137,9 @@ def _compute_metrics(chapters: list[ChapterResult], evolution_meta: dict[str, An
     total_chars = sum(item["char_count"] for item in chapter_metrics)
     repetitive_phrase_total = sum(item["repetitive_phrase_total"] for item in chapter_metrics)
     agent_api_usage = (evolution_meta.get("agent_api_usage") or {}).get("aggregate") or {}
+    diagnostics = evolution_meta.get("diagnostics") if isinstance(evolution_meta.get("diagnostics"), dict) else {}
+    host_context_summary = diagnostics.get("host_context_summary") if isinstance(diagnostics.get("host_context_summary"), dict) else {}
+    semantic_recall_summary = diagnostics.get("semantic_recall_summary") if isinstance(diagnostics.get("semantic_recall_summary"), dict) else {}
     return {
         "chapters": chapter_metrics,
         "aggregate": {
@@ -1173,6 +1176,12 @@ def _compute_metrics(chapters: list[ChapterResult], evolution_meta: dict[str, An
             "evolution_agent_api_input_tokens": int(agent_api_usage.get("input_tokens") or 0),
             "evolution_agent_api_output_tokens": int(agent_api_usage.get("output_tokens") or 0),
             "evolution_agent_api_total_tokens": int(agent_api_usage.get("total_tokens") or 0),
+            "plotpilot_native_context_mode": (host_context_summary.get("plotpilot_context_usage") or {}).get("mode") or "",
+            "plotpilot_native_active_source_count": len(host_context_summary.get("active_sources") or []),
+            "plotpilot_native_degraded_source_count": len(host_context_summary.get("degraded_sources") or []),
+            "plotpilot_native_empty_source_count": len(host_context_summary.get("empty_sources") or []),
+            "semantic_recall_item_count": int(semantic_recall_summary.get("item_count") or 0),
+            "semantic_recall_vector_enabled": bool(semantic_recall_summary.get("vector_enabled")),
             "transition_conflict_count": transitions["aggregate"]["conflict_count"],
             "transition_hard_conflict_count": transitions["aggregate"]["hard_conflict_count"],
             "transition_warning_count": transitions["aggregate"]["warning_count"],
@@ -1504,6 +1513,8 @@ async def main() -> None:
                             generation_usage["experiment_on"]["aggregate"],
                         ]
                     ),
+                    "plotpilot_chapter_sync": {"call_count": 0, "input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+                    "plotpilot_main_review": {"call_count": 0, "input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
                     "evolution_agent_api": _sum_usage_dicts(
                         [
                             agent_api_usage["control_off"]["aggregate"],

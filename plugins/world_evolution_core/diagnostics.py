@@ -51,6 +51,8 @@ def build_diagnostics(
     _check_character_pollution(risks, repository, novel_id)
     _check_recent_failures(risks, agent_status)
     _check_settings_conflict(risks, repository)
+    context_budget_summary = _context_budget_summary(repository, novel_id)
+    plugin_leakage_check = _plugin_leakage_check(repository, novel_id, agent_status)
 
     risks.sort(key=lambda item: (_severity_rank(item.get("severity")), str(item.get("source") or "")))
     return {
@@ -67,9 +69,14 @@ def build_diagnostics(
         },
         "host_context_summary": _redact(host_context_summary),
         "host_feature_alignment": _redact(host_feature_alignment),
+        "degraded_sources": list(host_context_summary.get("degraded_sources") or []),
+        "empty_sources": list(host_context_summary.get("empty_sources") or []),
+        "field_missing_sources": list(host_context_summary.get("field_missing_sources") or []),
         "semantic_recall_summary": _redact(semantic_recall_summary),
         "dependency_status": dependency_status(),
         "agent_asset_counts": dict(agent_status.get("asset_counts") or {}),
+        "plugin_leakage_check": plugin_leakage_check,
+        "context_budget_summary": context_budget_summary,
         "risks": risks,
     }
 
@@ -97,6 +104,9 @@ def _check_host_context(risks: list[dict[str, Any]], summary: dict[str, Any]) ->
         return
     if empty:
         risks.append(_risk("info", "host_context", f"宿主表存在但暂无命中：{', '.join(empty[:8])}", "这表示 schema 可读但本小说尚未沉淀对应资料；不同于缺表降级。", "host_context_empty", {"empty_sources": empty, "counts": counts}))
+    field_missing = [str(item) for item in summary.get("field_missing_sources") or [] if str(item)]
+    if field_missing:
+        risks.append(_risk("info", "host_context", f"宿主表存在但字段不完整：{', '.join(field_missing[:8])}", "Evolution 会使用兼容字段或降级摘要；实验报告需标注 schema 版本差异。", "host_context_schema", {"field_missing_sources": field_missing, "source_status": source_status}))
     if not any(int(value or 0) for value in counts.values()):
         risks.append(_risk("info", "host_context", "外部信息源均未命中。", "如果本书已配置世界观/故事线/伏笔，需检查 novel_id 隔离或宿主读取映射。", "host_context", {"counts": counts}))
 
@@ -122,7 +132,44 @@ def _host_feature_alignment(summary: dict[str, Any]) -> dict[str, Any]:
         "long_context_duplicated": bool(usage.get("long_context_duplicated")),
         "degraded_sources": list(summary.get("degraded_sources") or []),
         "empty_sources": list(summary.get("empty_sources") or []),
+        "field_missing_sources": list(summary.get("field_missing_sources") or []),
         "source_status": dict(summary.get("source_status") or {}),
+    }
+
+
+def _context_budget_summary(repository: Any, novel_id: str) -> dict[str, Any]:
+    records = repository.list_context_injection_records(novel_id, limit=1)
+    latest = records[-1] if records else {}
+    blocks = [block for block in latest.get("blocks") or [] if isinstance(block, dict)] if isinstance(latest, dict) else []
+    block_ids = [str(block.get("id") or block.get("title") or "") for block in blocks if block]
+    token_budget = sum(int(block.get("token_budget") or 0) for block in blocks)
+    return {
+        "has_context_injection": bool(records),
+        "block_count": len(blocks),
+        "token_budget": token_budget,
+        "duplicate_block_ids": _duplicates(item for item in block_ids if item),
+        "strategy_only": any(block.get("id") == "plotpilot_native_strategy" for block in blocks),
+        "latest_chapter": latest.get("chapter_number") if isinstance(latest, dict) else None,
+    }
+
+
+def _plugin_leakage_check(repository: Any, novel_id: str, agent_status: dict[str, Any]) -> dict[str, Any]:
+    asset_counts = agent_status.get("asset_counts") if isinstance(agent_status.get("asset_counts"), dict) else {}
+    injection_count = len(repository.list_context_injection_records(novel_id, limit=5))
+    review_count = len(repository.list_review_records(novel_id, limit=5))
+    learned_count = (
+        int(asset_counts.get("events") or 0)
+        + int(asset_counts.get("capsules") or 0)
+        + int(asset_counts.get("reflections") or 0)
+        + int(asset_counts.get("gene_candidates") or 0)
+    )
+    return {
+        "plugin_name": PLUGIN_NAME,
+        "enabled": _plugin_enabled(),
+        "context_injection_records": injection_count,
+        "review_records": review_count,
+        "agent_learning_assets": learned_count,
+        "has_evolution_activity": bool(injection_count or review_count or learned_count),
     }
 
 
