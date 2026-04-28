@@ -19,6 +19,7 @@ Collection 命名约定：
 - 图谱子网的语义扩展
 """
 import logging
+import os
 from typing import List, Optional, Dict, Any
 
 from domain.ai.services.embedding_service import EmbeddingService
@@ -276,7 +277,8 @@ class TripleIndexingService:
 
         existing = await self._vector_store.list_collections()
         if collection_name not in existing:
-            await self.ensure_collection(novel_id)
+            logger.debug("Triple vector collection missing, skip semantic search: %s", collection_name)
+            return []
 
         # 生成查询向量
         query_vector = await self._embedding_service.embed(query)
@@ -359,13 +361,21 @@ class TripleIndexingService:
         async def _search():
             return await self.search_triples(novel_id, query, limit, min_score)
 
-        try:
-            asyncio.get_running_loop()
-        except RuntimeError:
-            return asyncio.run(_search())
-
         def _run_in_fresh_loop():
             return asyncio.run(_search())
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            return pool.submit(_run_in_fresh_loop).result()
+        timeout_seconds = float(os.getenv("TRIPLE_VECTOR_SEARCH_TIMEOUT_SECONDS", "8"))
+        timeout = timeout_seconds if timeout_seconds > 0 else None
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        try:
+            future = pool.submit(_run_in_fresh_loop)
+            return future.result(timeout=timeout)
+        except concurrent.futures.TimeoutError:
+            logger.warning(
+                "Triple semantic search timed out novel=%s timeout=%ss",
+                novel_id,
+                timeout_seconds,
+            )
+            return []
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)

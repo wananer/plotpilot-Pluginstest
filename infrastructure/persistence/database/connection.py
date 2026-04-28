@@ -230,13 +230,13 @@ def _apply_chapter_summaries_enhancements(conn: sqlite3.Connection) -> None:
 
 
 def _apply_migration_files(conn: sqlite3.Connection) -> None:
-    """应用 migrations 目录下全部 .sql（幂等执行，顺序按文件名稳定排序）。"""
+    """应用 migrations 目录下全部 .sql（幂等执行，依赖优先于文件名排序）。"""
     migrations_dir = _database_asset_dir() / "migrations"
     if not migrations_dir.is_dir():
         logger.warning("未找到迁移目录（将仅依赖 schema.sql 与代码内补丁）: %s", migrations_dir)
         return
 
-    for migration_path in sorted(migrations_dir.glob("*.sql")):
+    for migration_path in sorted(migrations_dir.glob("*.sql"), key=_migration_sort_key):
         migration_file = migration_path.name
         try:
             migration_sql = migration_path.read_text(encoding="utf-8")
@@ -252,6 +252,15 @@ def _apply_migration_files(conn: sqlite3.Connection) -> None:
             logger.warning("Failed to read migration %s: %s", migration_file, e)
         except Exception as e:
             logger.warning("Failed to apply migration %s: %s", migration_file, e)
+
+
+def _migration_sort_key(path: Path) -> tuple[int, str]:
+    """Keep dependent migrations behind the table-creation migrations they patch."""
+    priority = {
+        "add_macro_diagnosis_results.sql": 10,
+        "add_macro_diagnosis_context_patch.sql": 11,
+    }.get(path.name, 100)
+    return priority, path.name
 
 
 def _ensure_triple_provenance_table(conn: sqlite3.Connection) -> None:

@@ -28,7 +28,7 @@ from infrastructure.persistence.database.story_node_repository import StoryNodeR
 from domain.ai.services.vector_store import VectorStore
 from domain.ai.services.embedding_service import EmbeddingService
 from application.ai.vector_retrieval_facade import VectorRetrievalFacade
-from plugins.platform.host_integration import build_generation_context_patch
+from plugins.platform.host_integration import build_generation_context_patch, collect_generation_context_blocks
 
 logger = logging.getLogger(__name__)
 
@@ -431,14 +431,14 @@ class ContextBudgetAllocator:
             priority=85,  # 介于角色锚点和伏笔之间
         )
 
-        # 5. 插件上下文补丁（如 Evolution 动态角色状态）
-        plugin_context = self._get_plugin_context_patch(novel_id, chapter_number, outline)
+        # 5. 插件上下文补丁（如 Evolution 动态角色状态）：硬约束进 T0，软参考进 T1
+        plugin_critical_context, plugin_support_context = self._get_plugin_context_patches(novel_id, chapter_number, outline)
         slots["plugin_context_patch"] = ContextSlot(
             name="插件上下文补丁",
             tier=PriorityTier.T0_CRITICAL,
-            content=plugin_context,
-            tokens=self.estimate_tokens(plugin_context),
-            max_tokens=2500,
+            content=plugin_critical_context,
+            tokens=self.estimate_tokens(plugin_critical_context),
+            max_tokens=1200,
             priority=88,
         )
         
@@ -453,6 +453,15 @@ class ContextBudgetAllocator:
             tokens=self.estimate_tokens(graph_content),
             max_tokens=self.MAX_GRAPH_SUBNETWORK_TOKENS,
             priority=70,
+        )
+
+        slots["plugin_support_context"] = ContextSlot(
+            name="插件辅助参考",
+            tier=PriorityTier.T1_COMPRESSIBLE,
+            content=plugin_support_context,
+            tokens=self.estimate_tokens(plugin_support_context),
+            max_tokens=2200,
+            priority=75,
         )
         
         # 5. 近期幕摘要
@@ -573,6 +582,45 @@ class ContextBudgetAllocator:
             source="context_budget_allocator",
             max_chars=6000,
         )
+
+    def _get_plugin_context_patches(self, novel_id: str, chapter_number: int, outline: str) -> tuple[str, str]:
+        """Fetch plugin context and split it into critical constraints and soft references."""
+        blocks = collect_generation_context_blocks(
+            novel_id,
+            chapter_number,
+            outline,
+            source="context_budget_allocator",
+        )
+        if not blocks:
+            return "", ""
+
+        critical_parts: list[str] = []
+        support_parts: list[str] = []
+        critical_kinds = {
+            "chapter_state_bridge",
+            "story_graph_route_constraints",
+            "continuity_risk",
+            "hard_constraint",
+        }
+        for block in sorted(blocks, key=lambda item: int(item.get("priority") or 0), reverse=True):
+            title = str(block.get("title") or block.get("id") or block.get("plugin_name") or "插件上下文").strip()
+            content = str(block.get("content") or "").strip()
+            if not content:
+                continue
+            rendered = f"【{title}】\n{content}"
+            kind = str(block.get("kind") or "").strip()
+            if kind in critical_kinds:
+                critical_parts.append(rendered)
+            else:
+                support_parts.append(rendered)
+
+        critical = "\n\n".join(critical_parts).strip()
+        support = "\n\n".join(support_parts).strip()
+        if len(critical) > 2800:
+            critical = critical[:2800] + "..."
+        if len(support) > 4200:
+            support = support[:4200] + "..."
+        return critical, support
     
     def _get_current_act_summary(self, novel_id: str, chapter_number: int) -> str:
         """获取当前幕摘要"""
@@ -1109,6 +1157,15 @@ class ContextBudgetAllocator:
             return []
         
         try:
+            all_triples = self.triple_repo.get_by_novel_sync(novel_id)
+            if not all_triples:
+                return []
+
+            collection_name = f"novel_{novel_id}_triples"
+            if not self._vector_collection_has_items(collection_name):
+                logger.debug("三元组向量集合为空，跳过语义检索 collection=%s", collection_name)
+                return []
+
             from application.analyst.services.triple_indexing_service import TripleIndexingService
             
             # 创建三元组索引服务
@@ -1141,7 +1198,6 @@ class ContextBudgetAllocator:
                 return []
             
             # 获取所有相关三元组
-            all_triples = self.triple_repo.get_by_novel_sync(novel_id)
             id_to_triple = {t.id: t for t in all_triples}
             
             # 按检索顺序返回
@@ -1383,9 +1439,14 @@ class ContextBudgetAllocator:
         """获取向量召回片段"""
         if not self.vector_facade:
             return ""
+
+        collection_name = f"novel_{novel_id}_chunks"
+        if not self._vector_collection_has_items(collection_name):
+            return ""
+        if not self._has_prior_chapter_content(novel_id, chapter_number):
+            return ""
         
         try:
-            collection_name = f"novel_{novel_id}_chunks"
             results = self.vector_facade.sync_search(
                 collection=collection_name,
                 query_text=outline,
@@ -1416,6 +1477,40 @@ class ContextBudgetAllocator:
             logger.warning(f"向量召回失败: {e}")
         
         return ""
+
+    def _vector_collection_has_items(self, collection_name: str) -> bool:
+        """Cheaply verify a vector collection exists before generating query embeddings."""
+        try:
+            store = self.vector_facade.vector_store if self.vector_facade else None
+            collections = getattr(store, "collections", None)
+            if isinstance(collections, dict):
+                collection = collections.get(collection_name)
+                if not collection:
+                    return False
+                index = collection.get("index") if isinstance(collection, dict) else None
+                if getattr(index, "ntotal", 0) > 0:
+                    return True
+                metadata = collection.get("metadata") if isinstance(collection, dict) else None
+                return bool(metadata)
+        except Exception as e:
+            logger.debug("向量集合预检查失败 collection=%s: %s", collection_name, e)
+            return False
+        return True
+
+    def _has_prior_chapter_content(self, novel_id: str, chapter_number: int) -> bool:
+        """Avoid vector recall for empty novels or placeholder chapter plans."""
+        if not self.chapter_repo:
+            return True
+        try:
+            chapters = self.chapter_repo.list_by_novel(NovelId(novel_id))
+            return any(
+                c.number < chapter_number
+                and (getattr(c, "content", "") or "").strip()
+                for c in chapters
+            )
+        except Exception as e:
+            logger.debug("最近章节正文预检查失败 novel=%s ch=%s: %s", novel_id, chapter_number, e)
+            return True
     
     def _get_diagnosis_breakpoints(
         self,

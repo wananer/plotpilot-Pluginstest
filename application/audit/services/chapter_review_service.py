@@ -55,22 +55,35 @@ class ConsistencyIssue:
         severity: str,  # critical, warning, suggestion
         description: str,
         location: str,  # 问题位置描述
-        suggestion: Optional[str] = None
+        suggestion: Optional[str] = None,
+        evidence: Optional[List[Dict[str, Any]]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        source_plugin: Optional[str] = None,
     ):
         self.issue_type = issue_type
         self.severity = severity
         self.description = description
         self.location = location
         self.suggestion = suggestion
+        self.evidence = evidence or []
+        self.metadata = metadata or {}
+        self.source_plugin = source_plugin
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        data = {
             "issue_type": self.issue_type,
             "severity": self.severity,
             "description": self.description,
             "location": self.location,
             "suggestion": self.suggestion
         }
+        if self.evidence:
+            data["evidence"] = self.evidence
+        if self.metadata:
+            data["metadata"] = self.metadata
+        if self.source_plugin:
+            data["source_plugin"] = self.source_plugin
+        return data
 
 
 class ChapterReviewResult:
@@ -236,6 +249,12 @@ class ChapterReviewService:
                         description=str(item.get("description") or ""),
                         location=str(item.get("location") or f"Chapter {chapter.chapter_number}"),
                         suggestion=item.get("suggestion"),
+                        evidence=item.get("evidence") if isinstance(item.get("evidence"), list) else [],
+                        metadata={
+                            **(item.get("metadata") if isinstance(item.get("metadata"), dict) else {}),
+                            "plugin_name": plugin_name,
+                        },
+                        source_plugin=plugin_name,
                     )
                 )
             suggestions.extend(str(item) for item in (data.get("suggestions") or []) if str(item).strip())
@@ -256,7 +275,7 @@ class ChapterReviewService:
             return issues
 
         # 提取章节中出现的人物
-        characters_in_chapter = self._extract_characters_from_content(chapter.content)
+        characters_in_chapter = self._extract_characters_from_content(chapter.content, cast.characters)
 
         # 使用 LLM 检查人物一致性
         for char_name in characters_in_chapter:
@@ -505,11 +524,46 @@ class ChapterReviewService:
 
         return max(0.0, base_score)
 
-    def _extract_characters_from_content(self, content: str) -> List[str]:
-        """从内容中提取人物名称（简化实现）"""
-        # TODO: 使用 NER 或 LLM 提取人物名称
-        # 这里先返回空列表，实际应该使用场记分析服务
-        return []
+    def _extract_characters_from_content(self, content: str, characters: Optional[List[Any]] = None) -> List[str]:
+        """从章节正文中提取已知角色名。
+
+        审稿阶段只需要判断“哪些已建档角色在本章出现”，因此优先使用
+        CastGraph 中的角色名/别名做确定性匹配，避免额外 NER/LLM 调用。
+        """
+        text = str(content or "")
+        if not text or not characters:
+            return []
+
+        matches: list[tuple[int, int, str]] = []
+        for order, character in enumerate(characters):
+            canonical_name = str(getattr(character, "name", "") or "").strip()
+            if not canonical_name:
+                continue
+
+            terms = [canonical_name]
+            aliases = getattr(character, "aliases", []) or []
+            terms.extend(str(alias or "").strip() for alias in aliases)
+
+            first_pos: Optional[int] = None
+            for term in terms:
+                if not term or len(term) < 2:
+                    continue
+                pos = text.find(term)
+                if pos >= 0 and (first_pos is None or pos < first_pos):
+                    first_pos = pos
+
+            if first_pos is not None:
+                matches.append((first_pos, order, canonical_name))
+
+        matches.sort(key=lambda item: (item[0], item[1]))
+        seen: set[str] = set()
+        result: list[str] = []
+        for _, _, name in matches:
+            if name in seen:
+                continue
+            seen.add(name)
+            result.append(name)
+        return result
 
     def _build_character_consistency_prompt(
         self,

@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 import uuid
 from datetime import datetime
@@ -31,6 +32,11 @@ from application.ai.structured_json_pipeline import (
 
 logger = logging.getLogger(__name__)
 
+CHAPTER_VECTOR_INDEX_TIMEOUT_SECONDS = float(
+    os.getenv("CHAPTER_VECTOR_INDEX_TIMEOUT_SECONDS", "45")
+)
+CHAPTER_VECTOR_INDEX_MODE = os.getenv("CHAPTER_VECTOR_INDEX_MODE", "disabled").strip().lower()
+
 
 def _extract_json_object(text: str) -> dict:
     """从模型输出中解析 JSON 对象，优先走通用清洗/修复管线。"""
@@ -47,6 +53,57 @@ def _extract_json_object(text: str) -> dict:
         cleaned,
         0,
     )
+
+
+async def _index_chapter_summary_with_timeout(
+    indexing_svc: Any,
+    novel_id: str,
+    chapter_number: int,
+    text_for_vector: str,
+) -> bool:
+    """Run optional vector indexing without blocking chapter progression.
+
+    Local embedding and FAISS calls are CPU/file-system heavy despite the async
+    interface. The default mode schedules the work in the background so a slow
+    vector path cannot block autopilot's chapter progression.
+    """
+    timeout_seconds = CHAPTER_VECTOR_INDEX_TIMEOUT_SECONDS
+
+    async def _index() -> None:
+        await indexing_svc.ensure_collection(novel_id)
+        await indexing_svc.index_chapter_summary(novel_id, chapter_number, text_for_vector)
+
+    def _run_in_thread() -> None:
+        asyncio.run(_index())
+
+    if CHAPTER_VECTOR_INDEX_MODE in {"disabled", "skip", "off"}:
+        logger.info("章节向量索引已禁用 novel=%s ch=%s", novel_id, chapter_number)
+        return False
+
+    if CHAPTER_VECTOR_INDEX_MODE in {"background", "deferred", "async"}:
+        async def _background_index() -> None:
+            try:
+                await asyncio.to_thread(_run_in_thread)
+                logger.debug("章节向量索引后台完成 novel=%s ch=%s", novel_id, chapter_number)
+            except Exception as exc:
+                logger.warning(
+                    "章节向量索引后台失败 novel=%s ch=%s: [%s] %s",
+                    novel_id,
+                    chapter_number,
+                    type(exc).__name__,
+                    exc,
+                    exc_info=True,
+                )
+
+        asyncio.create_task(_background_index())
+        logger.info("章节向量索引已转入后台 novel=%s ch=%s", novel_id, chapter_number)
+        return False
+
+    if timeout_seconds <= 0:
+        await asyncio.to_thread(_run_in_thread)
+    else:
+        await asyncio.wait_for(asyncio.to_thread(_run_in_thread), timeout=timeout_seconds)
+    return True
 
 
 def _beats_from_structure_outline(novel_id: str, chapter_number: int) -> List[str]:
@@ -1161,10 +1218,21 @@ async def sync_chapter_narrative_after_save(
     if indexing_svc is not None:
         text_for_vector = summary.strip() if summary.strip() else "；".join(beat_sections) if beat_sections else content[:800]
         try:
-            await indexing_svc.ensure_collection(novel_id)
-            await indexing_svc.index_chapter_summary(novel_id, chapter_number, text_for_vector)
-            flags["vector_stored"] = True
-            logger.debug("章节向量索引完成 novel=%s ch=%s", novel_id, chapter_number)
+            flags["vector_stored"] = await _index_chapter_summary_with_timeout(
+                indexing_svc,
+                novel_id,
+                chapter_number,
+                text_for_vector,
+            )
+            if flags["vector_stored"]:
+                logger.debug("章节向量索引完成 novel=%s ch=%s", novel_id, chapter_number)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "章节向量索引超时，已跳过以避免阻塞自动写作 novel=%s ch=%s timeout=%.1fs",
+                novel_id,
+                chapter_number,
+                CHAPTER_VECTOR_INDEX_TIMEOUT_SECONDS,
+            )
         except Exception as e:
             logger.warning("章节向量索引失败 novel=%s ch=%s: [%s] %s", novel_id, chapter_number, type(e).__name__, e, exc_info=True)
 

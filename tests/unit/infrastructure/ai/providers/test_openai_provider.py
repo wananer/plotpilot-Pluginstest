@@ -33,6 +33,7 @@ class TestOpenAIProviderLegacy:
 
     @pytest.fixture
     def provider(self, settings):
+        OpenAIProvider._fallback_to_chat_cache.clear()
         return OpenAIProvider(settings)
 
     def test_initialization(self, provider, settings):
@@ -179,6 +180,7 @@ class TestOpenAIProviderResponses:
 
     @pytest.fixture
     def provider(self, settings):
+        OpenAIProvider._fallback_to_chat_cache.clear()
         return OpenAIProvider(settings)
 
     def test_default_uses_responses(self, provider):
@@ -258,6 +260,29 @@ class TestOpenAIProviderResponses:
             assert mock_create.await_args.kwargs["stream"] is True
 
     @pytest.mark.anyio
+    async def test_stream_generate_falls_back_when_responses_stream_is_empty(self, provider):
+        prompt = Prompt(system="You are helpful", user="Hello")
+        config = GenerationConfig(model="gpt-4o", temperature=0.7, max_tokens=32)
+        responses_stream = _FakeStream([
+            SimpleNamespace(type="response.completed"),
+        ])
+        chat_stream = _FakeStream([
+            SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content="Hi"))]),
+            SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content=" there"))]),
+        ])
+
+        with patch.object(provider.async_client.responses, "create", new_callable=AsyncMock) as mock_responses:
+            with patch.object(provider.async_client.chat.completions, "create", new_callable=AsyncMock) as mock_chat:
+                mock_responses.return_value = responses_stream
+                mock_chat.return_value = chat_stream
+
+                chunks = [chunk async for chunk in provider.stream_generate(prompt, config)]
+
+                assert chunks == ["Hi", " there"]
+                assert mock_responses.await_args.kwargs["stream"] is True
+                assert mock_chat.await_args.kwargs["stream"] is True
+
+    @pytest.mark.anyio
     async def test_generate_empty_responses_raises(self, provider):
         prompt = Prompt(system="You are helpful", user="Hello")
         config = GenerationConfig(model="test-model")
@@ -265,12 +290,21 @@ class TestOpenAIProviderResponses:
             output=[],
             usage=SimpleNamespace(prompt_tokens=5, completion_tokens=0),
         )
+        empty_chat_response = SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=None))],
+            usage=SimpleNamespace(prompt_tokens=10, completion_tokens=0),
+        )
+        empty_chat_stream = _FakeStream([
+            SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content=None))]),
+        ])
 
         with patch.object(provider.async_client.responses, "create", new_callable=AsyncMock) as mock_create:
-            mock_create.return_value = response
+            with patch.object(provider.async_client.chat.completions, "create", new_callable=AsyncMock) as mock_chat:
+                mock_create.return_value = response
+                mock_chat.side_effect = [empty_chat_response, empty_chat_stream]
 
-            with pytest.raises(RuntimeError, match="empty content"):
-                await provider.generate(prompt, config)
+                with pytest.raises(RuntimeError, match="empty content"):
+                    await provider.generate(prompt, config)
 
 
 class TestProfilePassthrough:

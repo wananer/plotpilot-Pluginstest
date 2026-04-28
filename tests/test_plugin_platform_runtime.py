@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from application.audit.services.chapter_review_service import ChapterReviewService
 import plugins.loader as plugin_loader
+import plugins.platform.hook_dispatcher as hook_dispatcher_module
 from plugins.platform.context_bridge import dispatch_hook_sync, render_context_blocks
 from plugins.platform.hook_dispatcher import clear_hooks, dispatch_hook, list_hooks, register_hook
 from plugins.platform.host_database import ReadOnlyHostDatabase
@@ -22,6 +23,12 @@ from plugins.platform.host_integration import (
 )
 from plugins.platform.job_registry import PluginJobRecord, PluginJobRegistry
 from plugins.platform.plugin_storage import PluginStorage
+
+
+@pytest.fixture(autouse=True)
+def _registered_hooks_ignore_local_plugin_toggle(monkeypatch):
+    """Hook unit tests should not depend on the developer's UI plugin toggle file."""
+    monkeypatch.setattr(hook_dispatcher_module, "_plugin_is_enabled", lambda plugin_name: True)
 
 
 @pytest.mark.asyncio
@@ -65,6 +72,22 @@ def test_plugin_storage_scopes_state_under_plugin_root(tmp_path):
 
     with pytest.raises(ValueError):
         storage.write_json("sample_state_plugin", ["..", "escape.json"], {})
+
+
+def test_chapter_review_extracts_known_cast_characters_by_name_and_alias():
+    service = ChapterReviewService.__new__(ChapterReviewService)
+    characters = [
+        SimpleNamespace(name="沈砚", aliases=["阿砚"]),
+        SimpleNamespace(name="林澈", aliases=[]),
+        SimpleNamespace(name="王五", aliases=["A"]),
+    ]
+
+    result = service._extract_characters_from_content(
+        "阿砚推开C307的门，林澈随后赶到。A只是编号，不应命中单字别名。",
+        characters,
+    )
+
+    assert result == ["沈砚", "林澈"]
 
 
 def test_plugin_storage_lists_and_logs_by_novel_namespace(tmp_path):
@@ -422,6 +445,43 @@ async def test_host_integration_collects_and_notifies_plugin_review_context():
     assert seen_before["payload"]["review_targets"] == ["character", "timeline", "storyline", "foreshadowing"]
     assert after[0]["data"] == {"recorded": True}
     assert seen_after["payload"]["review_result"]["overall_score"] == 95
+    clear_hooks()
+
+
+@pytest.mark.asyncio
+async def test_chapter_review_service_preserves_plugin_issue_evidence():
+    clear_hooks()
+
+    register_hook(
+        "world_evolution_core",
+        "review_chapter",
+        lambda payload: {
+            "ok": True,
+            "data": {
+                "issues": [
+                    {
+                        "issue_type": "evolution_route_repeated_arrival",
+                        "severity": "warning",
+                        "description": "重复进入C307。",
+                        "location": "Chapter 2",
+                        "suggestion": "补足转场。",
+                        "evidence": [{"previous_ending": "沈砚已在C307", "current_opening": "沈砚进入C307"}],
+                        "metadata": {"kind": "boundary"},
+                    }
+                ]
+            },
+        },
+    )
+
+    service = ChapterReviewService.__new__(ChapterReviewService)
+    chapter = SimpleNamespace(chapter_number=2, content="沈砚进入C307。")
+    issues, _ = await service._review_with_plugins("novel-1", chapter)
+
+    data = issues[0].to_dict()
+    assert data["evidence"][0]["previous_ending"] == "沈砚已在C307"
+    assert data["metadata"]["kind"] == "boundary"
+    assert data["metadata"]["plugin_name"] == "world_evolution_core"
+    assert data["source_plugin"] == "world_evolution_core"
     clear_hooks()
 
 

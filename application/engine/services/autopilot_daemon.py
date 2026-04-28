@@ -171,7 +171,13 @@ class AutopilotDaemon:
             conn.close()
 
     def _merge_autopilot_status_from_db(self, novel: Novel) -> None:
-        """用户点「停止」只改 DB；写库前必须合并，否则会覆盖 STOPPED。"""
+        """用户点「停止」只改 DB；写库前合并外部停止信号。
+
+        只在内存仍是 RUNNING 时读取数据库。守护进程自己判定完成/暂停后，
+        内存态是更新来源，不能被数据库上一轮的 RUNNING 反向覆盖。
+        """
+        if novel.autopilot_status != AutopilotStatus.RUNNING:
+            return
         status = self._read_autopilot_status_ephemeral(novel.novel_id)
         if status is not None:
             novel.autopilot_status = status
@@ -499,12 +505,14 @@ class AutopilotDaemon:
             logger.info(f"[{novel.novel_id}] 已达到目标章节数 {target_chapters} 章，全托管完成")
             novel.autopilot_status = AutopilotStatus.STOPPED
             novel.current_stage = NovelStage.COMPLETED
+            self._flush_novel(novel)
             return
 
         if current_chapters >= max_chapters:
             logger.info(f"[{novel.novel_id}] 已达保护上限 {max_chapters} 章，自动暂停（目标为 {target_chapters} 章）")
             novel.autopilot_status = AutopilotStatus.STOPPED
             novel.current_stage = NovelStage.PAUSED_FOR_REVIEW
+            self._flush_novel(novel)
             return
 
         # 2. 缓冲章判断（高潮后插入日常章）
@@ -912,6 +920,8 @@ class AutopilotDaemon:
         
         # 7. 🆕 摘要生成钩子（双轨融合 - 轨道一）
         await self._maybe_generate_summaries(novel, len(completed))
+
+        self._flush_novel(novel)
 
     def _get_voice_service(self):
         """优先复用章后管线里的 voice service，避免配置分叉。"""
@@ -1689,4 +1699,3 @@ class AutopilotDaemon:
         
         except Exception as e:
             logger.warning(f"[{novel.novel_id}] 摘要生成失败: {e}")
-

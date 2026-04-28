@@ -184,6 +184,8 @@ async def startup_event():
     if os.name == "nt":
         logger.info("🧹 Windows 启动前检查残留进程...")
         _cleanup_orphan_python_processes()
+    else:
+        _cleanup_orphan_autopilot_daemon_processes()
 
     # 重启时将所有运行中的小说设置为停止状态
     _stop_all_running_novels()
@@ -301,7 +303,17 @@ def _stop_all_running_novels():
             if running_count > 0:
                 # 将所有运行中的小说设置为停止状态
                 conn.execute(
-                    "UPDATE novels SET autopilot_status = 'stopped', updated_at = CURRENT_TIMESTAMP WHERE autopilot_status = 'running'"
+                    """
+                    UPDATE novels
+                    SET autopilot_status = 'stopped',
+                        audit_progress = NULL,
+                        current_stage = CASE
+                            WHEN current_stage = 'auditing' THEN 'paused_for_review'
+                            ELSE current_stage
+                        END,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE autopilot_status = 'running'
+                    """
                 )
                 conn.commit()
                 logger.info(f"🔒 已将 {running_count} 本运行中的小说设置为停止状态（服务重启）")
@@ -467,6 +479,56 @@ def _cleanup_orphan_python_processes():
         logger.warning(f"⚠️ 进程清理失败: {e}")
 
 
+def _cleanup_orphan_autopilot_daemon_processes():
+    """Unix/macOS: 清理父进程异常退出后遗留的 multiprocessing 守护子进程。
+
+    uvicorn 被 kill 时 shutdown hook 可能来不及通知子进程，子进程会被
+    launchd/init 接管为 PPID=1 并继续轮询数据库，导致同一本书被重复写作。
+    这里只清理已成孤儿的 Python multiprocessing helper，不触碰当前后端的子进程。
+    """
+    if os.name == "nt":
+        return
+
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            ["ps", "-axo", "pid=,ppid=,command="],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        killed = 0
+        for raw_line in result.stdout.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            parts = line.split(None, 2)
+            if len(parts) < 3:
+                continue
+            pid_text, ppid_text, command = parts
+            if ppid_text != "1":
+                continue
+            if "CommandLineTools" not in command:
+                continue
+            if (
+                "multiprocessing.spawn" not in command
+                and "multiprocessing.resource_tracker" not in command
+            ):
+                continue
+            try:
+                os.kill(int(pid_text), signal.SIGTERM)
+                killed += 1
+            except ProcessLookupError:
+                continue
+            except Exception as exc:
+                logger.warning("清理孤儿守护子进程失败 PID=%s: %s", pid_text, exc)
+        if killed:
+            logger.warning("🧹 已清理 %s 个孤儿自动驾驶子进程", killed)
+    except Exception as e:
+        logger.warning("⚠️ 孤儿守护子进程清理失败: %s", e)
+
+
 def _stop_autopilot_daemon_thread():
     """停止守护进程"""
     global _daemon_process, _daemon_stop_event
@@ -496,9 +558,11 @@ def _stop_autopilot_daemon_thread():
     _daemon_process = None
     _daemon_stop_event = None
 
-    # Windows: 额外清理可能残留的 Python 子进程
+    # 额外清理可能残留的 Python 子进程
     if os.name == "nt":
         _cleanup_orphan_python_processes()
+    else:
+        _cleanup_orphan_autopilot_daemon_processes()
 
 
 def restart_autopilot_daemon():

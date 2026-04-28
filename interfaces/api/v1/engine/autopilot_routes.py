@@ -12,6 +12,7 @@ from domain.novel.entities.novel import AutopilotStatus, NovelStage
 from domain.novel.value_objects.novel_id import NovelId
 from interfaces.api.dependencies import get_novel_repository, get_chapter_repository
 from application.paths import get_db_path
+from application.ai.llm_control_service import LLMControlService
 from infrastructure.persistence.database.story_node_repository import StoryNodeRepository
 from application.engine.services.autopilot_log_ring import (
     file_end_offset,
@@ -126,9 +127,22 @@ class StartRequest(BaseModel):
     max_auto_chapters: Optional[int] = 9999  # 保护上限，默认几乎无限制，由 target_chapters 控制实际完成点
 
 
+def _assert_real_llm_configured() -> None:
+    runtime = LLMControlService().get_runtime_summary()
+    if runtime.using_mock:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "当前主 API 配置不完整，运行时会退回 MockProvider。"
+                "请先在 LLM 控制台配置 API Key 和模型名，并通过连接测试后再启动全托管。"
+            ),
+        )
+
+
 @router.post("/{novel_id}/start")
 async def start_autopilot(novel_id: str, body: StartRequest = StartRequest()):
     """启动自动驾驶"""
+    _assert_real_llm_configured()
     repo = get_novel_repository()
     novel = repo.get_by_id(NovelId(novel_id))
     if not novel:
@@ -166,6 +180,9 @@ async def stop_autopilot(novel_id: str):
     if not novel:
         raise HTTPException(404, "小说不存在")
     novel.autopilot_status = AutopilotStatus.STOPPED
+    novel.audit_progress = None
+    if novel.current_stage == NovelStage.AUDITING:
+        novel.current_stage = NovelStage.PAUSED_FOR_REVIEW
     repo.save(novel)
     logger.info("autopilot stop: novel_id=%s committed STOPPED", novel_id)
     return {"success": True, "message": "自动驾驶已停止"}

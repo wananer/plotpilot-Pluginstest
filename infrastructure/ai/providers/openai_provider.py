@@ -78,6 +78,8 @@ class OpenAIProvider(BaseProvider):
             return await self._generate_via_chat(prompt, config)
         except RuntimeError:
             raise
+        except ValueError:
+            raise
         except Exception as e:
             raise RuntimeError(f"Failed to generate text: {str(e)}") from e
 
@@ -118,11 +120,19 @@ class OpenAIProvider(BaseProvider):
                     # 尝试走 Responses 流式 API
                     request_kwargs = self._build_responses_request_kwargs(prompt, config, stream=True)
                     stream = await self.async_client.responses.create(**request_kwargs)
+                    emitted = False
                     async for chunk in stream:
                         content = self._extract_text_from_responses_chunk(chunk)
                         if content:
+                            emitted = True
                             yield content
-                    return  # 正常完成则结束 generator
+                    if emitted:
+                        return  # 正常完成则结束 generator
+                    self.__class__._fallback_to_chat_cache.add(base_url)
+                    logger.info(
+                        "Stream: Responses API returned empty content for %s, falling back.",
+                        base_url,
+                    )
                 except (openai.NotFoundError, openai.BadRequestError):
                     self.__class__._fallback_to_chat_cache.add(base_url)
                     logger.info(f"Stream: Responses API unsupported for {base_url}, falling back.")

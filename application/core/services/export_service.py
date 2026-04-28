@@ -7,6 +7,7 @@ import logging
 import os
 import re
 import tempfile
+import zipfile
 from pathlib import Path
 from typing import Iterator, List, Optional, Tuple
 
@@ -144,7 +145,10 @@ class ExportService:
             raise
 
     def _export_to_epub(self, novel: Novel, chapters: list[Chapter]) -> Tuple[bytes, str, str]:
-        from ebooklib import epub
+        try:
+            from ebooklib import epub
+        except ModuleNotFoundError:
+            return self._export_to_epub_stdlib(novel, chapters)
 
         book = epub.EpubBook()
         uid = _novel_id_str(novel)
@@ -211,6 +215,81 @@ class ExportService:
 
         stem = _safe_filename_stem(novel.title)
         return data, "application/epub+zip", f"{stem}.epub"
+
+    def _export_to_epub_stdlib(self, novel: Novel, chapters: list[Chapter]) -> Tuple[bytes, str, str]:
+        """Generate a minimal EPUB with the standard library when ebooklib is absent."""
+        uid = f"plotpilot:{_novel_id_str(novel)}"
+        title = html.escape(novel.title or "未命名")
+        author = html.escape(novel.author or "未知作者")
+        premise = html.escape((novel.premise or "").strip() or "（无简介）")
+
+        files: dict[str, str] = {
+            "META-INF/container.xml": """<?xml version="1.0" encoding="utf-8"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles>
+    <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
+  </rootfiles>
+</container>""",
+            "OEBPS/intro.xhtml": f"""<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="zh">
+<head><title>简介</title><meta charset="utf-8"/></head>
+<body><h1>{title}</h1><p>作者：{author}</p><p>{premise}</p></body>
+</html>""",
+        }
+
+        manifest_items = [
+            '<item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>',
+            '<item id="intro" href="intro.xhtml" media-type="application/xhtml+xml"/>',
+        ]
+        spine_items = ['<itemref idref="intro"/>']
+        nav_points = [
+            '<navPoint id="nav-intro" playOrder="1"><navLabel><text>简介</text></navLabel><content src="intro.xhtml"/></navPoint>'
+        ]
+
+        for i, ch in enumerate(chapters, start=1):
+            item_id = f"chap{i:03d}"
+            fname = f"{item_id}.xhtml"
+            chapter_title = html.escape(_chapter_display_title(ch))
+            body = _content_to_html_paragraphs(ch.content or "")
+            files[f"OEBPS/{fname}"] = f"""<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="zh">
+<head><title>{chapter_title}</title><meta charset="utf-8"/></head>
+<body><h1>{chapter_title}</h1>{body}</body>
+</html>"""
+            manifest_items.append(f'<item id="{item_id}" href="{fname}" media-type="application/xhtml+xml"/>')
+            spine_items.append(f'<itemref idref="{item_id}"/>')
+            nav_points.append(
+                f'<navPoint id="nav-{item_id}" playOrder="{i + 1}"><navLabel><text>{chapter_title}</text></navLabel><content src="{fname}"/></navPoint>'
+            )
+
+        files["OEBPS/content.opf"] = f"""<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" unique-identifier="bookid" version="2.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:identifier id="bookid">{html.escape(uid)}</dc:identifier>
+    <dc:title>{title}</dc:title>
+    <dc:language>zh</dc:language>
+    <dc:creator>{author}</dc:creator>
+  </metadata>
+  <manifest>{''.join(manifest_items)}</manifest>
+  <spine toc="ncx">{''.join(spine_items)}</spine>
+</package>"""
+        files["OEBPS/toc.ncx"] = f"""<?xml version="1.0" encoding="utf-8"?>
+<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
+  <head><meta name="dtb:uid" content="{html.escape(uid)}"/></head>
+  <docTitle><text>{title}</text></docTitle>
+  <navMap>{''.join(nav_points)}</navMap>
+</ncx>"""
+
+        out = io.BytesIO()
+        with zipfile.ZipFile(out, "w") as zf:
+            zf.writestr(zipfile.ZipInfo("mimetype"), "application/epub+zip", compress_type=zipfile.ZIP_STORED)
+            for path, content in files.items():
+                zf.writestr(path, content.encode("utf-8"), compress_type=zipfile.ZIP_DEFLATED)
+
+        stem = _safe_filename_stem(novel.title)
+        return out.getvalue(), "application/epub+zip", f"{stem}.epub"
 
     def _try_register_cjk_font(self, pdf) -> bool:
         for path in _cjk_font_paths():
