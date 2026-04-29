@@ -13,6 +13,7 @@ from scripts.evaluation.evolution_frontend_pressure_v2 import (
     evaluate_chapter_drift_series,
     evaluate_macro_planning_gate,
     seed_native_context_in_app_db,
+    start_backend,
 )
 from scripts.evaluation.evolution_pressure_test import (
     ChapterResult,
@@ -636,6 +637,26 @@ def test_frontend_pressure_v2_audit_gate_allows_planning_calls_without_chapter(t
     bad = check_audit_completeness(tmp_path / "llm_calls")
     assert bad["ok"] is False
     assert bad["unexpected_unknown_chapter_calls"][0]["phase"] == "unknown"
+
+
+def test_frontend_pressure_v2_start_backend_detaches_process(tmp_path, monkeypatch):
+    calls = []
+
+    class FakeProcess:
+        pid = 12345
+
+    def fake_popen(*args, **kwargs):
+        calls.append({"args": args, "kwargs": kwargs})
+        return FakeProcess()
+
+    monkeypatch.setattr("scripts.evaluation.evolution_frontend_pressure_v2.subprocess.Popen", fake_popen)
+
+    proc = start_backend(tmp_path, port=8123)
+
+    assert proc.pid == 12345
+    assert calls[0]["kwargs"]["start_new_session"] is True
+    assert calls[0]["kwargs"]["stdin"] is not None
+    assert (tmp_path / "backend_process.json").exists()
 
 
 def test_frontend_pressure_v2_chapter_drift_gate_stops_on_two_low_theme_chapters():

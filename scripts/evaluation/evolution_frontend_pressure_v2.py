@@ -214,8 +214,10 @@ def start_backend(run_dir: Path, *, port: int = 8005) -> subprocess.Popen[str]:
         [sys.executable, "-m", "uvicorn", "interfaces.main:app", "--host", "127.0.0.1", "--port", str(port)],
         cwd=str(PROJECT_ROOT),
         env=env,
+        stdin=subprocess.DEVNULL,
         stdout=log,
         stderr=subprocess.STDOUT,
+        start_new_session=True,
         text=True,
     )
     _write_json(run_dir / "backend_process.json", {"pid": proc.pid, "started_at": _utc_now(), "port": port})
