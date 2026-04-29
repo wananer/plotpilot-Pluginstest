@@ -1,5 +1,6 @@
 """OpenAI LLM 提供商实现"""
 import logging
+import os
 import openai
 import httpx
 from typing import Any, AsyncIterator
@@ -44,10 +45,14 @@ class OpenAIProvider(BaseProvider):
         if settings.base_url:
             client_kwargs["base_url"] = settings.base_url
 
-        self._http_client = httpx.AsyncClient(
-            timeout=httpx.Timeout(settings.timeout_seconds),
-            trust_env=False,
-        )
+        http_client_kwargs: dict[str, Any] = {
+            "timeout": httpx.Timeout(settings.timeout_seconds),
+            "trust_env": False,
+        }
+        explicit_proxy = (os.getenv("AITEXT_LLM_PROXY") or "").strip()
+        if explicit_proxy:
+            http_client_kwargs["proxy"] = explicit_proxy
+        self._http_client = httpx.AsyncClient(**http_client_kwargs)
         client_kwargs["http_client"] = self._http_client
         self.async_client = AsyncOpenAI(**client_kwargs)
 

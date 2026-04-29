@@ -323,3 +323,13 @@ class TestProfilePassthrough:
         settings = Settings(api_key="k")
         provider = OpenAIProvider(settings)
         assert provider._use_legacy is False
+
+    def test_explicit_llm_proxy_is_opt_in(self, monkeypatch):
+        monkeypatch.setenv("AITEXT_LLM_PROXY", "http://127.0.0.1:7897")
+
+        with patch("infrastructure.ai.providers.openai_provider.AsyncOpenAI"):
+            with patch("infrastructure.ai.providers.openai_provider.httpx.AsyncClient") as mock_client:
+                OpenAIProvider(Settings(api_key="k"))
+
+        assert mock_client.call_args.kwargs["trust_env"] is False
+        assert mock_client.call_args.kwargs["proxy"] == "http://127.0.0.1:7897"
