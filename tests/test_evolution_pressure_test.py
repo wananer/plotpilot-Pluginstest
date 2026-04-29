@@ -387,6 +387,9 @@ def _create_frontend_v2_seed_schema(db_path):
             CREATE TABLE knowledge (
                 id TEXT PRIMARY KEY, novel_id TEXT, version INTEGER, premise_lock TEXT, created_at TEXT, updated_at TEXT
             );
+            CREATE TABLE bibles (
+                id TEXT PRIMARY KEY, novel_id TEXT, schema_version INTEGER, extensions TEXT, created_at TEXT, updated_at TEXT
+            );
             CREATE TABLE bible_characters (
                 id TEXT PRIMARY KEY, novel_id TEXT, name TEXT, description TEXT,
                 mental_state TEXT, mental_state_reason TEXT, verbal_tic TEXT, idle_behavior TEXT, created_at TEXT, updated_at TEXT
@@ -450,12 +453,15 @@ def test_frontend_pressure_v2_seeds_identical_native_context_for_both_arms(tmp_p
     assert control_seed["seed_hash"] == experiment_seed["seed_hash"]
     assert control_seed["premise_hash"] == experiment_seed["premise_hash"]
     assert control_seed["chapter_outline_hash"] == experiment_seed["chapter_outline_hash"]
+    assert control_seed["counts"]["bibles"] == 1
     assert control_seed["counts"]["bible_characters"] >= 3
     assert control_seed["counts"]["triples"] >= 3
     assert gate["ok"] is True
     assert "api_key" not in json.dumps(manifest, ensure_ascii=False)
     with sqlite3.connect(db_path) as conn:
         seeded_sql = "\n".join(conn.iterdump())
+        setting_types = {row[0] for row in conn.execute("SELECT DISTINCT setting_type FROM bible_world_settings")}
+    assert setting_types == {"rule"}
     for drift_term in ("退婚", "修仙", "灵根", "宗门", "仙尊", "丹田"):
         assert drift_term not in seeded_sql
 

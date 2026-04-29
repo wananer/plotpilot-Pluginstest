@@ -391,6 +391,16 @@ def build_native_seed_bundle(*, chapter_limit: int = 10) -> dict[str, Any]:
 def _rows_for_db_seed(novel_id: str, bundle: dict[str, Any], now: str) -> dict[str, list[dict[str, Any]]]:
     knowledge_id = f"v2-knowledge-{novel_id}"
     rows: dict[str, list[dict[str, Any]]] = {
+        "bibles": [
+            {
+                "id": f"bible-{novel_id}",
+                "novel_id": novel_id,
+                "schema_version": 1,
+                "extensions": "{}",
+                "created_at": now,
+                "updated_at": now,
+            }
+        ],
         "knowledge": [
             {
                 "id": knowledge_id,
@@ -434,7 +444,7 @@ def _rows_for_db_seed(novel_id: str, bundle: dict[str, Any], now: str) -> dict[s
                 "novel_id": novel_id,
                 "name": f"核心规则{index}",
                 "description": rule,
-                "setting_type": "fact_lock",
+                "setting_type": "rule",
                 "created_at": now,
                 "updated_at": now,
             }
