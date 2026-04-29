@@ -768,6 +768,25 @@ def evaluate_chapter_drift_series(chapters: list[dict[str, Any]], *, min_theme_h
     return {"ok": not should_stop, "should_stop": should_stop, "invalid_reasons": sorted(set(invalid_reasons)), "chapters": results}
 
 
+def chapters_for_drift_gate(chapters: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return generated chapters and skip empty draft placeholders created by planning."""
+
+    normalized: list[dict[str, Any]] = []
+    for index, chapter in enumerate(chapters, start=1):
+        content = str(chapter.get("content") or "")
+        status = str(chapter.get("status") or "").lower()
+        if not content.strip() and status not in {"completed", "published"}:
+            continue
+        normalized.append(
+            {
+                "chapter_number": chapter.get("number") or chapter.get("chapter_number") or index,
+                "content": content,
+                "status": status,
+            }
+        )
+    return normalized
+
+
 def check_audit_completeness(
     audit_dir: Path,
     *,
@@ -998,13 +1017,7 @@ def gate_chapters_for_run(
     for plan in plans:
         try:
             chapters = fetch_chapters(base_url, plan.novel_id)
-            normalized = [
-                {
-                    "chapter_number": chapter.get("number") or chapter.get("chapter_number") or index,
-                    "content": chapter.get("content") or "",
-                }
-                for index, chapter in enumerate(chapters, start=1)
-            ]
+            normalized = chapters_for_drift_gate(chapters)
             result = evaluate_chapter_drift_series(normalized)
             result["chapter_count"] = len(normalized)
             items[plan.novel_id] = result

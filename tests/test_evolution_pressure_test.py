@@ -8,6 +8,7 @@ from scripts.evaluation.evolution_frontend_pressure_v2 import (
     build_base_input_gate,
     build_leakage_gate,
     build_seed_manifest,
+    chapters_for_drift_gate,
     check_audit_completeness,
     evaluate_chapter_drift_series,
     evaluate_macro_planning_gate,
@@ -580,6 +581,20 @@ def test_frontend_pressure_v2_chapter_drift_gate_stops_on_two_low_theme_chapters
 
     assert result["should_stop"] is True
     assert "chapter_theme_hits_low_for_two_consecutive_chapters" in result["invalid_reasons"]
+
+
+def test_frontend_pressure_v2_chapter_drift_gate_ignores_empty_draft_placeholders():
+    chapters = chapters_for_drift_gate(
+        [
+            {"number": 1, "status": "completed", "content": "雾港里，沈砚带着黑匣子追查坠塔旧案。"},
+            {"number": 2, "status": "completed", "content": "顾岚和陆行舟在财阀学院发现旧AI圣像线索。"},
+            {"number": 3, "status": "draft", "content": ""},
+            {"number": 4, "status": "draft", "content": "   "},
+        ]
+    )
+
+    assert [chapter["chapter_number"] for chapter in chapters] == [1, 2]
+    assert evaluate_chapter_drift_series(chapters)["ok"] is True
 
 
 def test_frontend_pressure_v2_leakage_gate_requires_control_clean_and_experiment_active():
