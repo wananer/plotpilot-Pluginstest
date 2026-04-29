@@ -557,10 +557,29 @@ def _rows_for_db_seed(novel_id: str, bundle: dict[str, Any], now: str) -> dict[s
                 "novel_id": novel_id,
                 "payload": json.dumps(
                     {
+                        "id": f"fr-{novel_id}",
+                        "novel_id": novel_id,
                         "foreshadowings": [
-                            {"id": "v2-fs-box-noise", "description": "黑匣子第一段噪声隐藏沈澜坐标暗号", "status": "PLANNED", "chapter_planted": 1},
-                            {"id": "v2-fs-old-badge", "description": "圣像旧徽章会触发黑匣子发热", "status": "PLANNED", "chapter_planted": 2},
-                        ]
+                            {
+                                "id": "v2-fs-box-noise",
+                                "description": "黑匣子第一段噪声隐藏沈澜坐标暗号",
+                                "importance": 3,
+                                "status": "planted",
+                                "planted_in_chapter": 1,
+                                "suggested_resolve_chapter": 4,
+                                "resolved_in_chapter": None,
+                            },
+                            {
+                                "id": "v2-fs-old-badge",
+                                "description": "圣像旧徽章会触发黑匣子发热",
+                                "importance": 2,
+                                "status": "planted",
+                                "planted_in_chapter": 2,
+                                "suggested_resolve_chapter": 5,
+                                "resolved_in_chapter": None,
+                            },
+                        ],
+                        "subtext_entries": [],
                     },
                     ensure_ascii=False,
                 ),

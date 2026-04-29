@@ -32,6 +32,7 @@ from scripts.evaluation.evolution_pressure_test import (
 )
 from plugins.world_evolution_core.agent_orchestrator import AgentOrchestrator, decision_to_context_blocks
 from plugins.world_evolution_core.host_context import HostContextReader
+from infrastructure.persistence.mappers.foreshadowing_mapper import ForeshadowingMapper
 
 
 def test_repetitive_phrase_metrics_catch_silent_templates():
@@ -461,6 +462,26 @@ def test_frontend_pressure_v2_seeds_identical_native_context_for_both_arms(tmp_p
     with sqlite3.connect(db_path) as conn:
         setting_types = {row[0] for row in conn.execute("SELECT DISTINCT setting_type FROM bible_world_settings")}
     assert setting_types == {"rule"}
+
+
+def test_frontend_pressure_v2_seeds_native_foreshadow_registry_payload(tmp_path):
+    db_path = tmp_path / "aitext.db"
+    _create_frontend_v2_seed_schema(db_path)
+    novel_id = "frontend-v2-control-off-test"
+
+    seed_native_context_in_app_db(db_path, novel_id, chapter_limit=2)
+
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT payload FROM novel_foreshadow_registry WHERE novel_id = ?",
+            (novel_id,),
+        ).fetchone()
+    assert row is not None
+    registry = ForeshadowingMapper.from_dict(json.loads(row[0]))
+
+    assert registry.id == f"fr-{novel_id}"
+    assert registry.novel_id.value == novel_id
+    assert len(registry.get_unresolved()) == 2
 
 
 def test_frontend_pressure_v2_seed_gate_compares_control_and_experiment_per_run_kind(tmp_path):
