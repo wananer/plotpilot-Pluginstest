@@ -174,6 +174,19 @@ def test_disabled_plugin_routes_and_static_are_blocked(tmp_path, monkeypatch):
     assert static_response.json()["plugin_name"] == "guard_plugin"
 
 
+def test_plugin_control_state_follows_active_data_dir(tmp_path, monkeypatch):
+    sandbox_data = tmp_path / "sandbox_data"
+    monkeypatch.setattr(plugin_loader, "DATA_DIR", sandbox_data)
+    monkeypatch.setattr(plugin_loader, "_PLUGIN_CONTROL_PATH", None)
+
+    plugin_loader.set_plugin_enabled("world_evolution_core", False)
+
+    control_path = sandbox_data / "plugin_platform" / "plugin_controls.json"
+    assert control_path.exists()
+    assert plugin_loader._plugin_control_path() == control_path
+    assert control_path.read_text(encoding="utf-8").count("world_evolution_core") == 1
+
+
 def test_readonly_host_database_allows_reads_and_blocks_writes(tmp_path):
     import sqlite3
 

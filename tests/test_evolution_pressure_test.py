@@ -1,6 +1,18 @@
 import json
+import sqlite3
 from types import SimpleNamespace
 
+from scripts.evaluation.evolution_frontend_pressure_v2 import (
+    ARM_CONTROL,
+    ARM_EXPERIMENT,
+    build_base_input_gate,
+    build_leakage_gate,
+    build_seed_manifest,
+    check_audit_completeness,
+    evaluate_chapter_drift_series,
+    evaluate_macro_planning_gate,
+    seed_native_context_in_app_db,
+)
 from scripts.evaluation.evolution_pressure_test import (
     ChapterResult,
     EXPERIMENT_SPEC,
@@ -364,3 +376,202 @@ def test_pressure_host_context_seed_is_readable_and_isolated(tmp_path):
     assert context["plotpilot_context_usage"]["mode"] == "strategy_only"
 
     assert "api_key" not in json.dumps(seed, ensure_ascii=False)
+
+
+def _create_frontend_v2_seed_schema(db_path):
+    with sqlite3.connect(db_path) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE knowledge (
+                id TEXT PRIMARY KEY, novel_id TEXT, version INTEGER, premise_lock TEXT, created_at TEXT, updated_at TEXT
+            );
+            CREATE TABLE bible_characters (
+                id TEXT PRIMARY KEY, novel_id TEXT, name TEXT, description TEXT,
+                mental_state TEXT, mental_state_reason TEXT, verbal_tic TEXT, idle_behavior TEXT, created_at TEXT, updated_at TEXT
+            );
+            CREATE TABLE bible_locations (
+                id TEXT PRIMARY KEY, novel_id TEXT, name TEXT, description TEXT, location_type TEXT, parent_id TEXT, created_at TEXT, updated_at TEXT
+            );
+            CREATE TABLE bible_world_settings (
+                id TEXT PRIMARY KEY, novel_id TEXT, name TEXT, description TEXT, setting_type TEXT, created_at TEXT, updated_at TEXT
+            );
+            CREATE TABLE bible_timeline_notes (
+                id TEXT PRIMARY KEY, novel_id TEXT, event TEXT, time_point TEXT, description TEXT, sort_order INTEGER
+            );
+            CREATE TABLE chapter_summaries (
+                id TEXT PRIMARY KEY, knowledge_id TEXT, chapter_number INTEGER, summary TEXT,
+                key_events TEXT, open_threads TEXT, consistency_note TEXT, beat_sections TEXT, micro_beats TEXT, sync_status TEXT
+            );
+            CREATE TABLE triples (
+                id TEXT PRIMARY KEY, novel_id TEXT, subject TEXT, predicate TEXT, object TEXT,
+                chapter_number INTEGER, note TEXT, entity_type TEXT, importance TEXT, location_type TEXT,
+                description TEXT, first_appearance INTEGER, confidence REAL, source_type TEXT,
+                subject_entity_id TEXT, object_entity_id TEXT, created_at TEXT, updated_at TEXT
+            );
+            CREATE TABLE storylines (
+                id TEXT PRIMARY KEY, novel_id TEXT, storyline_type TEXT, status TEXT,
+                estimated_chapter_start INTEGER, estimated_chapter_end INTEGER, current_milestone_index INTEGER,
+                extensions TEXT, created_at TEXT, updated_at TEXT, name TEXT, description TEXT,
+                last_active_chapter INTEGER, progress_summary TEXT
+            );
+            CREATE TABLE storyline_milestones (
+                id TEXT PRIMARY KEY, storyline_id TEXT, milestone_order INTEGER, title TEXT, description TEXT,
+                target_chapter_start INTEGER, target_chapter_end INTEGER, prerequisite_list TEXT, milestone_triggers TEXT
+            );
+            CREATE TABLE timeline_registries (novel_id TEXT PRIMARY KEY, data TEXT, updated_at TEXT);
+            CREATE TABLE novel_foreshadow_registry (novel_id TEXT PRIMARY KEY, payload TEXT, updated_at TEXT);
+            CREATE TABLE narrative_events (
+                event_id TEXT PRIMARY KEY, novel_id TEXT, chapter_number INTEGER, event_summary TEXT,
+                mutations TEXT, tags TEXT, timestamp_ts TEXT
+            );
+            CREATE TABLE memory_engine_states (novel_id TEXT PRIMARY KEY, state_json TEXT, last_updated_chapter INTEGER);
+            """
+        )
+
+
+def test_frontend_pressure_v2_seeds_identical_native_context_for_both_arms(tmp_path):
+    db_path = tmp_path / "aitext.db"
+    _create_frontend_v2_seed_schema(db_path)
+
+    control_seed = seed_native_context_in_app_db(db_path, "frontend-v2-control-off-test", chapter_limit=2)
+    experiment_seed = seed_native_context_in_app_db(db_path, "frontend-v2-experiment-on-test", chapter_limit=2)
+    manifest = build_seed_manifest([control_seed, experiment_seed])
+    gate = build_base_input_gate(
+        manifest,
+        [
+            SimpleNamespace(novel_id="frontend-v2-control-off-test"),
+            SimpleNamespace(novel_id="frontend-v2-experiment-on-test"),
+        ],
+    )
+
+    assert manifest["base_input_gate"]["ok"] is True
+    assert control_seed["seed_hash"] == experiment_seed["seed_hash"]
+    assert control_seed["premise_hash"] == experiment_seed["premise_hash"]
+    assert control_seed["chapter_outline_hash"] == experiment_seed["chapter_outline_hash"]
+    assert control_seed["counts"]["bible_characters"] >= 3
+    assert control_seed["counts"]["triples"] >= 3
+    assert gate["ok"] is True
+    assert "api_key" not in json.dumps(manifest, ensure_ascii=False)
+
+
+def test_frontend_pressure_v2_seed_gate_compares_control_and_experiment_per_run_kind(tmp_path):
+    db_path = tmp_path / "aitext.db"
+    _create_frontend_v2_seed_schema(db_path)
+    records = []
+    for run_kind, chapter_limit in (("calibration", 2), ("formal", 10)):
+        for arm in (ARM_CONTROL, ARM_EXPERIMENT):
+            novel_id = f"frontend-v2-{run_kind}-{arm}-test"
+            seed = seed_native_context_in_app_db(db_path, novel_id, chapter_limit=chapter_limit)
+            seed.update({"run_kind": run_kind, "arm": arm, "chapter_count": chapter_limit})
+            records.append(seed)
+
+    manifest = build_seed_manifest(records)
+
+    assert manifest["base_input_gate"]["ok"] is True
+    assert manifest["chapter_outline_hash"] == ""
+    assert manifest["base_input_gate"]["groups"]["calibration"]["ok"] is True
+    assert manifest["base_input_gate"]["groups"]["formal"]["ok"] is True
+
+
+def test_frontend_pressure_v2_macro_gate_requires_premise_and_rejects_drift(tmp_path):
+    prompt_path = tmp_path / "prompt.json"
+    output_path = tmp_path / "output.md"
+    prompt_path.write_text(
+        json.dumps(
+            {
+                "prompt": {
+                    "system": "规划",
+                    "user": (
+                        EXPERIMENT_SPEC["premise"]
+                        + " 类型：近未来悬疑群像。世界观：海上城邦/财阀学院/旧AI遗迹。"
+                    ),
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    output_path.write_text("雾港、黑匣子、坠塔、圣像和沈砚/顾岚/陆行舟构成十章规划。", encoding="utf-8")
+    record = {
+        "novel_id": "frontend-v2-control-off-test",
+        "phase": "chapter_outline_suggestion",
+        "paths": {"prompt": str(prompt_path), "output": str(output_path)},
+    }
+
+    ok = evaluate_macro_planning_gate([record], novel_id="frontend-v2-control-off-test")
+    assert ok["ok"] is True
+    assert ok["premise_received"] is True
+
+    output_path.write_text("退婚后他测出灵根，进入宗门修仙。", encoding="utf-8")
+    bad = evaluate_macro_planning_gate([record], novel_id="frontend-v2-control-off-test")
+    assert bad["ok"] is False
+    assert "macro_drift_terms_present" in bad["invalid_reasons"]
+
+
+def test_frontend_pressure_v2_audit_gate_requires_files_per_novel(tmp_path):
+    call_dir = tmp_path / "llm_calls" / "by_chapter" / ARM_CONTROL / "chapter_01" / "call"
+    call_dir.mkdir(parents=True)
+    for filename in ("prompt.json", "output.md", "usage.json", "chunks.jsonl"):
+        (call_dir / filename).write_text("{}" if filename.endswith(".json") else "正文", encoding="utf-8")
+    record = {
+        "call_id": "call-1",
+        "arm": ARM_CONTROL,
+        "novel_id": "frontend-v2-control-off-test",
+        "chapter_number": 1,
+        "phase": "chapter_generation_stream",
+        "stream": True,
+        "paths": {
+            "prompt": str(call_dir / "prompt.json"),
+            "output": str(call_dir / "output.md"),
+            "usage": str(call_dir / "usage.json"),
+            "chunks": str(call_dir / "chunks.jsonl"),
+        },
+    }
+    (tmp_path / "llm_calls" / "calls.jsonl").write_text(json.dumps(record, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    ok = check_audit_completeness(tmp_path / "llm_calls", expected_novels={"frontend-v2-control-off-test": 1})
+    assert ok["ok"] is True
+
+    (call_dir / "usage.json").unlink()
+    bad = check_audit_completeness(tmp_path / "llm_calls", expected_novels={"frontend-v2-control-off-test": 1})
+    assert bad["ok"] is False
+    assert bad["missing_files"][0]["kind"] == "usage"
+
+
+def test_frontend_pressure_v2_chapter_drift_gate_stops_on_two_low_theme_chapters():
+    result = evaluate_chapter_drift_series(
+        [
+            {"chapter_number": 1, "content": "陌生故事开场，没有雾港与黑匣子。"},
+            {"chapter_number": 2, "content": "人物继续闲谈，仍没有旧AI和坠塔线。"},
+        ]
+    )
+
+    assert result["should_stop"] is True
+    assert "chapter_theme_hits_low_for_two_consecutive_chapters" in result["invalid_reasons"]
+
+
+def test_frontend_pressure_v2_leakage_gate_requires_control_clean_and_experiment_active():
+    clean_control = {"asset_counts": {}}
+    clean_diag = {"context_budget_summary": {"api2_control_card_chars": 0}}
+    active_experiment = {
+        "asset_counts": {"events": 2, "reflections": 1},
+        "agent_api_usage": {"aggregate": {"call_count": 1}},
+        "plotpilot_context_usage": {"selection_count": 1},
+    }
+
+    ok = build_leakage_gate(
+        control_agent_status=clean_control,
+        experiment_agent_status=active_experiment,
+        control_diagnostics=clean_diag,
+        experiment_diagnostics=clean_diag,
+    )
+    assert ok["ok"] is True
+
+    leaked = build_leakage_gate(
+        control_agent_status={"asset_counts": {"events": 1}},
+        experiment_agent_status=active_experiment,
+        control_diagnostics=clean_diag,
+        experiment_diagnostics=clean_diag,
+    )
+    assert leaked["ok"] is False
+    assert "control_has_no_evolution_assets" in leaked["invalid_reasons"]

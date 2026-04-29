@@ -26,14 +26,24 @@ from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from application.paths import DATA_DIR
+
 logger = logging.getLogger(__name__)
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 _PLUGINS_ROOT = _PROJECT_ROOT / "plugins"
-_PLUGIN_CONTROL_PATH = _PROJECT_ROOT / "data" / "plugin_platform" / "plugin_controls.json"
+_PLUGIN_CONTROL_PATH: Path | None = None
 _PLUGIN_NAME_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")
 _PLUGIN_CONTROL_LOCK = threading.RLock()
 _LOCAL_ADMIN_HOSTS = {"127.0.0.1", "::1", "localhost", "testclient"}
+
+
+def _plugin_control_path() -> Path:
+    """Return the mutable plugin-control file for the active data directory."""
+
+    if _PLUGIN_CONTROL_PATH is not None:
+        return Path(_PLUGIN_CONTROL_PATH)
+    return DATA_DIR / "plugin_platform" / "plugin_controls.json"
 
 
 def _discover_plugin_dirs() -> List[Path]:
@@ -82,10 +92,11 @@ def _is_enabled(manifest: Dict[str, Any]) -> bool:
 
 
 def _load_plugin_controls() -> Dict[str, Any]:
-    if not _PLUGIN_CONTROL_PATH.exists():
+    path = _plugin_control_path()
+    if not path.exists():
         return {}
     try:
-        data = json.loads(_PLUGIN_CONTROL_PATH.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
         return data if isinstance(data, dict) else {}
     except Exception as exc:
         logger.warning("⚠️ Plugin control state read failed: %s", exc)
@@ -94,10 +105,11 @@ def _load_plugin_controls() -> Dict[str, Any]:
 
 def _write_plugin_controls(controls: Dict[str, Any]) -> None:
     with _PLUGIN_CONTROL_LOCK:
-        _PLUGIN_CONTROL_PATH.parent.mkdir(parents=True, exist_ok=True)
-        temp_path = _PLUGIN_CONTROL_PATH.with_suffix(".tmp")
+        path = _plugin_control_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = path.with_suffix(".tmp")
         temp_path.write_text(json.dumps(controls, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
-        temp_path.replace(_PLUGIN_CONTROL_PATH)
+        temp_path.replace(path)
 
 
 def _configured_plugin_enabled(plugin_name: str) -> bool | None:
