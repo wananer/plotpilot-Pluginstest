@@ -43,6 +43,8 @@ THEME_TERMS = ("雾港", "黑匣子", "坠塔", "旧AI", "圣像", "财阀学院
 ARM_CONTROL = "control_off"
 ARM_EXPERIMENT = "experiment_on"
 RUN_KINDS = ("calibration", "formal")
+AUDITED_CHAPTER_GENERATION_PHASES = {"chapter_generation_stream", "chapter_generation_beat"}
+AUDITED_CHAPTERLESS_PHASES = {"chapter_outline_suggestion", "evolution_agent_control_card"}
 
 
 @dataclass(frozen=True)
@@ -808,11 +810,11 @@ def check_audit_completeness(
             chunks = paths.get("chunks")
             if not chunks or not Path(chunks).exists():
                 missing_files.append({"call_id": record.get("call_id"), "kind": "chunks", "path": chunks or ""})
-        if record.get("phase") == "chapter_generation_stream" and record.get("chapter_number"):
+        if record.get("phase") in AUDITED_CHAPTER_GENERATION_PHASES and record.get("chapter_number"):
             chapters_with_generation.setdefault(str(record.get("arm") or "unknown"), set()).add(int(record["chapter_number"]))
             if record.get("novel_id"):
                 chapters_by_novel.setdefault(str(record.get("novel_id")), set()).add(int(record["chapter_number"]))
-        if not record.get("chapter_number") and record.get("phase") not in {"chapter_outline_suggestion"}:
+        if not record.get("chapter_number") and record.get("phase") not in AUDITED_CHAPTERLESS_PHASES:
             unexpected_unknown_chapter_calls.append(
                 {
                     "call_id": record.get("call_id"),

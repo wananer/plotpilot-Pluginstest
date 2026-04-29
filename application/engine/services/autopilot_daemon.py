@@ -683,12 +683,13 @@ class AutopilotDaemon:
                         novel=novel,
                         voice_anchors=voice_anchors,
                         chapter_draft_so_far=chapter_content,
+                        chapter_number=chapter_num,
                     )
 
                 if beat_content.strip():
                     # V8: 截断检测与自动续写（软着陆）
                     beat_content = await self._ensure_complete_ending(
-                        beat_content, beat, outline, chapter_content, novel
+                        beat_content, beat, outline, chapter_content, novel, chapter_number=chapter_num
                     )
                     chapter_content += ("\n\n" if chapter_content else "") + beat_content
                     await self._upsert_chapter_content(novel, next_chapter_node, chapter_content, status="draft")
@@ -728,7 +729,7 @@ class AutopilotDaemon:
                 beat_content = await self._stream_llm_with_stop_watch(prompt, cfg, novel=novel, chapter_number=chapter_num)
             else:
                 beat_content = await self._stream_one_beat(
-                    outline, context, None, None, novel=novel, voice_anchors=voice_anchors
+                    outline, context, None, None, novel=novel, voice_anchors=voice_anchors, chapter_number=chapter_num
                 )
             if not self._is_still_running(novel):
                 logger.info(f"[{novel.novel_id}] 用户已停止，单段生成已中断")
@@ -1370,6 +1371,7 @@ class AutopilotDaemon:
         outline: str,
         chapter_draft_so_far: str,
         novel=None,
+        chapter_number: int | None = None,
     ) -> str:
         """V8: 截断检测与自动续写（软着陆）
 
@@ -1424,7 +1426,10 @@ class AutopilotDaemon:
         try:
             config = GenerationConfig(max_tokens=300, temperature=0.7)
             continuation = await self._stream_llm_with_stop_watch(
-                continuation_prompt, config, novel=novel, chapter_number=getattr(novel, "current_chapter_number", None)
+                continuation_prompt,
+                config,
+                novel=novel,
+                chapter_number=chapter_number if chapter_number is not None else getattr(novel, "current_chapter_number", None),
             )
 
             if continuation and continuation.strip():
@@ -1448,6 +1453,7 @@ class AutopilotDaemon:
         novel=None,
         voice_anchors: str = "",
         chapter_draft_so_far: str = "",
+        chapter_number: int | None = None,
     ) -> str:
         """无 AutoNovelGenerationWorkflow 时的降级：爽文短 Prompt + 流式。"""
         va = (voice_anchors or "").strip()
@@ -1484,7 +1490,12 @@ class AutopilotDaemon:
 
         prompt = Prompt(system=system, user="\n".join(user_parts))
         config = GenerationConfig(max_tokens=max_tokens, temperature=0.85)
-        return await self._stream_llm_with_stop_watch(prompt, config, novel=novel, chapter_number=getattr(novel, "current_chapter_number", None))
+        return await self._stream_llm_with_stop_watch(
+            prompt,
+            config,
+            novel=novel,
+            chapter_number=chapter_number if chapter_number is not None else getattr(novel, "current_chapter_number", None),
+        )
 
     async def _upsert_chapter_content(self, novel, chapter_node, content: str, status: str):
         """最小事务：只更新章节内容，不涉及其他表

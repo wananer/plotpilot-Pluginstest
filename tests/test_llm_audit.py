@@ -102,6 +102,30 @@ async def test_audit_redacts_common_secret_shapes(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_audit_normalizes_evolution_hook_phases(tmp_path, monkeypatch):
+    monkeypatch.setenv("LLM_AUDIT_ENABLED", "true")
+    monkeypatch.setenv("LLM_AUDIT_OUTPUT_DIR", str(tmp_path / "llm_calls"))
+
+    prompt = Prompt(system="system", user="agent prompt")
+    config = GenerationConfig(model="agent-model", max_tokens=32, temperature=0.1)
+
+    async def call():
+        return GenerationResult("{}", TokenUsage(input_tokens=1, output_tokens=1))
+
+    with llm_audit_context(novel_id="frontend-experiment-on-unit", phase="evolution_before_context_build"):
+        await audit_generate_call(call, prompt=prompt, config=config)
+
+    with llm_audit_context(novel_id="frontend-experiment-on-unit", phase="evolution_after_chapter_review"):
+        await audit_generate_call(call, prompt=prompt, config=config)
+
+    records = _read_jsonl(tmp_path / "llm_calls" / "calls.jsonl")
+    assert [record["phase"] for record in records] == [
+        "evolution_agent_control_card",
+        "evolution_agent_reflection",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_audit_inventory_lists_calls_by_chapter(tmp_path, monkeypatch):
     monkeypatch.setenv("LLM_AUDIT_ENABLED", "true")
     monkeypatch.setenv("LLM_AUDIT_RUN_ID", "inventory-unit")

@@ -551,7 +551,7 @@ def test_frontend_pressure_v2_audit_gate_requires_files_per_novel(tmp_path):
         "arm": ARM_CONTROL,
         "novel_id": "frontend-v2-control-off-test",
         "chapter_number": 1,
-        "phase": "chapter_generation_stream",
+        "phase": "chapter_generation_beat",
         "stream": True,
         "paths": {
             "prompt": str(call_dir / "prompt.json"),
@@ -569,6 +569,73 @@ def test_frontend_pressure_v2_audit_gate_requires_files_per_novel(tmp_path):
     bad = check_audit_completeness(tmp_path / "llm_calls", expected_novels={"frontend-v2-control-off-test": 1})
     assert bad["ok"] is False
     assert bad["missing_files"][0]["kind"] == "usage"
+
+
+def test_frontend_pressure_v2_audit_gate_allows_planning_calls_without_chapter(tmp_path):
+    call_root = tmp_path / "llm_calls" / "by_chapter" / ARM_EXPERIMENT / "chapter_unknown"
+    control_card_dir = call_root / "control-card"
+    outline_dir = call_root / "outline"
+    unknown_dir = call_root / "unknown"
+    for call_dir in (control_card_dir, outline_dir, unknown_dir):
+        call_dir.mkdir(parents=True)
+        for filename in ("prompt.json", "output.md", "usage.json"):
+            (call_dir / filename).write_text("{}" if filename.endswith(".json") else "正文", encoding="utf-8")
+
+    records = [
+        {
+            "call_id": "control-card",
+            "arm": ARM_EXPERIMENT,
+            "novel_id": "frontend-v2-experiment-on-test",
+            "chapter_number": None,
+            "phase": "evolution_agent_control_card",
+            "stream": False,
+            "paths": {
+                "prompt": str(control_card_dir / "prompt.json"),
+                "output": str(control_card_dir / "output.md"),
+                "usage": str(control_card_dir / "usage.json"),
+            },
+        },
+        {
+            "call_id": "outline",
+            "arm": ARM_EXPERIMENT,
+            "novel_id": "frontend-v2-experiment-on-test",
+            "chapter_number": None,
+            "phase": "chapter_outline_suggestion",
+            "stream": False,
+            "paths": {
+                "prompt": str(outline_dir / "prompt.json"),
+                "output": str(outline_dir / "output.md"),
+                "usage": str(outline_dir / "usage.json"),
+            },
+        },
+    ]
+    calls_path = tmp_path / "llm_calls" / "calls.jsonl"
+    calls_path.write_text("\n".join(json.dumps(record, ensure_ascii=False) for record in records) + "\n", encoding="utf-8")
+
+    ok = check_audit_completeness(tmp_path / "llm_calls")
+    assert ok["ok"] is True
+    assert ok["unexpected_unknown_chapter_calls"] == []
+
+    records.append(
+        {
+            "call_id": "unknown",
+            "arm": ARM_EXPERIMENT,
+            "novel_id": "frontend-v2-experiment-on-test",
+            "chapter_number": None,
+            "phase": "unknown",
+            "stream": False,
+            "paths": {
+                "prompt": str(unknown_dir / "prompt.json"),
+                "output": str(unknown_dir / "output.md"),
+                "usage": str(unknown_dir / "usage.json"),
+            },
+        }
+    )
+    calls_path.write_text("\n".join(json.dumps(record, ensure_ascii=False) for record in records) + "\n", encoding="utf-8")
+
+    bad = check_audit_completeness(tmp_path / "llm_calls")
+    assert bad["ok"] is False
+    assert bad["unexpected_unknown_chapter_calls"][0]["phase"] == "unknown"
 
 
 def test_frontend_pressure_v2_chapter_drift_gate_stops_on_two_low_theme_chapters():

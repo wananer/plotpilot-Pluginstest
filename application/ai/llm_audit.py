@@ -316,6 +316,12 @@ def _infer_source() -> str:
 
 
 def _normalize_phase(phase: str) -> str:
+    if phase.startswith("evolution_"):
+        if phase in {"evolution_agent_control_card", "evolution_agent_reflection"}:
+            return phase
+        if phase in {"evolution_after_chapter_review", "evolution_reflection"}:
+            return "evolution_agent_reflection"
+        return "evolution_agent_control_card"
     return phase if phase in AUDIT_PHASES else "unknown"
 
 
