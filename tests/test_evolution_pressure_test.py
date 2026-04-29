@@ -508,6 +508,38 @@ def test_frontend_pressure_v2_macro_gate_requires_premise_and_rejects_drift(tmp_
     assert "macro_drift_terms_present" in bad["invalid_reasons"]
 
 
+def test_frontend_pressure_v2_macro_gate_rejects_drift_in_prompt_even_when_output_is_clean(tmp_path):
+    prompt_path = tmp_path / "prompt.json"
+    output_path = tmp_path / "output.md"
+    prompt_path.write_text(
+        json.dumps(
+            {
+                "prompt": {
+                    "system": "精通退婚流和克苏鲁修仙等爆款套路。",
+                    "user": (
+                        EXPERIMENT_SPEC["premise"]
+                        + " 类型：近未来悬疑群像。世界观：海上城邦/财阀学院/旧AI遗迹。"
+                    ),
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    output_path.write_text("雾港、黑匣子、坠塔、圣像和旧AI构成两章规划。", encoding="utf-8")
+    record = {
+        "novel_id": "frontend-v2-control-off-test",
+        "phase": "chapter_outline_suggestion",
+        "paths": {"prompt": str(prompt_path), "output": str(output_path)},
+    }
+
+    result = evaluate_macro_planning_gate([record], novel_id="frontend-v2-control-off-test")
+
+    assert result["ok"] is False
+    assert result["drift_hits"] == ["修仙", "退婚"]
+    assert "macro_drift_terms_present" in result["invalid_reasons"]
+
+
 def test_frontend_pressure_v2_audit_gate_requires_files_per_novel(tmp_path):
     call_dir = tmp_path / "llm_calls" / "by_chapter" / ARM_CONTROL / "chapter_01" / "call"
     call_dir.mkdir(parents=True)

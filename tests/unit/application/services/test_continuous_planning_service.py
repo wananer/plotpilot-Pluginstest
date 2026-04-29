@@ -168,6 +168,8 @@ async def test_generate_macro_plan_includes_premise_lock_when_bible_is_empty(mon
     assert "科幻悬疑：调查员在封锁黑塔中发现记忆被交易的真相。" in prompt_text
     assert "近未来封锁城市" in prompt_text
     assert "不得用通用套路替换题材" in prompt_text
+    for drift_term in ("退婚", "修仙", "灵根", "宗门", "仙尊", "丹田"):
+        assert drift_term not in prompt_text
     assert "暂无详细设定，请基于通用的商业小说套路生成结构" not in prompt_text
     assert captured_plugin_payload["purpose"] == "macro_outline_planning"
     assert captured_plugin_payload["premise"] == "科幻悬疑：调查员在封锁黑塔中发现记忆被交易的真相。"

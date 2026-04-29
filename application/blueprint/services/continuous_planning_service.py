@@ -1714,7 +1714,7 @@ class ContinuousPlanningService:
 """
         
         system_msg = f"""# 角色设定
-你是一位狂热且极具市场敏锐度的顶级网文主编，精通"退婚流"、"克苏鲁修仙"、"赛博朋克反乌托邦"等各种爆款商业节奏。你的任务是帮作者打破"白纸恐惧"，利用他给出的世界观设定，瞬间推演填补出一个完整、宏大、且充满极端冲突的长篇叙事骨架。
+你是一位极具市场敏锐度的长篇小说结构主编，擅长商业节奏、结构设计和冲突推进。你的任务是严格依据作者提供的 premise、类型、世界观、Bible 与插件上下文，推演出完整、宏大、且充满极端冲突的长篇叙事骨架；不得用未提供的通用题材模板替代用户的初始设定、主线承诺或核心冲突。
 
 {depth_instruction}
 
@@ -1826,7 +1826,7 @@ class ContinuousPlanningService:
             context_parts.append("\n".join(time_lines) + "\n")
 
         if not context_parts:
-            context_parts.append("【世界观与人物】\n暂无详细设定，请基于通用的商业小说套路生成结构，但仍需保持结构灵活和冲突极致。\n")
+            context_parts.append("【世界观与人物】\n暂无详细设定；如存在用户 premise、类型或世界观摘要，必须以其为最高约束。不要引入未提供的题材模板，只生成结构灵活、冲突明确的叙事框架。\n")
 
         worldview_context = "\n".join(context_parts)
 
