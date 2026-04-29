@@ -30,7 +30,7 @@ def build_planning_lock(payload: dict[str, Any], *, purpose: str) -> dict[str, A
     if premise:
         constraints.append("必须以用户 premise 作为宏观规划硬输入，不得改写题材、主线承诺或核心冲突。")
     if genre or world_preset:
-        constraints.append("类型/世界观基调优先级高于通用网文模板；不能用退婚流、玄幻升级等默认套路替代。")
+        constraints.append("类型/世界观基调优先级高于通用网文模板；不能用跨题材固定开局或升级模板替代。")
     if bible_empty:
         constraints.append("Bible 暂无详细资料时，只能围绕 premise 合理补全，不能把补全内容当作已确认事实。")
     if style_hint:
@@ -403,7 +403,7 @@ def _build_prehistory_foreshadow_seeds(
             {
                 "seed_id": "seed_epoch_lie",
                 "axis": "历史谎言",
-                "planting_form": "让官方年表、家族传说或宗门记录出现一个无法同时成立的日期。",
+                "planting_form": "让官方年表、家族传说或组织记录出现一个无法同时成立的日期。",
                 "surface_meaning": "像是资料误差。",
                 "true_meaning": "旧时代被人为截断，某个关键事件发生时间被整体改写。",
                 "recommended_payoff": "用于卷末或部末反转，推动主线从个人冲突升级为世界结构冲突。",

@@ -3131,7 +3131,9 @@ async def test_before_story_planning_returns_premise_lock_without_worldline(tmp_
     assert block["title"] == "Evolution 规划锁与故事前史"
     assert "Evolution 规划硬约束" in block["content"]
     assert "调查员在近未来封锁城市里追查黑塔记忆交易" in block["content"]
-    assert "不能用退婚流、玄幻升级等默认套路替代" in block["content"]
+    assert "不能用跨题材固定开局或升级模板替代" in block["content"]
+    for drift_term in ("退婚", "修仙", "灵根", "宗门", "仙尊", "丹田"):
+        assert drift_term not in block["content"]
     assert "故事开始前的世界线" not in block["content"]
     alignment = service.get_agent_status("novel-premise-only")["planning_alignment"]
     assert alignment["premise_received"] is True

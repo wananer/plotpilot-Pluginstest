@@ -454,6 +454,10 @@ def test_frontend_pressure_v2_seeds_identical_native_context_for_both_arms(tmp_p
     assert control_seed["counts"]["triples"] >= 3
     assert gate["ok"] is True
     assert "api_key" not in json.dumps(manifest, ensure_ascii=False)
+    with sqlite3.connect(db_path) as conn:
+        seeded_sql = "\n".join(conn.iterdump())
+    for drift_term in ("退婚", "修仙", "灵根", "宗门", "仙尊", "丹田"):
+        assert drift_term not in seeded_sql
 
 
 def test_frontend_pressure_v2_seed_gate_compares_control_and_experiment_per_run_kind(tmp_path):
