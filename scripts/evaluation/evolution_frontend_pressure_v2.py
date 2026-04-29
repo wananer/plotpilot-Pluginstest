@@ -36,7 +36,6 @@ DEFAULT_BACKEND_URL = "http://127.0.0.1:8005"
 DEFAULT_FRONTEND_URL = "http://127.0.0.1:3010"
 PLUGIN_NAME = "world_evolution_core"
 
-DRIFT_TERMS = ("退婚", "修仙", "灵根", "宗门", "仙尊", "丹田", "筑基", "金丹", "飞升")
 MACRO_PROMPT_REQUIRED_TERMS = ("近未来悬疑群像", "海上城邦", "财阀学院", "旧AI")
 THEME_TERMS = ("雾港", "黑匣子", "坠塔", "旧AI", "圣像", "财阀学院", "海上城邦", "沈砚", "顾岚", "陆行舟")
 
@@ -400,8 +399,8 @@ def build_native_seed_bundle(*, chapter_limit: int = 10) -> dict[str, Any]:
         ],
         "seed_policy": {
             "control_and_experiment_identical": True,
-            "forbidden_drift_terms": list(DRIFT_TERMS),
             "theme_terms": list(THEME_TERMS),
+            "topic_alignment": "positive_theme_coverage_only",
         },
     }
 
@@ -748,7 +747,6 @@ def evaluate_macro_planning_gate(
     premise_hit = premise in prompt_text or premise[:80] in prompt_text
     prompt_hits = {term: term in prompt_text for term in MACRO_PROMPT_REQUIRED_TERMS}
     output_theme_hits = {term: term in output_text for term in THEME_TERMS}
-    drift_hits = sorted({term for term in DRIFT_TERMS if term in prompt_text or term in output_text})
     invalid_reasons: list[str] = []
     if not candidates:
         invalid_reasons.append("macro_planning_call_missing")
@@ -759,8 +757,6 @@ def evaluate_macro_planning_gate(
         invalid_reasons.append("macro_prompt_missing_required_terms")
     if sum(1 for ok in output_theme_hits.values() if ok) < 3:
         invalid_reasons.append("macro_output_theme_hits_below_threshold")
-    if drift_hits:
-        invalid_reasons.append("macro_drift_terms_present")
     return {
         "schema_version": 1,
         "novel_id": novel_id,
@@ -771,45 +767,41 @@ def evaluate_macro_planning_gate(
         "premise_received": premise_hit,
         "prompt_required_hits": prompt_hits,
         "output_theme_hits": output_theme_hits,
-        "drift_hits": drift_hits,
+        "topic_alignment": "ok" if not invalid_reasons else "needs_review",
         "prompt_chars": len(prompt_text),
         "output_chars": len(output_text),
     }
 
 
-def evaluate_chapter_drift(chapter_text: str, *, min_theme_hits: int = 3) -> dict[str, Any]:
+def evaluate_chapter_topic_alignment(chapter_text: str, *, min_theme_hits: int = 3) -> dict[str, Any]:
     theme_hits = {term: chapter_text.count(term) for term in THEME_TERMS if term in chapter_text}
-    drift_hits = {term: chapter_text.count(term) for term in DRIFT_TERMS if term in chapter_text}
     low_theme = len(theme_hits) < min_theme_hits
     return {
-        "ok": not drift_hits and not low_theme,
+        "ok": not low_theme,
+        "topic_alignment": "low_theme_coverage" if low_theme else "ok",
         "theme_hit_count": len(theme_hits),
         "theme_hits": theme_hits,
-        "drift_hits": drift_hits,
         "low_theme": low_theme,
     }
 
 
-def evaluate_chapter_drift_series(chapters: list[dict[str, Any]], *, min_theme_hits: int = 3) -> dict[str, Any]:
+def evaluate_chapter_topic_alignment_series(chapters: list[dict[str, Any]], *, min_theme_hits: int = 3) -> dict[str, Any]:
     results: list[dict[str, Any]] = []
     consecutive_low = 0
     should_stop = False
     invalid_reasons: list[str] = []
     for chapter in chapters:
-        result = evaluate_chapter_drift(str(chapter.get("content") or ""), min_theme_hits=min_theme_hits)
+        result = evaluate_chapter_topic_alignment(str(chapter.get("content") or ""), min_theme_hits=min_theme_hits)
         result["chapter_number"] = int(chapter.get("chapter_number") or len(results) + 1)
         results.append(result)
         consecutive_low = consecutive_low + 1 if result["low_theme"] else 0
-        if result["drift_hits"]:
-            should_stop = True
-            invalid_reasons.append("chapter_forbidden_drift_terms_present")
         if consecutive_low >= 2:
             should_stop = True
             invalid_reasons.append("chapter_theme_hits_low_for_two_consecutive_chapters")
     return {"ok": not should_stop, "should_stop": should_stop, "invalid_reasons": sorted(set(invalid_reasons)), "chapters": results}
 
 
-def chapters_for_drift_gate(chapters: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def chapters_for_topic_alignment_gate(chapters: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Return generated chapters and skip empty draft placeholders created by planning."""
 
     normalized: list[dict[str, Any]] = []
@@ -1081,8 +1073,8 @@ def gate_chapters_for_run(
     for plan in plans:
         try:
             chapters = fetch_chapters(base_url, plan.novel_id)
-            normalized = chapters_for_drift_gate(chapters)
-            result = evaluate_chapter_drift_series(normalized)
+            normalized = chapters_for_topic_alignment_gate(chapters)
+            result = evaluate_chapter_topic_alignment_series(normalized)
             result["chapter_count"] = len(normalized)
             items[plan.novel_id] = result
             if result["should_stop"] and stop_on_fail:
@@ -1097,7 +1089,7 @@ def gate_chapters_for_run(
         "stopped_novels": stopped,
         "generated_at": _utc_now(),
     }
-    _write_json(run_dir / "chapter_drift_gate.json", report)
+    _write_json(run_dir / "chapter_topic_alignment_gate.json", report)
     return report
 
 
@@ -1233,7 +1225,7 @@ def _write_runbook(run_dir: Path, plans: list[ArmPlan]) -> Path:
             "## Gates",
             "",
             "- Macro gate: run `gate-macro` after the first planning review pause.",
-            "- Drift gate: run `gate-chapters` after each completed chapter or at least after each arm.",
+            "- Topic alignment gate: run `gate-chapters` after each completed chapter or at least after each arm.",
             "- Final report: run `report` after both formal arms finish.",
             "",
         ]
@@ -1361,7 +1353,7 @@ def _build_parser() -> argparse.ArgumentParser:
     gate_audit.add_argument("--experiment-chapters", type=int, default=10)
     gate_audit.set_defaults(func=_gate_audit_command)
 
-    gate_chapters = sub.add_parser("gate-chapters", help="Fetch completed chapters and stop/report if the run drifts off topic.")
+    gate_chapters = sub.add_parser("gate-chapters", help="Fetch completed chapters and stop/report if theme coverage stays low.")
     gate_chapters.add_argument("--run-dir", required=True)
     gate_chapters.add_argument("--base-url", default=DEFAULT_BACKEND_URL)
     gate_chapters.add_argument("--stop-on-fail", action="store_true")

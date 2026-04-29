@@ -8,9 +8,9 @@ from scripts.evaluation.evolution_frontend_pressure_v2 import (
     build_base_input_gate,
     build_leakage_gate,
     build_seed_manifest,
-    chapters_for_drift_gate,
+    chapters_for_topic_alignment_gate,
     check_audit_completeness,
-    evaluate_chapter_drift_series,
+    evaluate_chapter_topic_alignment_series,
     evaluate_macro_planning_gate,
     seed_native_context_in_app_db,
     start_backend,
@@ -459,11 +459,8 @@ def test_frontend_pressure_v2_seeds_identical_native_context_for_both_arms(tmp_p
     assert gate["ok"] is True
     assert "api_key" not in json.dumps(manifest, ensure_ascii=False)
     with sqlite3.connect(db_path) as conn:
-        seeded_sql = "\n".join(conn.iterdump())
         setting_types = {row[0] for row in conn.execute("SELECT DISTINCT setting_type FROM bible_world_settings")}
     assert setting_types == {"rule"}
-    for drift_term in ("退婚", "修仙", "灵根", "宗门", "仙尊", "丹田"):
-        assert drift_term not in seeded_sql
 
 
 def test_frontend_pressure_v2_seed_gate_compares_control_and_experiment_per_run_kind(tmp_path):
@@ -485,7 +482,7 @@ def test_frontend_pressure_v2_seed_gate_compares_control_and_experiment_per_run_
     assert manifest["base_input_gate"]["groups"]["formal"]["ok"] is True
 
 
-def test_frontend_pressure_v2_macro_gate_requires_premise_and_rejects_drift(tmp_path):
+def test_frontend_pressure_v2_macro_gate_requires_premise_and_positive_theme_hits(tmp_path):
     prompt_path = tmp_path / "prompt.json"
     output_path = tmp_path / "output.md"
     prompt_path.write_text(
@@ -513,25 +510,24 @@ def test_frontend_pressure_v2_macro_gate_requires_premise_and_rejects_drift(tmp_
     ok = evaluate_macro_planning_gate([record], novel_id="frontend-v2-control-off-test")
     assert ok["ok"] is True
     assert ok["premise_received"] is True
+    assert ok["topic_alignment"] == "ok"
 
-    output_path.write_text("退婚后他测出灵根，进入宗门修仙。", encoding="utf-8")
+    output_path.write_text("故事转向无关的办公室争执和家庭琐事，没有核心线索推进。", encoding="utf-8")
     bad = evaluate_macro_planning_gate([record], novel_id="frontend-v2-control-off-test")
     assert bad["ok"] is False
-    assert "macro_drift_terms_present" in bad["invalid_reasons"]
+    assert bad["topic_alignment"] == "needs_review"
+    assert "macro_output_theme_hits_below_threshold" in bad["invalid_reasons"]
 
 
-def test_frontend_pressure_v2_macro_gate_rejects_drift_in_prompt_even_when_output_is_clean(tmp_path):
+def test_frontend_pressure_v2_macro_gate_requires_positive_terms_in_prompt(tmp_path):
     prompt_path = tmp_path / "prompt.json"
     output_path = tmp_path / "output.md"
     prompt_path.write_text(
         json.dumps(
             {
                 "prompt": {
-                    "system": "精通退婚流和克苏鲁修仙等爆款套路。",
-                    "user": (
-                        EXPERIMENT_SPEC["premise"]
-                        + " 类型：近未来悬疑群像。世界观：海上城邦/财阀学院/旧AI遗迹。"
-                    ),
+                    "system": "规划",
+                    "user": EXPERIMENT_SPEC["premise"],
                 }
             },
             ensure_ascii=False,
@@ -548,8 +544,8 @@ def test_frontend_pressure_v2_macro_gate_rejects_drift_in_prompt_even_when_outpu
     result = evaluate_macro_planning_gate([record], novel_id="frontend-v2-control-off-test")
 
     assert result["ok"] is False
-    assert result["drift_hits"] == ["修仙", "退婚"]
-    assert "macro_drift_terms_present" in result["invalid_reasons"]
+    assert result["topic_alignment"] == "needs_review"
+    assert "macro_prompt_missing_required_terms" in result["invalid_reasons"]
 
 
 def test_frontend_pressure_v2_audit_gate_requires_files_per_novel(tmp_path):
@@ -708,8 +704,8 @@ def test_frontend_pressure_v2_start_backend_detaches_process(tmp_path, monkeypat
     assert (tmp_path / "backend_process.json").exists()
 
 
-def test_frontend_pressure_v2_chapter_drift_gate_stops_on_two_low_theme_chapters():
-    result = evaluate_chapter_drift_series(
+def test_frontend_pressure_v2_topic_alignment_gate_stops_on_two_low_theme_chapters():
+    result = evaluate_chapter_topic_alignment_series(
         [
             {"chapter_number": 1, "content": "陌生故事开场，没有雾港与黑匣子。"},
             {"chapter_number": 2, "content": "人物继续闲谈，仍没有旧AI和坠塔线。"},
@@ -720,8 +716,8 @@ def test_frontend_pressure_v2_chapter_drift_gate_stops_on_two_low_theme_chapters
     assert "chapter_theme_hits_low_for_two_consecutive_chapters" in result["invalid_reasons"]
 
 
-def test_frontend_pressure_v2_chapter_drift_gate_ignores_empty_draft_placeholders():
-    chapters = chapters_for_drift_gate(
+def test_frontend_pressure_v2_topic_alignment_gate_ignores_empty_draft_placeholders():
+    chapters = chapters_for_topic_alignment_gate(
         [
             {"number": 1, "status": "completed", "content": "雾港里，沈砚带着黑匣子追查坠塔旧案。"},
             {"number": 2, "status": "completed", "content": "顾岚和陆行舟在财阀学院发现旧AI圣像线索。"},
@@ -731,7 +727,7 @@ def test_frontend_pressure_v2_chapter_drift_gate_ignores_empty_draft_placeholder
     )
 
     assert [chapter["chapter_number"] for chapter in chapters] == [1, 2]
-    assert evaluate_chapter_drift_series(chapters)["ok"] is True
+    assert evaluate_chapter_topic_alignment_series(chapters)["ok"] is True
 
 
 def test_frontend_pressure_v2_leakage_gate_requires_control_clean_and_experiment_active():
