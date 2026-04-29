@@ -1,12 +1,15 @@
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from application.ai.llm_audit import audit_generate_call, audit_stream_call, llm_audit_context, write_audit_inventory
+from application.blueprint.services.volume_summary_service import VolumeSummaryService
 from domain.ai.services.llm_service import GenerationConfig, GenerationResult
 from domain.ai.value_objects.prompt import Prompt
 from domain.ai.value_objects.token_usage import TokenUsage
+from domain.structure.story_node import NodeType
 
 
 def _read_jsonl(path: Path) -> list[dict]:
@@ -150,3 +153,61 @@ async def test_audit_inventory_lists_calls_by_chapter(tmp_path, monkeypatch):
     inventory = (tmp_path / "run" / "llm_call_inventory.md").read_text(encoding="utf-8")
     assert "evolution_agent_reflection" in inventory
     assert "chapter_02" in inventory
+
+
+@pytest.mark.asyncio
+async def test_volume_summary_audit_context_marks_act_summary_as_planning(tmp_path, monkeypatch):
+    monkeypatch.setenv("LLM_AUDIT_ENABLED", "true")
+    monkeypatch.setenv("LLM_AUDIT_OUTPUT_DIR", str(tmp_path / "llm_calls"))
+
+    class FakeLLM:
+        async def generate(self, prompt, config):
+            async def call():
+                return GenerationResult("幕摘要输出", TokenUsage(input_tokens=5, output_tokens=3))
+
+            return await audit_generate_call(call, prompt=prompt, config=config)
+
+    class FakeStoryNodeRepository:
+        def __init__(self):
+            self.act = SimpleNamespace(
+                id="act-1",
+                title="噪声与徽章",
+                description="开场幕",
+                metadata={},
+                chapter_start=1,
+                chapter_end=2,
+            )
+            self.chapter = SimpleNamespace(
+                id="chapter-node-1",
+                node_type=NodeType.CHAPTER,
+                number=1,
+                title="黑匣子",
+                outline="沈砚在海上城邦发现旧AI黑匣子。",
+                description="",
+            )
+
+        async def get_by_id(self, node_id):
+            return self.act if node_id == self.act.id else None
+
+        def get_children_sync(self, node_id):
+            return [self.chapter] if node_id == self.act.id else []
+
+        async def update(self, node):
+            self.updated = node
+
+    service = VolumeSummaryService(
+        llm_service=FakeLLM(),
+        story_node_repository=FakeStoryNodeRepository(),
+    )
+
+    result = await service.generate_act_summary("frontend-experiment-on-unit", "act-1")
+
+    assert result.success is True
+    records = _read_jsonl(tmp_path / "llm_calls" / "calls.jsonl")
+    assert len(records) == 1
+    record = records[0]
+    assert record["novel_id"] == "frontend-experiment-on-unit"
+    assert record["phase"] == "chapter_outline_suggestion"
+    assert record["chapter_number"] is None
+    assert record["arm"] == "experiment_on"
+    assert record["metadata"]["summary_level"] == "act"

@@ -26,6 +26,7 @@ from domain.novel.repositories.chapter_repository import ChapterRepository
 from domain.novel.repositories.foreshadowing_repository import ForeshadowingRepository
 from infrastructure.persistence.database.story_node_repository import StoryNodeRepository
 from domain.structure.story_node import NodeType
+from application.ai.llm_audit import llm_audit_context
 
 logger = logging.getLogger(__name__)
 
@@ -134,10 +135,17 @@ class VolumeSummaryService:
             prompt = self._build_act_summary_prompt(act_node, chapter_info, foreshadowing_info)
             
             # 调用 LLM
-            response = await self.llm_service.generate(
-                prompt,
-                GenerationConfig(max_tokens=400, temperature=0.5)
-            )
+            with llm_audit_context(
+                novel_id=novel_id,
+                phase="chapter_outline_suggestion",
+                source="volume_summary_service.generate_act_summary",
+                summary_level="act",
+                act_id=act_id,
+            ):
+                response = await self.llm_service.generate(
+                    prompt,
+                    GenerationConfig(max_tokens=400, temperature=0.5)
+                )
             
             summary = response.content.strip() if hasattr(response, 'content') else str(response).strip()
             
@@ -212,10 +220,17 @@ class VolumeSummaryService:
             # Reduce: LLM 压缩
             prompt = self._build_volume_summary_prompt(volume_node, act_summaries)
             
-            response = await self.llm_service.generate(
-                prompt,
-                GenerationConfig(max_tokens=800, temperature=0.5)
-            )
+            with llm_audit_context(
+                novel_id=novel_id,
+                phase="chapter_outline_suggestion",
+                source="volume_summary_service.generate_volume_summary",
+                summary_level="volume",
+                volume_number=volume_number,
+            ):
+                response = await self.llm_service.generate(
+                    prompt,
+                    GenerationConfig(max_tokens=800, temperature=0.5)
+                )
             
             summary = response.content.strip() if hasattr(response, 'content') else str(response).strip()
             
@@ -277,10 +292,17 @@ class VolumeSummaryService:
             
             prompt = self._build_part_summary_prompt(part_node, volume_summaries)
             
-            response = await self.llm_service.generate(
-                prompt,
-                GenerationConfig(max_tokens=500, temperature=0.5)
-            )
+            with llm_audit_context(
+                novel_id=novel_id,
+                phase="chapter_outline_suggestion",
+                source="volume_summary_service.generate_part_summary",
+                summary_level="part",
+                part_number=part_number,
+            ):
+                response = await self.llm_service.generate(
+                    prompt,
+                    GenerationConfig(max_tokens=500, temperature=0.5)
+                )
             
             summary = response.content.strip() if hasattr(response, 'content') else str(response).strip()
             
@@ -347,10 +369,17 @@ class VolumeSummaryService:
             
             prompt = self._build_checkpoint_summary_prompt(current_chapter, chapter_info)
             
-            response = await self.llm_service.generate(
-                prompt,
-                GenerationConfig(max_tokens=400, temperature=0.5)
-            )
+            with llm_audit_context(
+                novel_id=novel_id,
+                phase="chapter_outline_suggestion",
+                source="volume_summary_service.generate_checkpoint_summary",
+                summary_level="checkpoint",
+                current_chapter=current_chapter,
+            ):
+                response = await self.llm_service.generate(
+                    prompt,
+                    GenerationConfig(max_tokens=400, temperature=0.5)
+                )
             
             summary = response.content.strip() if hasattr(response, 'content') else str(response).strip()
             
@@ -604,10 +633,17 @@ class VolumeSummaryService:
 请生成这一卷的摘要。"""
             )
             
-            response = await self.llm_service.generate(
-                prompt,
-                GenerationConfig(max_tokens=800, temperature=0.5)
-            )
+            with llm_audit_context(
+                novel_id=novel_id,
+                phase="chapter_outline_suggestion",
+                source="volume_summary_service._generate_volume_summary_from_chapters",
+                summary_level="volume",
+                volume_number=getattr(volume_node, "number", None),
+            ):
+                response = await self.llm_service.generate(
+                    prompt,
+                    GenerationConfig(max_tokens=800, temperature=0.5)
+                )
             
             summary = response.content.strip() if hasattr(response, 'content') else str(response).strip()
             

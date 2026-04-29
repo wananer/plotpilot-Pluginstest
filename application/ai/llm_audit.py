@@ -300,6 +300,8 @@ def _infer_phase() -> str:
                 return "chapter_review_foreshadow"
         if "continuous_planning_service.py" in filename:
             return "chapter_outline_suggestion"
+        if "volume_summary_service.py" in filename:
+            return "chapter_outline_suggestion"
         if "autopilot_daemon.py" in filename:
             if "tension" in function or "audit" in function:
                 return "chapter_narrative_sync"

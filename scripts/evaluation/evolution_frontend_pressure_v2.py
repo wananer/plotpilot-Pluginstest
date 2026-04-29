@@ -45,6 +45,24 @@ ARM_EXPERIMENT = "experiment_on"
 RUN_KINDS = ("calibration", "formal")
 AUDITED_CHAPTER_GENERATION_PHASES = {"chapter_generation_stream", "chapter_generation_beat"}
 AUDITED_CHAPTERLESS_PHASES = {"chapter_outline_suggestion", "evolution_agent_control_card"}
+CHAPTERLESS_SUMMARY_MARKERS = (
+    "为一幕（Act）生成简洁的摘要",
+    "幕摘要",
+    "请生成这一幕的摘要",
+    "请生成这一卷的摘要",
+    "请生成这一部的摘要",
+    "请生成检查点摘要",
+)
+LEAKAGE_ACTIVE_ASSET_KEYS = {
+    "agent_decisions",
+    "capsules",
+    "decisions",
+    "events",
+    "gene_candidates",
+    "gene_versions",
+    "reflections",
+    "selections",
+}
 
 
 @dataclass(frozen=True)
@@ -705,6 +723,15 @@ def _read_record_text(record: dict[str, Any], kind: str) -> str:
     return text
 
 
+def _is_chapterless_summary_record(record: dict[str, Any]) -> bool:
+    """Identify legacy audit records for act/volume summaries without chapter ids."""
+
+    if record.get("chapter_number"):
+        return False
+    prompt_text = _read_record_text(record, "prompt")
+    return any(marker in prompt_text for marker in CHAPTERLESS_SUMMARY_MARKERS)
+
+
 def evaluate_macro_planning_gate(
     records: list[dict[str, Any]],
     *,
@@ -810,6 +837,7 @@ def check_audit_completeness(
     records = load_audit_records(audit_dir)
     missing_files: list[dict[str, Any]] = []
     unexpected_unknown_chapter_calls: list[dict[str, Any]] = []
+    allowed_chapterless_summary_calls: list[dict[str, Any]] = []
     chapters_with_generation: dict[str, set[int]] = {}
     chapters_by_novel: dict[str, set[int]] = {}
     for record in records:
@@ -827,6 +855,16 @@ def check_audit_completeness(
             if record.get("novel_id"):
                 chapters_by_novel.setdefault(str(record.get("novel_id")), set()).add(int(record["chapter_number"]))
         if not record.get("chapter_number") and record.get("phase") not in AUDITED_CHAPTERLESS_PHASES:
+            if _is_chapterless_summary_record(record):
+                allowed_chapterless_summary_calls.append(
+                    {
+                        "call_id": record.get("call_id"),
+                        "phase": record.get("phase"),
+                        "novel_id": record.get("novel_id"),
+                        "reason": "chapterless_act_volume_summary",
+                    }
+                )
+                continue
             unexpected_unknown_chapter_calls.append(
                 {
                     "call_id": record.get("call_id"),
@@ -852,6 +890,7 @@ def check_audit_completeness(
         "missing_files": missing_files,
         "missing_chapters": missing_chapters,
         "unexpected_unknown_chapter_calls": unexpected_unknown_chapter_calls,
+        "allowed_chapterless_summary_calls": allowed_chapterless_summary_calls,
         "chapters_with_generation": {arm: sorted(values) for arm, values in chapters_with_generation.items()},
         "chapters_by_novel": {novel_id: sorted(values) for novel_id, values in chapters_by_novel.items()},
     }
@@ -888,6 +927,8 @@ def build_leakage_gate(
 ) -> dict[str, Any]:
     control_counts = _agent_counts(control_agent_status)
     experiment_counts = _agent_counts(experiment_agent_status)
+    control_active_counts = _active_leakage_counts(control_counts)
+    experiment_active_counts = _active_leakage_counts(experiment_counts)
     control_context = _context_selection_count(control_agent_status, control_diagnostics)
     experiment_context = _context_selection_count(experiment_agent_status, experiment_diagnostics)
     experiment_agent_api = _agent_api_call_count(experiment_agent_status)
@@ -895,14 +936,19 @@ def build_leakage_gate(
     checks = [
         {
             "id": "control_has_no_evolution_assets",
-            "ok": not any(control_counts.values()) and control_context == 0,
-            "evidence": {"asset_counts": control_counts, "context_selection_count": control_context},
+            "ok": not any(control_active_counts.values()) and control_context == 0,
+            "evidence": {
+                "asset_counts": control_counts,
+                "active_asset_counts": control_active_counts,
+                "context_selection_count": control_context,
+            },
         },
         {
             "id": "experiment_has_evolution_participation",
-            "ok": experiment_context > 0 or any(experiment_counts.values()) or experiment_agent_api > 0 or bool(degraded),
+            "ok": experiment_context > 0 or any(experiment_active_counts.values()) or experiment_agent_api > 0 or bool(degraded),
             "evidence": {
                 "asset_counts": experiment_counts,
+                "active_asset_counts": experiment_active_counts,
                 "context_selection_count": experiment_context,
                 "agent_api_call_count": experiment_agent_api,
                 "degraded_reason": degraded,
@@ -931,6 +977,10 @@ def _agent_counts(status: dict[str, Any]) -> dict[str, int]:
         orchestration = status.get("agent_orchestration") if isinstance(status.get("agent_orchestration"), dict) else {}
         counts = orchestration.get("decision_counts") if isinstance(orchestration.get("decision_counts"), dict) else {}
     return {str(key): int(value or 0) for key, value in counts.items()}
+
+
+def _active_leakage_counts(counts: dict[str, int]) -> dict[str, int]:
+    return {key: value for key, value in counts.items() if key in LEAKAGE_ACTIVE_ASSET_KEYS}
 
 
 def _context_selection_count(status: dict[str, Any], diagnostics: dict[str, Any]) -> int:

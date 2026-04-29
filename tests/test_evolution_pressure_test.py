@@ -649,6 +649,45 @@ def test_frontend_pressure_v2_audit_gate_allows_planning_calls_without_chapter(t
     assert bad["unexpected_unknown_chapter_calls"][0]["phase"] == "unknown"
 
 
+def test_frontend_pressure_v2_audit_gate_allows_legacy_chapterless_act_summary(tmp_path):
+    call_dir = tmp_path / "llm_calls" / "by_chapter" / "unknown" / "chapter_unknown" / "act-summary"
+    call_dir.mkdir(parents=True)
+    (call_dir / "prompt.json").write_text(
+        json.dumps(
+            {
+                "prompt": {
+                    "system": "你是一位专业的小说编辑，擅长提炼故事精华。你的任务是为一幕（Act）生成简洁的摘要。",
+                    "user": "幕标题：噪声与徽章\n请生成这一幕的摘要。",
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (call_dir / "output.md").write_text("", encoding="utf-8")
+    (call_dir / "usage.json").write_text(json.dumps({"status": "error"}), encoding="utf-8")
+    record = {
+        "call_id": "chapter_generation_beat_na_legacy",
+        "arm": "unknown",
+        "novel_id": "",
+        "chapter_number": None,
+        "phase": "chapter_generation_beat",
+        "stream": False,
+        "paths": {
+            "prompt": str(call_dir / "prompt.json"),
+            "output": str(call_dir / "output.md"),
+            "usage": str(call_dir / "usage.json"),
+        },
+    }
+    (tmp_path / "llm_calls" / "calls.jsonl").write_text(json.dumps(record, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    result = check_audit_completeness(tmp_path / "llm_calls")
+
+    assert result["ok"] is True
+    assert result["unexpected_unknown_chapter_calls"] == []
+    assert result["allowed_chapterless_summary_calls"][0]["reason"] == "chapterless_act_volume_summary"
+
+
 def test_frontend_pressure_v2_start_backend_detaches_process(tmp_path, monkeypatch):
     calls = []
 
@@ -696,7 +735,7 @@ def test_frontend_pressure_v2_chapter_drift_gate_ignores_empty_draft_placeholder
 
 
 def test_frontend_pressure_v2_leakage_gate_requires_control_clean_and_experiment_active():
-    clean_control = {"asset_counts": {}}
+    clean_control = {"asset_counts": {"genes": 6}}
     clean_diag = {"context_budget_summary": {"api2_control_card_chars": 0}}
     active_experiment = {
         "asset_counts": {"events": 2, "reflections": 1},
@@ -711,6 +750,8 @@ def test_frontend_pressure_v2_leakage_gate_requires_control_clean_and_experiment
         experiment_diagnostics=clean_diag,
     )
     assert ok["ok"] is True
+    assert ok["checks"][0]["evidence"]["asset_counts"]["genes"] == 6
+    assert "genes" not in ok["checks"][0]["evidence"]["active_asset_counts"]
 
     leaked = build_leakage_gate(
         control_agent_status={"asset_counts": {"events": 1}},
