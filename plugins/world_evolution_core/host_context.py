@@ -618,36 +618,46 @@ def render_host_context_sections(context: dict[str, Any]) -> list[dict[str, Any]
 def _render_plotpilot_native_strategy(context: dict[str, Any]) -> str:
     if not isinstance(context, dict):
         return ""
-    lines = ["Evolution 已读取 PlotPilot 原生资料；这里只给写作操作约束，不重复注入全文资料。"]
+    hard: list[str] = []
+    soft: list[str] = []
     latest_story = _latest_item(context.get("story_knowledge"))
     if latest_story:
-        lines.append(f"- 承接章后同步：{_item_label(latest_story)}；不要重复展开已完成 beat，优先推进 open threads。")
+        hard.append(f"承接章后同步：{_item_label(latest_story)}；不要重复展开已完成 beat，优先推进 open threads。")
         beats = latest_story.get("beat_sections") if isinstance(latest_story.get("beat_sections"), list) else []
         if beats:
-            lines.append(f"- 已有分章节拍：{' / '.join(str(item) for item in beats[:3])}；本章只补缺口，不机械复述。")
+            soft.append(f"已有分章节拍：{' / '.join(str(item) for item in beats[:3])}；本章只补缺口，不机械复述。")
     storyline = _latest_item(context.get("storyline"))
     if storyline:
         milestone = ""
         milestones = storyline.get("milestones") if isinstance(storyline.get("milestones"), list) else []
         if milestones:
             milestone = f"；当前里程碑={milestones[0]}"
-        lines.append(f"- 遵守故事线：{_item_label(storyline)}{milestone}；场景选择服务 milestone 推进。")
+        soft.append(f"遵守故事线：{_item_label(storyline)}{milestone}；场景选择服务 milestone 推进。")
     foreshadow = _latest_item(context.get("foreshadow"))
     if foreshadow:
-        lines.append(f"- 伏笔账本：{_item_label(foreshadow)}；到期伏笔优先推进或回收，少开无关新悬念。")
+        soft.append(f"伏笔账本：{_item_label(foreshadow)}；到期伏笔优先推进或回收，少开无关新悬念。")
     timeline = _latest_item(context.get("timeline") or context.get("chronicle"))
     if timeline:
-        lines.append(f"- 编年史/时间线：{_item_label(timeline)}；若时空跳转，先写明确桥段，避免章节首尾回滚。")
+        hard.append(f"编年史/时间线：{_item_label(timeline)}；若时空跳转，先写明确桥段，避免章节首尾回滚。")
     bible = _latest_item(context.get("bible"))
     if bible:
-        lines.append(f"- Bible 边界：{_item_label(bible)}；人物事实、地点规则和声线以 Bible/章后同步为准。")
+        hard.append(f"Bible 边界：{_item_label(bible)}；人物事实、地点规则和声线以 Bible/章后同步为准。")
     triples = _latest_item(context.get("triples") or context.get("knowledge"))
     if triples:
-        lines.append(f"- 图谱/知识事实：{_item_label(triples)}；角色不得重新发现已知信息，也不得无证据突破知识边界。")
+        hard.append(f"图谱/知识事实：{_item_label(triples)}；角色不得重新发现已知信息，也不得无证据突破知识边界。")
     dialogue = _latest_item(context.get("dialogue"))
     if dialogue:
-        lines.append(f"- 对话声线：参考{_item_label(dialogue)}；保持说话方式一致，避免模板化沉默与重复反应句。")
-    return "\n".join(lines[:8]) if len(lines) > 1 else ""
+        soft.append(f"对话声线：参考{_item_label(dialogue)}；保持说话方式一致，避免模板化沉默与重复反应句。")
+    if not hard and not soft:
+        return ""
+    lines = ["Evolution 已读取 PlotPilot 原生资料；这里只给写作操作约束，不重复注入全文资料。"]
+    if hard:
+        lines.append("【必须遵守】")
+        lines.extend(f"- {item}" for item in hard[:4])
+    if soft:
+        lines.append("【建议参考】")
+        lines.extend(f"- {item}" for item in soft[:4])
+    return "\n".join(lines)
 
 
 def _rows(db: ReadOnlyHostDatabase | None, sql: str, params: tuple[Any, ...]) -> list[dict[str, Any]]:
@@ -782,10 +792,16 @@ def _build_plotpilot_context_usage(
         "t2_recent_chapter_sync": ["story_knowledge", "chronicle", "dialogue"],
         "t3_recall_support": ["knowledge", "triples", "dialogue"],
     }
+    source_roles = {
+        "story_knowledge": "chapter_after_sync",
+        "triples": "graph_fact_source",
+        "knowledge": "weak_recall_support",
+    }
     return {
         "source": "plotpilot_native_context_adapter",
         "mode": "strategy_only",
         "source_tiers": source_tiers,
+        "source_roles": source_roles,
         "hit_counts_by_tier": {
             tier: sum(int(counts.get(source) or 0) for source in sources)
             for tier, sources in source_tiers.items()

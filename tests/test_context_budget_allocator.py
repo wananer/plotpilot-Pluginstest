@@ -202,3 +202,33 @@ def test_plugin_context_patches_split_hard_constraints_from_soft_references(monk
     assert "已经在C307内部" in critical
     assert "本章焦点角色" not in critical
     assert "本章焦点角色" in support
+
+
+def test_plugin_context_patches_respect_explicit_evolution_tiers(monkeypatch):
+    def fake_collect_blocks(novel_id, chapter_number, outline, *, source):
+        return [
+            {
+                "title": "角色事实边界",
+                "kind": "focus_character_state",
+                "tier": "intended_t0",
+                "priority": 76,
+                "content": "沈砚不知道墙面划痕来自谁，不能提前说出答案。",
+            },
+            {
+                "title": "声线提醒",
+                "kind": "hard_constraint",
+                "metadata": {"tier": "intended_t1"},
+                "priority": 88,
+                "content": "对话保持克制，不要使用重复沉默句。",
+            },
+        ]
+
+    monkeypatch.setattr(allocator_module, "collect_generation_context_blocks", fake_collect_blocks)
+    allocator = ContextBudgetAllocator()
+
+    critical, support = allocator._get_plugin_context_patches("novel-1", 2, "沈砚调查C307")
+
+    assert "角色事实边界" in critical
+    assert "不能提前说出答案" in critical
+    assert "声线提醒" not in critical
+    assert "声线提醒" in support

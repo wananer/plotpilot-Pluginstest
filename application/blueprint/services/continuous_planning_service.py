@@ -23,6 +23,7 @@ from domain.ai.services.llm_service import LLMService, GenerationConfig
 from domain.ai.value_objects.prompt import Prompt
 from application.ai.llm_audit import llm_audit_context
 from application.audit.services.macro_merge_engine import MacroMergeEngine, MergePlan, MergeConflictException
+from application.core.premise_genre_world import parse_genre_world_from_premise
 from plugins.platform.host_integration import collect_story_planning_context_with_plugins
 
 logger = logging.getLogger(__name__)
@@ -31,9 +32,65 @@ _macro_plan_result_store: Dict[str, Dict] = {}
 
 
 def _append_plugin_story_context(context_parts: List[str], bible_context: Dict) -> None:
+    planning_lock = _render_native_planning_lock(bible_context)
+    if planning_lock:
+        context_parts.append(f"{planning_lock}\n")
     plugin_context = str((bible_context or {}).get("plugin_story_context") or "").strip()
     if plugin_context:
         context_parts.append(f"{plugin_context}\n")
+
+
+def _planning_payload_summary(payload: Optional[Dict], *, target_chapters: Optional[int] = None) -> Dict:
+    payload = payload or {}
+    premise = str(payload.get("premise") or payload.get("novel_premise") or "").strip()
+    title = str(payload.get("title") or payload.get("novel_title") or "").strip()
+    genre = str(payload.get("genre") or "").strip()
+    world_preset = str(payload.get("world_preset") or "").strip()
+    if premise and (not genre or not world_preset):
+        parsed_genre, parsed_world = parse_genre_world_from_premise(premise)
+        genre = genre or parsed_genre
+        world_preset = world_preset or parsed_world
+    try:
+        chapters = int(payload.get("target_chapters") or target_chapters or 0)
+    except (TypeError, ValueError):
+        chapters = int(target_chapters or 0)
+    return {
+        "novel_title": title[:200],
+        "premise": premise[:3000],
+        "genre": genre[:120],
+        "world_preset": world_preset[:200],
+        "target_chapters": chapters,
+        "style_hint": str(payload.get("style_hint") or "")[:1200],
+    }
+
+
+def _render_native_planning_lock(bible_context: Dict) -> str:
+    payload = (bible_context or {}).get("planning_payload") if isinstance(bible_context, dict) else {}
+    if not isinstance(payload, dict):
+        return ""
+    premise = str(payload.get("premise") or "").strip()
+    title = str(payload.get("novel_title") or "").strip()
+    genre = str(payload.get("genre") or "").strip()
+    world_preset = str(payload.get("world_preset") or "").strip()
+    target_chapters = payload.get("target_chapters")
+    style_hint = str(payload.get("style_hint") or "").strip()
+    if not any([premise, title, genre, world_preset, style_hint]):
+        return ""
+    lines = ["【小说初始设定硬约束】"]
+    if title:
+        lines.append(f"- 标题：{title}")
+    if genre:
+        lines.append(f"- 类型/赛道：{genre}")
+    if world_preset:
+        lines.append(f"- 世界观基调：{world_preset}")
+    if target_chapters:
+        lines.append(f"- 目标章数：{target_chapters}")
+    if premise:
+        lines.append(f"- 用户 premise：{premise}")
+    if style_hint:
+        lines.append(f"- 文风提示：{style_hint}")
+    lines.append("- 即使 Bible 暂无详细资料，也必须以以上 premise、类型和世界观为硬输入，不得用通用套路替换题材、主线或核心冲突。")
+    return "\n".join(lines)
 
 
 # ======================================================================
@@ -307,6 +364,7 @@ class ContinuousPlanningService:
         novel_id: str,
         target_chapters: int,
         structure_preference: Optional[Dict[str, int]] = None,
+        planning_context: Optional[Dict] = None,
     ) -> Dict:
         """生成宏观规划"""
         import time
@@ -316,7 +374,10 @@ class ContinuousPlanningService:
         self._update_macro_progress(novel_id, status="running", current=0, total=0, message="正在准备结构规划")
 
         # 获取 Bible 信息
-        bible_context = self._get_bible_context(novel_id)
+        bible_context = self._get_bible_context(
+            novel_id,
+            planning_payload=_planning_payload_summary(planning_context, target_chapters=target_chapters),
+        )
 
         try:
             if structure_preference is None:
@@ -1288,13 +1349,16 @@ class ContinuousPlanningService:
 
     # ==================== 辅助方法 ====================
 
-    def _get_bible_context(self, novel_id: str) -> Dict:
+    def _get_bible_context(self, novel_id: str, planning_payload: Optional[Dict] = None) -> Dict:
         """获取 Bible 上下文"""
+        planning_payload = _planning_payload_summary(planning_payload)
         if not self.bible_service:
             return {
+                "planning_payload": planning_payload,
                 "plugin_story_context": collect_story_planning_context_with_plugins(
                     novel_id,
                     purpose="macro_outline_planning",
+                    payload=planning_payload,
                     source="continuous_planning_service",
                     max_chars=6000,
                 )
@@ -1303,9 +1367,11 @@ class ContinuousPlanningService:
         bible = self.bible_service.get_bible_by_novel(novel_id)
         if not bible:
             return {
+                "planning_payload": planning_payload,
                 "plugin_story_context": collect_story_planning_context_with_plugins(
                     novel_id,
                     purpose="macro_outline_planning",
+                    payload=planning_payload,
                     source="continuous_planning_service",
                     max_chars=6000,
                 )
@@ -1321,6 +1387,7 @@ class ContinuousPlanningService:
             )
 
         context = {
+            "planning_payload": planning_payload,
             "characters": [{"id": c.id, "name": c.name, "description": c.description}
                            for c in bible.characters],
             "world_settings": [{"id": w.id, "name": w.name, "description": w.description}
@@ -1335,7 +1402,7 @@ class ContinuousPlanningService:
         context["plugin_story_context"] = collect_story_planning_context_with_plugins(
             novel_id,
             purpose="macro_outline_planning",
-            payload={"bible_context": context},
+            payload={**planning_payload, "bible_context": context},
             source="continuous_planning_service",
             max_chars=6000,
         )

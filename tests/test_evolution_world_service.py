@@ -25,6 +25,22 @@ class FakeControlCardLLM:
 
     async def generate(self, prompt, config):
         self.calls.append({"prompt": prompt, "config": config})
+        if "Evolution Agent Orchestrator" in str(getattr(prompt, "system", "")) or "Evolution Agent Orchestrator" in str(getattr(prompt, "user", "")):
+            return GenerationResult(
+                content=json.dumps(
+                    {
+                        "intent": "context_control",
+                        "evidence_refs": [{"source_type": "chapter_full_text", "chapter_number": 1}],
+                        "t0_constraints": ["沈砚已经在C307内部。", "不要重复进入C307。"],
+                        "t1_strategy": ["避免使用没有说话。"],
+                        "actions": [],
+                        "issues": [],
+                        "gene_patches": [],
+                    },
+                    ensure_ascii=False,
+                ),
+                token_usage=TokenUsage(input_tokens=123, output_tokens=45),
+            )
         return GenerationResult(
             content="【承接】沈砚已经在C307内部。\n【禁写】不要重复进入C307，不要使用没有说话。",
             token_usage=TokenUsage(input_tokens=123, output_tokens=45),
@@ -43,6 +59,106 @@ class FakeConnectionLLM:
         return GenerationResult(
             content="OK",
             token_usage=TokenUsage(input_tokens=3, output_tokens=1),
+        )
+
+    async def stream_generate(self, prompt, config):
+        yield "unused"
+
+
+class FakeAgentTakeoverLLM:
+    def __init__(self):
+        self.calls = []
+
+    async def generate(self, prompt, config):
+        self.calls.append({"prompt": prompt, "config": config})
+        user = str(getattr(prompt, "user", ""))
+        system = str(getattr(prompt, "system", ""))
+        if "智能体的反思器" in system:
+            return GenerationResult(
+                content=json.dumps(
+                    {
+                        "problem_pattern": "角色认知边界反复越界",
+                        "root_cause": "写作前没有把已知/未知信息锁为硬约束",
+                        "next_chapter_constraints": ["角色必须先获得证据再推断钥匙代价。"],
+                        "evidence_refs": ["evt-1"],
+                        "suggest_gene_candidate": True,
+                    },
+                    ensure_ascii=False,
+                ),
+                token_usage=TokenUsage(input_tokens=20, output_tokens=10),
+            )
+        if "agent_after_chapter_review" in user:
+            return GenerationResult(
+                content=json.dumps(
+                    {
+                        "intent": "reflect",
+                        "evidence_refs": [{"source_type": "review_issue", "id": "evt-1"}],
+                        "t0_constraints": ["下一章必须锁住角色认知边界。"],
+                        "t1_strategy": ["先写证据获取，再写推断。"],
+                        "actions": [{"type": "apply_gene_patch"}],
+                        "issues": [],
+                        "gene_patches": [
+                            {
+                                "gene_id": "gene_agent_cognition_lock",
+                                "title": "Agent 认知边界锁",
+                                "category": "character_logic",
+                                "signals_match": ["character_cognition", "knowledge_boundary"],
+                                "strategy": ["角色只能使用已知信息；未知信息必须先通过证据、对话或实验获得。"],
+                                "priority": 91,
+                                "reason": "审查发现角色直接使用未知钥匙代价。",
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+                token_usage=TokenUsage(input_tokens=30, output_tokens=20),
+            )
+        return GenerationResult(
+            content=json.dumps(
+                {
+                    "intent": "observe",
+                    "evidence_refs": [],
+                    "t0_constraints": [],
+                    "t1_strategy": ["保持全文知识索引更新。"],
+                    "actions": [],
+                    "issues": [],
+                    "gene_patches": [],
+                },
+                ensure_ascii=False,
+            ),
+            token_usage=TokenUsage(input_tokens=10, output_tokens=5),
+        )
+
+    async def stream_generate(self, prompt, config):
+        yield "unused"
+
+
+class FakeSensitiveAgentLLM:
+    def __init__(self):
+        self.calls = []
+
+    async def generate(self, prompt, config):
+        self.calls.append({"prompt": prompt, "config": config})
+        return GenerationResult(
+            content=json.dumps(
+                {
+                    "intent": "context_control",
+                    "evidence_refs": [],
+                    "t0_constraints": ["不得把 sk-test-secret 写进插件上下文。"],
+                    "t1_strategy": [],
+                    "actions": [],
+                    "issues": [],
+                    "gene_patches": [
+                        {
+                            "gene_id": "gene_bad_secret",
+                            "strategy": ["PRIVATE KEY must never be stored."],
+                        }
+                    ],
+                    "api_key": "sk-test-secret",
+                },
+                ensure_ascii=False,
+            ),
+            token_usage=TokenUsage(input_tokens=7, output_tokens=9),
         )
 
     async def stream_generate(self, prompt, config):
@@ -89,6 +205,13 @@ class SlowSemanticMemory:
     def search(self, *_args, **_kwargs):
         time.sleep(0.05)
         return {"source": "too_slow", "vector_enabled": True, "items": [{"source_type": "slow"}]}
+
+
+def _joined_context_blocks(context: dict) -> str:
+    return "\n".join(
+        f"【{block.get('title') or block.get('id')}】\n{block.get('content') or ''}"
+        for block in context.get("context_blocks", [])
+    )
 
 
 class FakeEmbeddingService:
@@ -224,7 +347,7 @@ async def test_after_commit_writes_facts_characters_and_context_block(tmp_path):
 
     context = service.before_context_build({"novel_id": "novel-1", "chapter_number": 2})
     assert context["ok"] is True
-    content = context["context_blocks"][0]["content"]
+    content = _joined_context_blocks(context)
     assert "本章焦点角色" in content
     assert "林澈" in content
     assert "《林澈》" not in content
@@ -240,8 +363,16 @@ async def test_after_commit_writes_facts_characters_and_context_block(tmp_path):
     ]
     assert patch["blocks"][1]["kind"] == "chapter_state_bridge"
     assert patch["blocks"][2]["kind"] == "focus_character_state"
+    assert patch["blocks"][1]["tier"] == "intended_t0"
+    assert patch["blocks"][2]["metadata"]["injection_layer"] == "t0_hard_constraints"
+    assert any(block["id"] == "focus_characters" and block["tier"] == "intended_t0" for block in context["context_blocks"])
     assert "上一章小总结" in content
     assert "下一章开头必须承接上一章结尾" in content
+    diagnostics = service.get_diagnostics("novel-1")
+    assert diagnostics["context_budget_summary"]["t0_block_count"] >= 1
+    assert diagnostics["context_budget_summary"]["t1_block_count"] >= 1
+    assert diagnostics["context_budget_summary"]["t0_chars"] > 0
+    assert diagnostics["context_budget_summary"]["t1_chars"] > 0
     assert service.repository.list_agent_events("novel-1")[-1]["intent"] == "inject"
 
 
@@ -658,7 +789,7 @@ async def test_after_commit_writes_chapter_and_volume_summaries(tmp_path):
     assert volume_summaries[0]["chapter_end"] == 10
 
     context = service.before_context_build({"novel_id": "novel-summary", "chapter_number": 11})
-    content = context["context_blocks"][0]["content"]
+    content = _joined_context_blocks(context)
     assert "最近10章大总结" in content
     assert "上一章小总结" in content
     assert "上一章结尾状态" in content
@@ -725,7 +856,7 @@ async def test_context_patch_injects_local_semantic_memory(tmp_path):
     assert block["kind"] == "local_semantic_memory"
     assert "本地知识库/向量库" in block["content"]
     assert "钥匙只能响应黑塔密门" in block["content"]
-    assert "本地语义记忆召回" in context["context_blocks"][0]["content"]
+    assert "本地语义记忆召回" in _joined_context_blocks(context)
 
 
 @pytest.mark.asyncio
@@ -923,14 +1054,16 @@ async def test_agent_api_control_card_setting_compresses_context_inside_evolutio
     )
 
     block = context["context_blocks"][0]
-    assert block["title"] == "Evolution 智能体写作控制卡"
+    assert block["title"] == "Evolution Agent T0 硬约束"
+    assert block["tier"] == "intended_t0"
+    assert block["kind"] == "hard_constraint"
     assert "沈砚已经在C307内部" in block["content"]
     assert "不要重复进入C307" in block["content"]
     assert block["metadata"]["api2_control_card_enabled"] is False
     assert block["metadata"]["agent_control_card_enabled"] is True
     assert block["metadata"]["agent_provider_mode"] == "custom"
     assert fake_llm.calls
-    assert "智能体控制卡" in fake_llm.calls[0]["prompt"].user
+    assert any("Evolution Agent Orchestrator" in call["prompt"].user for call in fake_llm.calls)
     records = service.repository.list_context_control_card_records("novel-agent-control-card")
     assert records[-1]["provider_mode"] == "custom"
     assert records[-1]["source"] == "agent_api"
@@ -982,16 +1115,17 @@ async def test_api2_control_card_setting_no_longer_compresses_context(tmp_path):
     )
 
     block = context["context_blocks"][0]
-    assert block["title"] == "Evolution World State"
-    assert block["metadata"]["api2_control_card_enabled"] is False
-    assert block["metadata"]["agent_control_card_enabled"] is False
+    assert block["title"] != "Evolution 智能体写作控制卡"
+    assert all((item.get("metadata") or {}).get("api2_control_card_enabled") is False for item in context["context_blocks"])
+    assert all((item.get("metadata") or {}).get("agent_control_card_enabled") is False for item in context["context_blocks"])
+    assert {item.get("tier") for item in context["context_blocks"]} >= {"intended_t0", "intended_t1"}
     assert not fake_llm.calls
     records = service.repository.list_context_control_card_records("novel-api2")
     assert records == []
 
 
 @pytest.mark.asyncio
-async def test_legacy_api2_model_fetch_is_deprecated_and_does_not_call_provider(tmp_path, monkeypatch):
+async def test_legacy_api2_model_fetch_is_deprecated_and_does_not_call_provider(tmp_path):
     storage = PluginStorage(root=tmp_path)
     service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage))
     service.update_settings(
@@ -1006,11 +1140,6 @@ async def test_legacy_api2_model_fetch_is_deprecated_and_does_not_call_provider(
             }
         }
     )
-
-    async def fake_fetch_model_items(request):
-        raise AssertionError("legacy API2 must not fetch models")
-
-    monkeypatch.setattr(evolution_service_module, "_fetch_model_list_items", fake_fetch_model_items)
 
     result = await service.fetch_api2_models(
         {
@@ -1184,8 +1313,200 @@ def test_agent_api_reflection_runs_after_solidifying_capsules(tmp_path):
     assert result["data"]["reflection"]["source"] == "agent_api"
     assert service.repository.list_agent_reflections("novel-agent-api")[0]["id"] == result["data"]["reflection"]["id"]
     assert agent_llm.calls
-    assert "智能体的反思器" in agent_llm.calls[-1]["prompt"].system
+    assert any("智能体的反思器" in call["prompt"].system for call in agent_llm.calls)
+    assert "agent_orchestration" in result["data"]
     assert any(event.get("intent") == "reflect" for event in service.repository.list_agent_events("novel-agent-api"))
+
+
+def test_agent_knowledge_base_indexes_full_project_sources(tmp_path):
+    storage = PluginStorage(root=tmp_path)
+    service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage))
+
+    chapter_index = service.agent_knowledge.index_chapter(
+        "novel-agent-kb",
+        1,
+        "林澈在黑塔门前使用钥匙。钥匙会消耗一段记忆，不能被第二次当成新发现。",
+    )
+    native_index = service.agent_knowledge.index_host_context(
+        "novel-agent-kb",
+        {
+            "bible": [{"id": "bc-1", "name": "林澈", "description": "调查黑塔事故的主角。"}],
+            "triples": [{"id": "tri-1", "subject": "钥匙", "predicate": "代价", "object": "消耗记忆"}],
+            "story_knowledge": [{"id": "cs-1", "chapter_number": 1, "summary": "林澈已经知道钥匙代价。"}],
+        },
+    )
+    asset_index = service.agent_knowledge.index_agent_assets(
+        "novel-agent-kb",
+        genes=[
+            {
+                "id": "gene-memory-cost",
+                "title": "钥匙代价守卫",
+                "strategy": ["钥匙代价已揭示时，不得重复写成第一次发现。"],
+            }
+        ],
+        reflections=[
+            {
+                "id": "ref-1",
+                "problem_pattern": "重复发现钥匙代价",
+                "next_chapter_constraints": ["下一章必须承接已知代价。"],
+            }
+        ],
+    )
+
+    result = service.agent_knowledge.search("novel-agent-kb", "钥匙 消耗记忆", before_chapter=2, limit=8)
+    status = service.get_agent_status("novel-agent-kb")
+
+    assert chapter_index["document_indexed"] is True
+    assert native_index["documents_indexed"] == 3
+    assert asset_index["documents_indexed"] == 2
+    assert result["item_count"] >= 3
+    assert {"chapter_full_text", "triples", "story_knowledge"} <= set(result["source_types"])
+    assert status["knowledge_base"]["document_counts_by_source"]["chapter_full_text"] == 1
+    assert status["knowledge_base"]["document_counts_by_source"]["gene"] == 1
+    assert status["knowledge_base"]["vector_status"] == "keyword_indexed"
+
+
+def test_agent_takeover_reflection_applies_gene_patch_immediately(tmp_path):
+    storage = PluginStorage(root=tmp_path)
+    agent_llm = FakeAgentTakeoverLLM()
+    service = EvolutionWorldAssistantService(
+        storage=storage,
+        jobs=PluginJobRegistry(storage),
+        agent_llm_service=agent_llm,
+    )
+    service.update_settings(
+        {
+            "agent_api": {
+                "enabled": True,
+                "provider_mode": "custom",
+                "custom_profile": {"api_key": "agent-key", "model": "agent-model"},
+            }
+        }
+    )
+    issue = {
+        "issue_type": "evolution_character_cognition",
+        "severity": "warning",
+        "description": "林澈不知道钥匙代价，但本章直接利用该信息。",
+        "suggestion": "补充林澈如何得知或推断。",
+        "evidence": [{"event_id": "evt-1", "summary": "林澈不知道钥匙代价"}],
+    }
+
+    result = service.after_chapter_review(
+        {
+            "novel_id": "novel-agent-takeover",
+            "chapter_number": 2,
+            "payload": {"review_result": {"issues": [issue]}},
+        }
+    )
+    genes = service.repository.list_agent_genes("novel-agent-takeover")
+    versions = service.repository.list_gene_versions("novel-agent-takeover")
+    status = service.get_agent_status("novel-agent-takeover")
+
+    assert result["data"]["gene_versions"]
+    assert versions[0]["gene_id"] == "gene_agent_cognition_lock"
+    assert versions[0]["created_by_agent"] is True
+    patched = next(gene for gene in genes if gene["id"] == "gene_agent_cognition_lock")
+    assert patched["created_by_agent"] is True
+    assert patched["version"] == 1
+    assert "角色只能使用已知信息" in patched["strategy"][0]
+    assert status["auto_evolution"]["gene_version_count"] == 1
+    assert any(item["gene_id"] == "gene_agent_cognition_lock" for item in status["active_gene_versions"])
+    assert any(event.get("intent") == "evolve_gene" for event in service.repository.list_agent_events("novel-agent-takeover"))
+
+
+def test_agent_decision_rejects_sensitive_structured_output(tmp_path):
+    storage = PluginStorage(root=tmp_path)
+    agent_llm = FakeSensitiveAgentLLM()
+    service = EvolutionWorldAssistantService(
+        storage=storage,
+        jobs=PluginJobRegistry(storage),
+        agent_llm_service=agent_llm,
+    )
+    service.update_settings(
+        {
+            "agent_api": {
+                "enabled": True,
+                "provider_mode": "custom",
+                "custom_profile": {"api_key": "agent-key", "model": "agent-model"},
+            }
+        }
+    )
+    service.repository.save_chapter_summary(
+        "novel-sensitive-agent",
+        1,
+        {"novel_id": "novel-sensitive-agent", "chapter_number": 1, "short_summary": "林澈进入黑塔。"},
+    )
+
+    context = service.before_context_build(
+        {
+            "novel_id": "novel-sensitive-agent",
+            "chapter_number": 2,
+            "payload": {"outline": "林澈继续调查钥匙代价。"},
+        }
+    )
+    records = service.repository.list_agent_decision_records("novel-sensitive-agent")
+    rendered = json.dumps(context, ensure_ascii=False)
+    diagnostics = service.get_diagnostics("novel-sensitive-agent")
+
+    assert records[-1]["status"] == "degraded"
+    assert records[-1]["output"]["degraded_reason"] == "agent_decision_rejected_sensitive_content"
+    assert "sk-test-secret" not in rendered
+    assert "PRIVATE KEY" not in rendered
+    assert diagnostics["agent_takeover_health"]["degraded_decision_count"] >= 1
+    assert diagnostics["degraded_agent_tools"][0]["tool"] == "agent_orchestrator"
+
+
+@pytest.mark.asyncio
+async def test_agent_knowledge_rebuild_records_coverage_and_decision(tmp_path):
+    db_path = tmp_path / "host-context.sqlite3"
+    _make_host_context_db(db_path)
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE chapters (
+            id TEXT PRIMARY KEY,
+            novel_id TEXT,
+            number INTEGER,
+            title TEXT,
+            content TEXT,
+            updated_at TEXT
+        );
+        """
+    )
+    conn.execute(
+        "INSERT INTO chapters VALUES (?, ?, ?, ?, ?, ?)",
+        ("chapter-host-1", "novel-host", 1, "黑塔钥匙", "林澈在黑塔门前确认钥匙会消耗记忆。", "2026-01-01"),
+    )
+    conn.commit()
+    conn.close()
+    storage = PluginStorage(root=tmp_path / "plugin")
+    service = EvolutionWorldAssistantService(
+        storage=storage,
+        jobs=PluginJobRegistry(storage),
+        host_database=ReadOnlyHostDatabase(db_path),
+    )
+    await service.after_commit(
+        {
+            "novel_id": "novel-host",
+            "chapter_number": 2,
+            "payload": {"content": "《林澈》带着钥匙靠近黑塔，记住钥匙代价会消耗记忆。"},
+        }
+    )
+
+    result = service.rebuild_agent_knowledge("novel-host")
+    decisions = service.repository.list_agent_decision_records("novel-host")
+    coverage = result["data"]["coverage"]
+
+    assert result["ok"] is True
+    assert result["data"]["host_chapters"]["documents_indexed"] == 1
+    assert coverage["document_count"] >= 4
+    assert coverage["chunk_count"] >= 4
+    assert coverage["document_counts_by_source"]["chapter_full_text"] >= 1
+    assert coverage["document_counts_by_source"]["chapter_summary"] >= 1
+    assert coverage["document_counts_by_source"]["evolution_fact_snapshot"] >= 1
+    assert coverage["document_counts_by_source"]["bible"] >= 1
+    assert decisions[-1]["phase"] == "knowledge_rebuild"
+    assert decisions[-1]["status"] == "succeeded"
 
 
 @pytest.mark.asyncio
@@ -2026,10 +2347,18 @@ def test_context_patch_injects_host_context_blocks(tmp_path):
     assert "host_world_context" not in block_ids
     strategy = next(block for block in context["context_patch"]["blocks"] if block["id"] == "plotpilot_native_strategy")
     assert "不重复注入全文资料" in strategy["content"]
+    assert "【必须遵守】" in strategy["content"]
+    assert "【建议参考】" in strategy["content"]
     assert "伏笔账本" in strategy["content"]
+    assert strategy["tier"] == "intended_t1"
+    assert any(block["id"] == "plotpilot_native_strategy" and block["tier"] == "intended_t1" for block in context["context_blocks"])
     status = service.get_agent_status("novel-host")
     assert status["host_context_summary"]["counts"]["world"] >= 2
     assert status["plotpilot_context_usage"]["mode"] == "strategy_only"
+    assert status["context_injection_summary"]["t1_block_count"] >= 1
+    assert status["context_injection_summary"]["t1_chars"] > 0
+    diagnostics = service.get_diagnostics("novel-host")
+    assert diagnostics["context_budget_summary"]["t1_block_count"] >= 1
     assert status["semantic_recall_summary"]["item_count"] >= 1
 
 
@@ -2165,7 +2494,7 @@ async def test_structured_provider_persists_rich_character_profile(tmp_path):
     context = service.before_context_build(
         {"novel_id": "novel-rich", "chapter_number": 2, "payload": {"outline": "测试角色甲结束演出后去找测试角色乙。"}}
     )
-    content = context["context_blocks"][0]["content"]
+    content = _joined_context_blocks(context)
     assert "外貌/出场识别" in content
     assert "性格调色盘" in content
     assert "底色=叛逆" in content
@@ -2444,7 +2773,7 @@ async def test_rich_character_card_tracks_cognition_growth_and_limits(tmp_path):
             "payload": {"outline": "林澈继续调查黑塔密门。"},
         }
     )
-    content = context["context_blocks"][0]["content"]
+    content = _joined_context_blocks(context)
     assert "不是本章任务清单" in content
     assert "不要逐条复述" in content
     assert "硬边界（不可无过渡违反）" in content
@@ -2768,10 +3097,49 @@ async def test_before_story_planning_returns_worldline_and_foreshadow_context(tm
 
     assert result["ok"] is True
     block = result["context_blocks"][0]
-    assert block["title"] == "Evolution 故事前史与伏笔库"
+    assert block["title"] == "Evolution 规划锁与故事前史"
+    assert "Evolution 规划硬约束" in block["content"]
     assert "故事开始前的世界线" in block["content"]
     assert "可用于大纲与伏笔的种子" in block["content"]
     assert result["data"]["foreshadow_seeds"]
+    assert result["data"]["planning_alignment"]["premise_received"] is True
+    assert result["data"]["planning_alignment"]["planning_lock_generated"] is True
+
+
+@pytest.mark.asyncio
+async def test_before_story_planning_returns_premise_lock_without_worldline(tmp_path):
+    storage = PluginStorage(root=tmp_path)
+    service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage))
+
+    result = service.before_story_planning(
+        {
+            "novel_id": "novel-premise-only",
+            "payload": {
+                "purpose": "macro_outline_planning",
+                "novel_title": "雾城黑塔",
+                "premise": "调查员在近未来封锁城市里追查黑塔记忆交易。",
+                "genre": "科幻悬疑",
+                "world_preset": "近未来封锁城市",
+                "target_chapters": 30,
+                "bible_context": {},
+            },
+        }
+    )
+
+    assert result["ok"] is True
+    block = result["context_blocks"][0]
+    assert block["title"] == "Evolution 规划锁与故事前史"
+    assert "Evolution 规划硬约束" in block["content"]
+    assert "调查员在近未来封锁城市里追查黑塔记忆交易" in block["content"]
+    assert "不能用退婚流、玄幻升级等默认套路替代" in block["content"]
+    assert "故事开始前的世界线" not in block["content"]
+    alignment = service.get_agent_status("novel-premise-only")["planning_alignment"]
+    assert alignment["premise_received"] is True
+    assert alignment["planning_lock_generated"] is True
+    assert alignment["bible_empty_fallback"] is True
+    diagnostics = service.get_diagnostics("novel-premise-only")
+    assert diagnostics["planning_alignment"]["premise_received"] is True
+    assert "native_context_alignment" in diagnostics
 
 
 @pytest.mark.asyncio

@@ -111,6 +111,72 @@ def test_extract_outer_json_value_prefers_object_root_over_leading_array():
 
 
 @pytest.mark.asyncio
+async def test_generate_macro_plan_includes_premise_lock_when_bible_is_empty(monkeypatch):
+    captured_plugin_payload = {}
+
+    def fake_story_planning_context(_novel_id, *, purpose, payload=None, source="", max_chars=0):
+        captured_plugin_payload.update(payload or {})
+        captured_plugin_payload["purpose"] = purpose
+        captured_plugin_payload["source"] = source
+        captured_plugin_payload["max_chars"] = max_chars
+        return ""
+
+    monkeypatch.setattr(
+        "application.blueprint.services.continuous_planning_service.collect_story_planning_context_with_plugins",
+        fake_story_planning_context,
+    )
+    llm_service = AsyncMock()
+    llm_service.generate = AsyncMock(
+        return_value="""{
+          "parts": [
+            {
+              "title": "第一部",
+              "volumes": [
+                {
+                  "title": "第一卷",
+                  "acts": [
+                    {"title": "雾城旧案", "description": "主角调查黑塔事故", "estimated_chapters": 30}
+                  ]
+                }
+              ]
+            }
+          ]
+        }"""
+    )
+    svc = ContinuousPlanningService(
+        story_node_repo=Mock(),
+        chapter_element_repo=Mock(),
+        llm_service=llm_service,
+    )
+
+    await svc.generate_macro_plan(
+        novel_id="novel-premise-lock",
+        target_chapters=30,
+        structure_preference=None,
+        planning_context={
+            "title": "雾城黑塔",
+            "premise": "科幻悬疑：调查员在封锁黑塔中发现记忆被交易的真相。",
+            "genre": "科幻悬疑",
+            "world_preset": "近未来封锁城市",
+            "target_chapters": 30,
+        },
+    )
+
+    prompt = llm_service.generate.call_args.args[0]
+    prompt_text = f"{prompt.system}\n{prompt.user}"
+    assert "小说初始设定硬约束" in prompt_text
+    assert "科幻悬疑：调查员在封锁黑塔中发现记忆被交易的真相。" in prompt_text
+    assert "近未来封锁城市" in prompt_text
+    assert "不得用通用套路替换题材" in prompt_text
+    assert "暂无详细设定，请基于通用的商业小说套路生成结构" not in prompt_text
+    assert captured_plugin_payload["purpose"] == "macro_outline_planning"
+    assert captured_plugin_payload["premise"] == "科幻悬疑：调查员在封锁黑塔中发现记忆被交易的真相。"
+    assert captured_plugin_payload["genre"] == "科幻悬疑"
+    assert captured_plugin_payload["world_preset"] == "近未来封锁城市"
+    assert captured_plugin_payload["target_chapters"] == 30
+
+
+@pytest.mark.asyncio
 async def test_generate_macro_plan_precise_mode_repairs_missing_act_fields_and_rebalances_chapters():
     llm_service = AsyncMock()
     llm_service.generate = AsyncMock(side_effect=[

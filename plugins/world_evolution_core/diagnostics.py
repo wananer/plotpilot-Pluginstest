@@ -9,6 +9,8 @@ from plugins.platform.hook_dispatcher import list_hooks
 
 PLUGIN_NAME = "world_evolution_core"
 DIAGNOSTICS_SCHEMA_VERSION = 1
+TIER_T0 = "intended_t0"
+TIER_T1 = "intended_t1"
 EXPECTED_HOOKS = {
     "after_novel_created",
     "before_story_planning",
@@ -53,6 +55,12 @@ def build_diagnostics(
     _check_settings_conflict(risks, repository)
     context_budget_summary = _context_budget_summary(repository, novel_id)
     plugin_leakage_check = _plugin_leakage_check(repository, novel_id, agent_status)
+    planning_alignment = agent_status.get("planning_alignment") if isinstance(agent_status.get("planning_alignment"), dict) else {}
+    native_context_alignment = agent_status.get("native_context_alignment") if isinstance(agent_status.get("native_context_alignment"), dict) else {}
+    agent_takeover_health = _agent_takeover_health(agent_status)
+    knowledge_coverage = agent_status.get("knowledge_base") if isinstance(agent_status.get("knowledge_base"), dict) else {}
+    gene_mutation_audit = agent_status.get("auto_evolution") if isinstance(agent_status.get("auto_evolution"), dict) else {}
+    degraded_agent_tools = _degraded_agent_tools(agent_status)
 
     risks.sort(key=lambda item: (_severity_rank(item.get("severity")), str(item.get("source") or "")))
     return {
@@ -69,6 +77,12 @@ def build_diagnostics(
         },
         "host_context_summary": _redact(host_context_summary),
         "host_feature_alignment": _redact(host_feature_alignment),
+        "planning_alignment": _redact(planning_alignment),
+        "native_context_alignment": _redact(native_context_alignment),
+        "agent_takeover_health": _redact(agent_takeover_health),
+        "knowledge_coverage": _redact(knowledge_coverage),
+        "gene_mutation_audit": _redact(gene_mutation_audit),
+        "degraded_agent_tools": _redact(degraded_agent_tools),
         "degraded_sources": list(host_context_summary.get("degraded_sources") or []),
         "empty_sources": list(host_context_summary.get("empty_sources") or []),
         "field_missing_sources": list(host_context_summary.get("field_missing_sources") or []),
@@ -143,10 +157,27 @@ def _context_budget_summary(repository: Any, novel_id: str) -> dict[str, Any]:
     blocks = _context_blocks_from_record(latest)
     block_ids = [str(block.get("id") or block.get("title") or "") for block in blocks if block]
     token_budget = sum(int(block.get("token_budget") or 0) for block in blocks)
+    tier_counts = {TIER_T0: 0, TIER_T1: 0, "unknown": 0}
+    tier_chars = {TIER_T0: 0, TIER_T1: 0, "unknown": 0}
+    block_tiers: list[dict[str, Any]] = []
+    for block in blocks:
+        tier = _block_tier(block)
+        bucket = tier if tier in {TIER_T0, TIER_T1} else "unknown"
+        chars = _block_chars(block)
+        tier_counts[bucket] += 1
+        tier_chars[bucket] += chars
+        block_tiers.append({"id": block.get("id"), "kind": block.get("kind"), "tier": tier or "unknown", "chars": chars})
     return {
         "has_context_injection": bool(records),
         "block_count": len(blocks),
         "token_budget": token_budget,
+        "t0_block_count": tier_counts[TIER_T0],
+        "t1_block_count": tier_counts[TIER_T1],
+        "tier_unknown_count": tier_counts["unknown"],
+        "t0_chars": tier_chars[TIER_T0],
+        "t1_chars": tier_chars[TIER_T1],
+        "tier_unknown_chars": tier_chars["unknown"],
+        "block_tiers": block_tiers,
         "duplicate_block_ids": _duplicates(item for item in block_ids if item),
         "strategy_only": any(block.get("id") == "plotpilot_native_strategy" for block in blocks),
         "latest_chapter": latest.get("chapter_number") if isinstance(latest, dict) else None,
@@ -169,6 +200,55 @@ def _context_blocks_from_record(record: Any) -> list[dict[str, Any]]:
         if blocks:
             return blocks
     return []
+
+
+def _agent_takeover_health(agent_status: dict[str, Any]) -> dict[str, Any]:
+    orchestration = agent_status.get("agent_orchestration") if isinstance(agent_status.get("agent_orchestration"), dict) else {}
+    knowledge = agent_status.get("knowledge_base") if isinstance(agent_status.get("knowledge_base"), dict) else {}
+    auto = agent_status.get("auto_evolution") if isinstance(agent_status.get("auto_evolution"), dict) else {}
+    decision_count = int(orchestration.get("decision_count") or 0)
+    degraded = int(orchestration.get("degraded_decision_count") or 0)
+    return {
+        "mode": "agent_orchestrator_takeover",
+        "decision_count": decision_count,
+        "degraded_decision_count": degraded,
+        "healthy": bool(decision_count and int(knowledge.get("chunk_count") or 0) > 0),
+        "knowledge_chunk_count": int(knowledge.get("chunk_count") or 0),
+        "auto_evolution_mode": auto.get("mode") or "immediate",
+        "gene_version_count": int(auto.get("gene_version_count") or 0),
+    }
+
+
+def _degraded_agent_tools(agent_status: dict[str, Any]) -> list[dict[str, Any]]:
+    orchestration = agent_status.get("agent_orchestration") if isinstance(agent_status.get("agent_orchestration"), dict) else {}
+    degraded = int(orchestration.get("degraded_decision_count") or 0)
+    if not degraded:
+        return []
+    return [
+        {
+            "tool": "agent_orchestrator",
+            "degraded_decision_count": degraded,
+            "latest_phase": orchestration.get("latest_phase"),
+            "latest_status": orchestration.get("latest_status"),
+        }
+    ]
+
+
+def _block_tier(block: dict[str, Any]) -> str:
+    tier = str(block.get("tier") or "").strip()
+    if tier:
+        return tier
+    metadata = block.get("metadata") if isinstance(block.get("metadata"), dict) else {}
+    return str(metadata.get("tier") or metadata.get("intended_tier") or "").strip()
+
+
+def _block_chars(block: dict[str, Any]) -> int:
+    if block.get("content_chars") is not None:
+        try:
+            return int(block.get("content_chars") or 0)
+        except (TypeError, ValueError):
+            return 0
+    return len(str(block.get("content") or ""))
 
 
 def _plugin_leakage_check(repository: Any, novel_id: str, agent_status: dict[str, Any]) -> dict[str, Any]:

@@ -664,6 +664,13 @@ def summarize_agent_status(
     host_context_summary: Optional[dict[str, Any]] = None,
     semantic_recall_summary: Optional[dict[str, Any]] = None,
     agent_api_usage: Optional[dict[str, Any]] = None,
+    planning_alignment: Optional[dict[str, Any]] = None,
+    native_context_alignment: Optional[dict[str, Any]] = None,
+    context_injection_summary: Optional[dict[str, Any]] = None,
+    agent_orchestration: Optional[dict[str, Any]] = None,
+    knowledge_base: Optional[dict[str, Any]] = None,
+    auto_evolution: Optional[dict[str, Any]] = None,
+    active_gene_versions: Optional[list[dict[str, Any]]] = None,
 ) -> dict[str, Any]:
     reflections = reflections or []
     candidates = candidates or []
@@ -690,6 +697,13 @@ def summarize_agent_status(
         "memory_index_summary": memory_index.get("summary") or {},
         "host_context_summary": host_context_summary or {},
         "plotpilot_context_usage": (host_context_summary or {}).get("plotpilot_context_usage") or {},
+        "planning_alignment": planning_alignment or {},
+        "native_context_alignment": native_context_alignment or {},
+        "context_injection_summary": context_injection_summary or {},
+        "agent_orchestration": agent_orchestration or {},
+        "knowledge_base": knowledge_base or {},
+        "auto_evolution": auto_evolution or {},
+        "active_gene_versions": active_gene_versions or [],
         "semantic_recall_summary": semantic_recall_summary or {},
         "agent_api_usage": agent_api_usage or {"aggregate": {}, "calls": []},
         "recent_events": events[-10:],

@@ -458,10 +458,22 @@
     const semanticRecall = agent.semantic_recall_summary || {};
     const agentApiUsage = agent.agent_api_usage || {};
     const agentApiAggregate = agentApiUsage.aggregate || {};
+    const planningAlignment = agent.planning_alignment || {};
+    const nativeAlignment = agent.native_context_alignment || {};
+    const orchestration = agent.agent_orchestration || {};
+    const knowledgeBase = agent.knowledge_base || {};
+    const autoEvolution = agent.auto_evolution || {};
+    const activeGeneVersions = Array.isArray(agent.active_gene_versions) ? agent.active_gene_versions : [];
     const observabilityNotes = [];
     if (hostContext.observability_normalized) observabilityNotes.push('旧版原生资料摘要已按当前 schema 兼容显示');
     if (!plotpilotUsage.mode) observabilityNotes.push('PlotPilot 原生资料策略模式暂未写入，已按 strategy_only 展示');
     const diagnostics = payload.diagnostics || {};
+    const budget = diagnostics.context_budget_summary || {};
+    const injectionSummary = agent.context_injection_summary || {};
+    const t0Blocks = budget.t0_block_count ?? injectionSummary.t0_block_count ?? 0;
+    const t1Blocks = budget.t1_block_count ?? injectionSummary.t1_block_count ?? 0;
+    const t0Chars = budget.t0_chars ?? injectionSummary.t0_chars ?? 0;
+    const t1Chars = budget.t1_chars ?? injectionSummary.t1_chars ?? 0;
     const diagnosticRisks = Array.isArray(diagnostics.risks) ? diagnostics.risks : [];
     const degradedRisks = diagnosticRisks.filter((item) => item.source === 'host_context' || item.source === 'semantic_recall' || item.source === 'agent_events').slice(0, 4);
     const reflections = Array.isArray(agent.latest_reflections) ? agent.latest_reflections.slice().reverse() : [];
@@ -490,6 +502,21 @@
       </section>
       <section class="ewa-section">
         <div class="ewa-section-head">
+          <h3>规划锁适配</h3>
+          <p>宏观规划前的 premise、题材与主线硬约束</p>
+        </div>
+        <dl class="ewa-status-list">
+          <div><dt>Premise 命中</dt><dd>${planningAlignment.premise_received ? '是' : '否'}</dd></div>
+          <div><dt>规划锁</dt><dd>${planningAlignment.planning_lock_generated ? '已生成' : '未生成'}</dd></div>
+          <div><dt>Bible 空表回退</dt><dd>${planningAlignment.bible_empty_fallback ? '是' : '否'}</dd></div>
+          <div><dt>前史辅助</dt><dd>${planningAlignment.prehistory_available ? '有' : '无'}</dd></div>
+          <div><dt>类型</dt><dd>${escapeHtml(planningAlignment.genre || '-')}</dd></div>
+          <div><dt>世界观</dt><dd>${escapeHtml(planningAlignment.world_preset || '-')}</dd></div>
+          <div><dt>目标章数</dt><dd>${escapeHtml(planningAlignment.target_chapters || 0)}</dd></div>
+        </dl>
+      </section>
+      <section class="ewa-section">
+        <div class="ewa-section-head">
           <h3>外部信息源</h3>
           <p>PlotPilot 内置模块只读召回状态</p>
         </div>
@@ -511,6 +538,10 @@
           ${(hostContext.active_sources || []).map((item) => `<em>${escapeHtml(item)}</em>`).join('') || '<em>暂无外部命中</em>'}
           ${(hostContext.degraded_sources || []).map((item) => `<em>降级:${escapeHtml(item)}</em>`).join('')}
           ${(hostContext.empty_sources || []).map((item) => `<em>空:${escapeHtml(item)}</em>`).join('')}
+          <em>短策略:${nativeAlignment.strategy_only === false ? '否' : '是'}</em>
+          <em>T0:${escapeHtml(t0Blocks)}块/${escapeHtml(t0Chars)}字</em>
+          <em>T1:${escapeHtml(t1Blocks)}块/${escapeHtml(t1Chars)}字</em>
+          <em>重复源:${escapeHtml(nativeAlignment.duplicated_source_count || 0)}</em>
           <em>向量:${semanticRecall.vector_enabled ? '启用' : '未启用'}</em>
           <em>召回:${escapeHtml(semanticRecall.item_count || 0)}</em>
         </div>
@@ -541,6 +572,23 @@
           <div><dt>输出</dt><dd>${escapeHtml(agentApiAggregate.output_tokens || 0)}</dd></div>
           <div><dt>总 token</dt><dd>${escapeHtml(agentApiAggregate.total_tokens || 0)}</dd></div>
         </dl>
+      </section>
+      <section class="ewa-section">
+        <div class="ewa-section-head">
+          <h3>Agent 接管</h3>
+          <p>Orchestrator 决策、全文知识库与自动 Gene 更新</p>
+        </div>
+        <dl class="ewa-status-list">
+          <div><dt>决策记录</dt><dd>${escapeHtml(orchestration.decision_count || 0)}</dd></div>
+          <div><dt>降级决策</dt><dd>${escapeHtml(orchestration.degraded_decision_count || 0)}</dd></div>
+          <div><dt>知识文档</dt><dd>${escapeHtml(knowledgeBase.document_count || 0)}</dd></div>
+          <div><dt>知识切块</dt><dd>${escapeHtml(knowledgeBase.chunk_count || 0)}</dd></div>
+          <div><dt>自进化</dt><dd>${escapeHtml(autoEvolution.mode || 'immediate')} · ${escapeHtml(autoEvolution.gene_version_count || 0)} 版</dd></div>
+          <div><dt>Agent Gene</dt><dd>${escapeHtml(activeGeneVersions.filter((item) => item.created_by_agent).length)}</dd></div>
+        </dl>
+        <div class="ewa-chip-row">
+          ${Object.entries(knowledgeBase.chunk_counts_by_source || {}).slice(0, 10).map(([key, value]) => `<em>${escapeHtml(key)}:${escapeHtml(value)}</em>`).join('') || '<em>暂无全文知识索引</em>'}
+        </div>
       </section>
       <section class="ewa-section">
         <div class="ewa-section-head">
@@ -665,6 +713,12 @@
     const counts = diagnostics.agent_asset_counts || {};
     const leakage = diagnostics.plugin_leakage_check || {};
     const budget = diagnostics.context_budget_summary || {};
+    const planningAlignment = diagnostics.planning_alignment || {};
+    const nativeAlignment = diagnostics.native_context_alignment || {};
+    const takeover = diagnostics.agent_takeover_health || {};
+    const coverage = diagnostics.knowledge_coverage || {};
+    const mutationAudit = diagnostics.gene_mutation_audit || {};
+    const degradedAgentTools = Array.isArray(diagnostics.degraded_agent_tools) ? diagnostics.degraded_agent_tools : [];
     const observabilityNotes = [];
     if (hostContext.observability_normalized) observabilityNotes.push('旧版 host context 摘要已兼容补齐');
     if (budget.legacy_record_normalized) observabilityNotes.push('历史 context injection 记录已兼容统计');
@@ -704,6 +758,21 @@
       </section>
       <section class="ewa-section">
         <div class="ewa-section-head">
+          <h3>规划锁适配</h3>
+          <p>宏观规划前是否收到 premise 与题材硬约束</p>
+        </div>
+        <dl class="ewa-status-list">
+          <div><dt>Premise</dt><dd>${planningAlignment.premise_received ? '已收到' : '未收到'}</dd></div>
+          <div><dt>规划锁</dt><dd>${planningAlignment.planning_lock_generated ? '已生成' : '未生成'}</dd></div>
+          <div><dt>Bible 空表回退</dt><dd>${planningAlignment.bible_empty_fallback ? '是' : '否'}</dd></div>
+          <div><dt>前史辅助</dt><dd>${planningAlignment.prehistory_available ? '有' : '无'}</dd></div>
+          <div><dt>渲染长度</dt><dd>${escapeHtml(planningAlignment.rendered_chars || 0)}</dd></div>
+          <div><dt>短策略</dt><dd>${nativeAlignment.strategy_only === false ? '否' : '是'}</dd></div>
+          <div><dt>重复源</dt><dd>${escapeHtml(nativeAlignment.duplicated_source_count || 0)}</dd></div>
+        </dl>
+      </section>
+      <section class="ewa-section">
+        <div class="ewa-section-head">
           <h3>原生资料适配</h3>
           <p>Bible、章后同步、故事线、伏笔、时间线、对白、Triples 与 MemoryEngine</p>
         </div>
@@ -725,8 +794,24 @@
           <div><dt>注入记录</dt><dd>${escapeHtml(leakage.context_injection_records || 0)}</dd></div>
           <div><dt>学习资产</dt><dd>${escapeHtml(leakage.agent_learning_assets || 0)}</dd></div>
           <div><dt>上下文块</dt><dd>${escapeHtml(budget.block_count || 0)} · budget ${escapeHtml(budget.token_budget || 0)}</dd></div>
+          <div><dt>T0 硬约束</dt><dd>${escapeHtml(budget.t0_block_count || 0)} 块 · ${escapeHtml(budget.t0_chars || 0)} 字</dd></div>
+          <div><dt>T1 软策略</dt><dd>${escapeHtml(budget.t1_block_count || 0)} 块 · ${escapeHtml(budget.t1_chars || 0)} 字</dd></div>
+          <div><dt>未分层</dt><dd>${escapeHtml(budget.tier_unknown_count || 0)} 块</dd></div>
           <div><dt>重复块</dt><dd>${escapeHtml((budget.duplicate_block_ids || []).join('、') || '无')}</dd></div>
           <div><dt>短策略模式</dt><dd>${budget.strategy_only ? '是' : '否'}</dd></div>
+        </dl>
+      </section>
+      <section class="ewa-section">
+        <div class="ewa-section-head">
+          <h3>Agent 接管护栏</h3>
+          <p>全文知识、自进化与工具降级</p>
+        </div>
+        <dl class="ewa-status-list">
+          <div><dt>健康</dt><dd>${takeover.healthy ? '是' : '待观察'}</dd></div>
+          <div><dt>决策</dt><dd>${escapeHtml(takeover.decision_count || 0)} · 降级 ${escapeHtml(takeover.degraded_decision_count || 0)}</dd></div>
+          <div><dt>知识覆盖</dt><dd>${escapeHtml(coverage.document_count || 0)} docs · ${escapeHtml(coverage.chunk_count || 0)} chunks</dd></div>
+          <div><dt>Gene 版本</dt><dd>${escapeHtml(mutationAudit.gene_version_count || 0)}</dd></div>
+          <div><dt>降级工具</dt><dd>${escapeHtml(degradedAgentTools.map((item) => item.tool).join('、') || '无')}</dd></div>
         </dl>
       </section>
       <section class="ewa-section ewa-run-section">

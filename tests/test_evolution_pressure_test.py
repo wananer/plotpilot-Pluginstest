@@ -16,8 +16,8 @@ from scripts.evaluation.evolution_pressure_test import (
     _selected_chapter_outlines,
     _write_experiment_protocol,
 )
+from plugins.world_evolution_core.agent_orchestrator import AgentOrchestrator, decision_to_context_blocks
 from plugins.world_evolution_core.host_context import HostContextReader
-from plugins.world_evolution_core.service import _build_agent_control_card_prompt
 
 
 def test_repetitive_phrase_metrics_catch_silent_templates():
@@ -32,20 +32,39 @@ def test_repetitive_phrase_metrics_catch_silent_templates():
     assert _repetitive_phrase_total(content) == 4
 
 
-def test_agent_control_card_prompt_is_unified_context_dispatcher():
-    prompt = _build_agent_control_card_prompt(
+def test_agent_orchestrator_outputs_t0_t1_context_blocks():
+    orchestrator = AgentOrchestrator(
+        run_agent=lambda phase, prompt, payload: {
+            "ok": True,
+            "model": "agent-model",
+            "token_usage": {"input_tokens": 12, "output_tokens": 8, "total_tokens": 20},
+            "structured": {
+                "intent": "context_control",
+                "evidence_refs": [{"source_type": "chapter_full_text", "chapter_number": 6}],
+                "t0_constraints": ["沈砚已经进入C307，黑匣子仍在他手里。"],
+                "t1_strategy": ["避免使用没有说话/没有回答等模板句。"],
+                "actions": [],
+                "issues": [],
+                "gene_patches": [],
+            },
+        }
+    )
+    decision = orchestrator.decide_context(
+        novel_id="novel-pressure",
         chapter_number=7,
         outline="三人潜入潮汐机房，黑匣子投影出争执。",
-        raw_context="上一章结尾：沈砚已经进入C307，黑匣子仍在他手里。",
+        patch_summary="上一章结尾：沈砚已经进入C307，黑匣子仍在他手里。",
+        knowledge={"items": []},
+        tier_summary={"t0_block_count": 1, "t1_block_count": 1},
     )
+    blocks = decision_to_context_blocks(decision, metadata={"novel_id": "novel-pressure"})
 
-    assert "上下文调度器" in prompt.system
-    assert "不写正文" in prompt.system
-    assert "只输出控制卡" in prompt.user
-    assert "沈砚已经进入C307" in prompt.user
-    assert "没有说话/没有回答" in prompt.user
-    assert "默认目标约 2500 字" in prompt.user
-    assert "超过 3000 字必须收束" in prompt.user
+    assert [block["tier"] for block in blocks] == ["intended_t0", "intended_t1"]
+    assert blocks[0]["kind"] == "hard_constraint"
+    assert "沈砚已经进入C307" in blocks[0]["content"]
+    assert "没有说话/没有回答" in blocks[1]["content"]
+    assert blocks[0]["metadata"]["agent_orchestrated"] is True
+    assert blocks[0]["metadata"]["evidence_refs"][0]["source_type"] == "chapter_full_text"
 
 
 def test_load_existing_arm_preserves_reused_usage_metadata(tmp_path):

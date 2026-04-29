@@ -7,6 +7,17 @@ from typing import Any, Optional, Union, Tuple
 from plugins.platform.plugin_storage import PluginStorage
 
 from .agent_assets import default_genes, summarize_agent_status
+from .agent_status_summary import (
+    active_gene_versions,
+    agent_api_usage_from_control_cards,
+    agent_orchestration_summary,
+    auto_evolution_summary,
+    context_injection_tier_summary,
+    knowledge_base_summary,
+    native_context_alignment,
+    normalize_host_context_summary,
+    normalize_planning_alignment,
+)
 from .models import ChapterFactSnapshot, CharacterCard
 
 PLUGIN_NAME = "world_evolution_core"
@@ -449,6 +460,48 @@ class EvolutionWorldRepository:
     def list_context_control_card_records(self, novel_id: str, limit: int = 30) -> list[dict[str, Any]]:
         return self.storage.read_jsonl(PLUGIN_NAME, ["novels", novel_id, "context", "control_cards.jsonl"], limit=limit)
 
+    def upsert_agent_knowledge_document(self, novel_id: str, document: dict[str, Any]) -> None:
+        doc_id = str(document.get("id") or "")
+        if not doc_id:
+            return
+        self.storage.write_json(PLUGIN_NAME, ["novels", novel_id, "agent", "knowledge", "documents", f"{doc_id}.json"], document)
+
+    def list_agent_knowledge_documents(self, novel_id: str, limit: int = 5000) -> list[dict[str, Any]]:
+        items = [
+            item
+            for item in self.storage.list_json(PLUGIN_NAME, ["novels", novel_id, "agent", "knowledge", "documents"])
+            if isinstance(item, dict)
+        ]
+        items.sort(key=lambda item: (str(item.get("updated_at") or ""), str(item.get("id") or "")))
+        return items[-limit:] if limit > 0 else items
+
+    def upsert_agent_knowledge_chunk(self, novel_id: str, chunk: dict[str, Any]) -> None:
+        chunk_id = str(chunk.get("chunk_id") or "")
+        if not chunk_id:
+            return
+        self.storage.write_json(PLUGIN_NAME, ["novels", novel_id, "agent", "knowledge", "chunks", f"{chunk_id}.json"], chunk)
+
+    def list_agent_knowledge_chunks(self, novel_id: str, limit: int = 10000) -> list[dict[str, Any]]:
+        items = [
+            item
+            for item in self.storage.list_json(PLUGIN_NAME, ["novels", novel_id, "agent", "knowledge", "chunks"])
+            if isinstance(item, dict)
+        ]
+        items.sort(key=lambda item: (int(item.get("chapter_number") or 0), str(item.get("source_type") or ""), str(item.get("chunk_id") or "")))
+        return items[-limit:] if limit > 0 else items
+
+    def append_agent_decision_record(self, novel_id: str, record: dict[str, Any]) -> None:
+        self.storage.append_jsonl(PLUGIN_NAME, ["novels", novel_id, "agent", "decisions.jsonl"], record)
+
+    def list_agent_decision_records(self, novel_id: str, limit: int = 80) -> list[dict[str, Any]]:
+        return self.storage.read_jsonl(PLUGIN_NAME, ["novels", novel_id, "agent", "decisions.jsonl"], limit=limit)
+
+    def append_gene_version(self, novel_id: str, version: dict[str, Any]) -> None:
+        self.storage.append_jsonl(PLUGIN_NAME, ["novels", novel_id, "agent", "gene_versions.jsonl"], version)
+
+    def list_gene_versions(self, novel_id: str, limit: int = 80) -> list[dict[str, Any]]:
+        return self.storage.read_jsonl(PLUGIN_NAME, ["novels", novel_id, "agent", "gene_versions.jsonl"], limit=limit)
+
     def get_settings(self) -> dict[str, Any]:
         data = self.storage.read_json(PLUGIN_NAME, ["settings.json"], default={})
         return data if isinstance(data, dict) else {}
@@ -597,7 +650,7 @@ class EvolutionWorldRepository:
 
     def get_host_context_summary(self, novel_id: str) -> dict[str, Any]:
         data = self.storage.read_json(PLUGIN_NAME, ["novels", novel_id, "agent", "host_context_summary.json"], default={})
-        return _normalize_host_context_summary(data if isinstance(data, dict) else {})
+        return normalize_host_context_summary(data if isinstance(data, dict) else {})
 
     def save_semantic_recall_summary(self, novel_id: str, summary: dict[str, Any]) -> None:
         self.storage.write_json(PLUGIN_NAME, ["novels", novel_id, "agent", "semantic_recall_summary.json"], summary)
@@ -605,6 +658,13 @@ class EvolutionWorldRepository:
     def get_semantic_recall_summary(self, novel_id: str) -> dict[str, Any]:
         data = self.storage.read_json(PLUGIN_NAME, ["novels", novel_id, "agent", "semantic_recall_summary.json"], default={})
         return data if isinstance(data, dict) else {}
+
+    def save_planning_alignment(self, novel_id: str, alignment: dict[str, Any]) -> None:
+        self.storage.write_json(PLUGIN_NAME, ["novels", novel_id, "agent", "planning_alignment.json"], alignment)
+
+    def get_planning_alignment(self, novel_id: str) -> dict[str, Any]:
+        data = self.storage.read_json(PLUGIN_NAME, ["novels", novel_id, "agent", "planning_alignment.json"], default={})
+        return normalize_planning_alignment(data if isinstance(data, dict) else {})
 
     def append_agent_event(self, novel_id: str, event: dict[str, Any]) -> None:
         self.storage.append_jsonl(PLUGIN_NAME, ["novels", novel_id, "agent", "events.jsonl"], event)
@@ -619,6 +679,7 @@ class EvolutionWorldRepository:
         return self.storage.read_jsonl(PLUGIN_NAME, ["novels", novel_id, "agent", "selection_records.jsonl"], limit=limit)
 
     def get_agent_status(self, novel_id: str) -> dict[str, Any]:
+        host_context_summary = self.get_host_context_summary(novel_id)
         return summarize_agent_status(
             genes=self.list_agent_genes(novel_id),
             capsules=self.list_agent_capsules(novel_id),
@@ -627,9 +688,16 @@ class EvolutionWorldRepository:
             reflections=self.list_agent_reflections(novel_id),
             candidates=self.list_agent_gene_candidates(novel_id),
             memory_index=self.get_agent_memory_index(novel_id),
-            host_context_summary=self.get_host_context_summary(novel_id),
+            host_context_summary=host_context_summary,
             semantic_recall_summary=self.get_semantic_recall_summary(novel_id),
-            agent_api_usage=_agent_api_usage_from_control_cards(self.list_context_control_card_records(novel_id, limit=500)),
+            agent_api_usage=agent_api_usage_from_control_cards(self.list_context_control_card_records(novel_id, limit=500)),
+            planning_alignment=self.get_planning_alignment(novel_id),
+            native_context_alignment=native_context_alignment(host_context_summary),
+            context_injection_summary=context_injection_tier_summary(self.list_context_injection_records(novel_id, limit=1)),
+            agent_orchestration=agent_orchestration_summary(self.list_agent_decision_records(novel_id, limit=200)),
+            knowledge_base=knowledge_base_summary(self.list_agent_knowledge_documents(novel_id), self.list_agent_knowledge_chunks(novel_id)),
+            auto_evolution=auto_evolution_summary(self.list_gene_versions(novel_id, limit=200)),
+            active_gene_versions=active_gene_versions(self.list_agent_genes(novel_id)),
         )
 
     def save_diagnostics_snapshot(self, novel_id: str, snapshot: dict[str, Any]) -> None:
@@ -1062,118 +1130,6 @@ def _int_or_none(value: Any) -> Optional[int]:
     except (TypeError, ValueError):
         return None
     return number if number > 0 else None
-
-
-def _agent_api_usage_from_control_cards(records: list[dict[str, Any]]) -> dict[str, Any]:
-    calls = []
-    totals = {
-        "call_count": 0,
-        "input_tokens": 0,
-        "output_tokens": 0,
-        "cache_creation_input_tokens": 0,
-        "cache_read_input_tokens": 0,
-        "total_tokens": 0,
-        "total_cost_usd": 0.0,
-    }
-    for record in records:
-        if not isinstance(record, dict) or record.get("source") != "agent_api":
-            continue
-        usage = record.get("token_usage") if isinstance(record.get("token_usage"), dict) else {}
-        call = {
-            "chapter_number": _int_or_none(record.get("chapter_number")),
-            "provider_mode": str(record.get("provider_mode") or ""),
-            "model": str(record.get("model") or ""),
-            "input_tokens": int(usage.get("input_tokens") or 0),
-            "output_tokens": int(usage.get("output_tokens") or 0),
-            "cache_creation_input_tokens": int(usage.get("cache_creation_input_tokens") or 0),
-            "cache_read_input_tokens": int(usage.get("cache_read_input_tokens") or 0),
-            "total_tokens": int(usage.get("total_tokens") or 0),
-            "total_cost_usd": float(usage.get("total_cost_usd") or 0.0),
-            "control_card_chars": int(record.get("control_card_chars") or 0),
-            "created_at": str(record.get("created_at") or ""),
-        }
-        calls.append(call)
-        totals["call_count"] += 1
-        for key in ("input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "total_tokens"):
-            totals[key] += int(call.get(key) or 0)
-        totals["total_cost_usd"] += float(call.get("total_cost_usd") or 0.0)
-    totals["total_cost_usd"] = round(totals["total_cost_usd"], 6)
-    return {"aggregate": totals, "calls": calls[-20:]}
-
-
-def _normalize_host_context_summary(summary: dict[str, Any]) -> dict[str, Any]:
-    if not isinstance(summary, dict) or not summary:
-        return {}
-    normalized = dict(summary)
-    counts = dict(normalized.get("counts") or {})
-    degraded_sources = list(normalized.get("degraded_sources") or [])
-    empty_sources = list(normalized.get("empty_sources") or [])
-    field_missing_sources = list(normalized.get("field_missing_sources") or [])
-    source_status = dict(normalized.get("source_status") or {})
-    active_sources = list(normalized.get("active_sources") or [])
-    if not active_sources and counts:
-        active_sources = [
-            source
-            for source in (
-                "bible",
-                "world",
-                "knowledge",
-                "story_knowledge",
-                "storyline",
-                "timeline",
-                "chronicle",
-                "foreshadow",
-                "dialogue",
-                "triples",
-                "memory_engine",
-            )
-            if int(counts.get(source) or 0) > 0
-        ]
-        active_sources.extend(source for source, count in counts.items() if source not in active_sources and int(count or 0) > 0)
-
-    usage = dict(normalized.get("plotpilot_context_usage") or {})
-    observability_normalized = False
-    if not usage:
-        usage = {
-            "source": "plotpilot_native_context_adapter",
-            "mode": "strategy_only",
-            "hit_counts_by_tier": {},
-            "degraded_sources": degraded_sources,
-            "empty_sources": empty_sources,
-            "field_missing_sources": field_missing_sources,
-            "long_context_duplicated": False,
-        }
-        observability_normalized = True
-    else:
-        defaults = {
-            "source": "plotpilot_native_context_adapter",
-            "mode": "strategy_only",
-            "hit_counts_by_tier": {},
-            "degraded_sources": degraded_sources,
-            "empty_sources": empty_sources,
-            "field_missing_sources": field_missing_sources,
-            "long_context_duplicated": False,
-        }
-        for key, value in defaults.items():
-            if key not in usage:
-                usage[key] = value
-                observability_normalized = True
-
-    for key, value in {
-        "active_sources": active_sources,
-        "degraded_sources": degraded_sources,
-        "empty_sources": empty_sources,
-        "field_missing_sources": field_missing_sources,
-        "source_status": source_status,
-        "counts": counts,
-        "plotpilot_context_usage": usage,
-    }.items():
-        if key not in normalized:
-            observability_normalized = True
-        normalized[key] = value
-    if observability_normalized:
-        normalized["observability_normalized"] = True
-    return normalized
 
 
 def _slug(value: str) -> str:

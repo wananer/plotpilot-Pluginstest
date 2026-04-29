@@ -331,8 +331,9 @@ async def run_smoke() -> Path:
             ),
         )
         assert context["ok"] is True
-        assert "最近10章大总结" in context["context_blocks"][0]["content"]
-        assert "性格调色盘" in context["context_blocks"][0]["content"]
+        context_text = "\n".join(str(block.get("content") or "") for block in context["context_blocks"])
+        assert "最近10章大总结" in context_text
+        assert "性格调色盘" in context_text
 
         review_context = runner.check(
             "evolution.before_chapter_review",

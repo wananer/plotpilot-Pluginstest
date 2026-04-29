@@ -286,6 +286,11 @@ class AutopilotDaemon:
             novel_id=novel.novel_id.value,
             target_chapters=target_chapters,
             structure_preference=None,
+            planning_context={
+                "title": novel.title,
+                "premise": novel.premise,
+                "target_chapters": target_chapters,
+            },
         )
 
         if not self._is_still_running(novel):

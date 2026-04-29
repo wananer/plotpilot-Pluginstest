@@ -8,6 +8,25 @@ from .context_capsules import enrich_blocks_with_capsules
 from .host_context import render_host_context_sections
 
 PLUGIN_NAME = "world_evolution_core"
+TIER_T0 = "intended_t0"
+TIER_T1 = "intended_t1"
+
+T0_CONTEXT_KINDS = {
+    "chapter_state_bridge",
+    "focus_character_state",
+    "background_character_constraint",
+    "chapter_facts",
+    "story_graph_route_constraints",
+    "continuity_risk",
+}
+
+T1_CONTEXT_KINDS = {
+    "usage_protocol",
+    "plotpilot_native_context_strategy",
+    "agent_strategy",
+    "local_semantic_memory",
+    "style_repetition_guard",
+}
 
 
 def build_context_patch(
@@ -196,6 +215,7 @@ def build_context_patch(
             }
         )
 
+    blocks = _apply_injection_tiers(blocks)
     blocks, skipped_blocks = enrich_blocks_with_capsules(
         blocks,
         novel_id=novel_id,
@@ -229,6 +249,36 @@ def render_patch_summary(patch: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def tier_summary(blocks: list[dict[str, Any]]) -> dict[str, Any]:
+    """Summarize explicit Evolution injection tiers for diagnostics and audit."""
+    counts = {TIER_T0: 0, TIER_T1: 0, "unknown": 0}
+    chars = {TIER_T0: 0, TIER_T1: 0, "unknown": 0}
+    block_tiers: list[dict[str, Any]] = []
+    for block in blocks:
+        tier = _block_tier(block)
+        bucket = tier if tier in {TIER_T0, TIER_T1} else "unknown"
+        content_chars = len(str(block.get("content") or ""))
+        counts[bucket] += 1
+        chars[bucket] += content_chars
+        block_tiers.append(
+            {
+                "id": block.get("id"),
+                "kind": block.get("kind"),
+                "tier": tier or "unknown",
+                "chars": content_chars,
+            }
+        )
+    return {
+        "t0_block_count": counts[TIER_T0],
+        "t1_block_count": counts[TIER_T1],
+        "tier_unknown_count": counts["unknown"],
+        "t0_chars": chars[TIER_T0],
+        "t1_chars": chars[TIER_T1],
+        "tier_unknown_chars": chars["unknown"],
+        "block_tiers": block_tiers,
+    }
+
+
 def _host_context_summary(context: Optional[dict[str, Any]]) -> dict[str, Any]:
     if not isinstance(context, dict):
         return {}
@@ -243,6 +293,39 @@ def _host_context_summary(context: Optional[dict[str, Any]]) -> dict[str, Any]:
         "before_chapter": context.get("before_chapter"),
         "plotpilot_context_usage": dict(context.get("plotpilot_context_usage") or {}),
     }
+
+
+def _apply_injection_tiers(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [_with_injection_tier(block, _infer_injection_tier(block)) for block in blocks]
+
+
+def _infer_injection_tier(block: dict[str, Any]) -> str:
+    kind = str(block.get("kind") or "")
+    block_id = str(block.get("id") or "")
+    if kind in T0_CONTEXT_KINDS or block_id in {"chapter_state_bridge", "focus_characters", "background_constraints", "recent_facts", "story_graph_routes", "continuity_risks"}:
+        return TIER_T0
+    if kind in T1_CONTEXT_KINDS or block_id in {"evolution_usage_protocol", "plotpilot_native_strategy", "evolution_agent_strategy", "local_semantic_memory", "style_repetition_guard"}:
+        return TIER_T1
+    return TIER_T1
+
+
+def _with_injection_tier(block: dict[str, Any], tier: str) -> dict[str, Any]:
+    enriched = dict(block)
+    metadata = dict(enriched.get("metadata") or {})
+    metadata["tier"] = tier
+    metadata["injection_layer"] = "t0_hard_constraints" if tier == TIER_T0 else "t1_soft_strategy"
+    metadata.setdefault("strategy_only", True)
+    enriched["tier"] = tier
+    enriched["metadata"] = metadata
+    return enriched
+
+
+def _block_tier(block: dict[str, Any]) -> str:
+    tier = str(block.get("tier") or "").strip()
+    if tier:
+        return tier
+    metadata = block.get("metadata") if isinstance(block.get("metadata"), dict) else {}
+    return str(metadata.get("tier") or "").strip()
 
 
 def _select_characters(

@@ -609,7 +609,12 @@ class ContextBudgetAllocator:
                 continue
             rendered = f"【{title}】\n{content}"
             kind = str(block.get("kind") or "").strip()
-            if kind in critical_kinds:
+            tier = self._plugin_block_tier(block)
+            if tier == "intended_t0":
+                critical_parts.append(rendered)
+            elif tier == "intended_t1":
+                support_parts.append(rendered)
+            elif kind in critical_kinds:
                 critical_parts.append(rendered)
             else:
                 support_parts.append(rendered)
@@ -621,6 +626,14 @@ class ContextBudgetAllocator:
         if len(support) > 4200:
             support = support[:4200] + "..."
         return critical, support
+
+    def _plugin_block_tier(self, block: dict[str, Any]) -> str:
+        """Read explicit plugin onion-tier intent before falling back to kind rules."""
+        tier = str(block.get("tier") or "").strip()
+        if tier:
+            return tier
+        metadata = block.get("metadata") if isinstance(block.get("metadata"), dict) else {}
+        return str(metadata.get("tier") or metadata.get("intended_tier") or "").strip()
     
     def _get_current_act_summary(self, novel_id: str, chapter_number: int) -> str:
         """获取当前幕摘要"""
