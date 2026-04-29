@@ -714,6 +714,7 @@ class EvolutionWorldAssistantService:
             return {"ok": False, "error": "missing novel_id"}
         if not isinstance(chapters, list) or not chapters:
             cards = self.repository.rebuild_character_cards_from_facts(novel_id)
+            palette_updates = self._apply_canonical_character_profiles(novel_id)
             self.repository.append_workflow_run(
                 novel_id,
                 {
@@ -724,10 +725,18 @@ class EvolutionWorldAssistantService:
                     "started_at": _now(),
                     "finished_at": _now(),
                     "input": {"mode": "existing_facts"},
-                    "output": {"characters_rebuilt": len(cards)},
+                    "output": {"characters_rebuilt": len(cards), "canonical_palette_updates": len(palette_updates)},
                 },
             )
-            return {"ok": True, "data": {"novel_id": novel_id, "mode": "existing_facts", "characters_rebuilt": len(cards)}}
+            return {
+                "ok": True,
+                "data": {
+                    "novel_id": novel_id,
+                    "mode": "existing_facts",
+                    "characters_rebuilt": len(cards),
+                    "canonical_palette_updates": len(palette_updates),
+                },
+            }
 
         rebuilt = []
         for chapter in chapters:
@@ -744,7 +753,16 @@ class EvolutionWorldAssistantService:
             if result.get("ok") and not result.get("skipped"):
                 rebuilt.append(result["data"]["facts"]["chapter_number"])
         cards = self.repository.rebuild_character_cards_from_facts(novel_id)
-        return {"ok": True, "data": {"novel_id": novel_id, "rebuilt_chapters": rebuilt, "characters_rebuilt": len(cards)}}
+        palette_updates = self._apply_canonical_character_profiles(novel_id)
+        return {
+            "ok": True,
+            "data": {
+                "novel_id": novel_id,
+                "rebuilt_chapters": rebuilt,
+                "characters_rebuilt": len(cards),
+                "canonical_palette_updates": len(palette_updates),
+            },
+        }
 
     async def rollback(self, payload: dict[str, Any]) -> dict[str, Any]:
         novel_id = str(payload.get("novel_id") or "").strip()
@@ -756,11 +774,13 @@ class EvolutionWorldAssistantService:
         self.repository.delete_chapter_summary(novel_id, chapter_number)
         self.repository.delete_story_graph_chapter(novel_id, chapter_number)
         cards = self.repository.rebuild_character_cards_from_facts(novel_id)
+        palette_updates = self._apply_canonical_character_profiles(novel_id)
         event = {
             "type": "chapter_rollback",
             "chapter_number": chapter_number,
             "removed_snapshot": removed,
             "characters_rebuilt": len(cards),
+            "canonical_palette_updates": len(palette_updates),
             "at": _now(),
         }
         self.repository.append_event(novel_id, event)
@@ -929,6 +949,16 @@ class EvolutionWorldAssistantService:
         if not card:
             return {"items": []}
         return {"character": card, "items": card.get("recent_events", [])}
+
+    def _apply_canonical_character_profiles(self, novel_id: str, chapter_number: Optional[int] = None) -> list[dict[str, Any]]:
+        canonical_characters = load_canonical_characters(self.host_database, novel_id)
+        if not canonical_characters:
+            return []
+        return self.repository.merge_character_updates(
+            novel_id,
+            [character.to_update() for character in canonical_characters],
+            chapter_number=chapter_number,
+        )
 
     def review_chapter(self, payload: dict[str, Any]) -> dict[str, Any]:
         novel_id = str(payload.get("novel_id") or "").strip()

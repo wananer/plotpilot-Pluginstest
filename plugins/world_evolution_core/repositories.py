@@ -19,6 +19,7 @@ from .agent_status_summary import (
     normalize_planning_alignment,
 )
 from .models import ChapterFactSnapshot, CharacterCard
+from .personality_palette import merge_palette_missing_fields, personality_palette_status
 
 PLUGIN_NAME = "world_evolution_core"
 RECENT_CONTEXT_FACT_LIMIT = 12
@@ -179,6 +180,27 @@ class EvolutionWorldRepository:
                 current["recent_events"] = current["recent_events"][-8:]
             self.write_character_card(novel_id, current)
             updated.append(current)
+        return updated
+
+    def merge_character_updates(self, novel_id: str, character_updates: list[dict[str, Any]], *, chapter_number: Optional[int] = None) -> list[dict[str, Any]]:
+        updated: list[dict[str, Any]] = []
+        for update in character_updates:
+            if not isinstance(update, dict):
+                continue
+            name = str(update.get("name") or "").strip()
+            if not name:
+                continue
+            current = self.get_character_card(novel_id, name)
+            if not current or _is_invalid_character_entry(current):
+                continue
+            current = _ensure_character_defaults(current)
+            _merge_canonical_identity(current, update)
+            _merge_character_life_state(
+                current,
+                update,
+                chapter_number or _int_or_none(current.get("last_seen_chapter")) or 0,
+            )
+            updated.append(self.write_character_card(novel_id, current))
         return updated
 
     def rebuild_character_cards_from_facts(self, novel_id: str) -> list[dict[str, Any]]:
@@ -698,6 +720,7 @@ class EvolutionWorldRepository:
             knowledge_base=knowledge_base_summary(self.list_agent_knowledge_documents(novel_id), self.list_agent_knowledge_chunks(novel_id)),
             auto_evolution=auto_evolution_summary(self.list_gene_versions(novel_id, limit=200)),
             active_gene_versions=active_gene_versions(self.list_agent_genes(novel_id)),
+            personality_palette_status=personality_palette_status(self.list_all_character_cards(novel_id).get("items", [])),
         )
 
     def save_diagnostics_snapshot(self, novel_id: str, snapshot: dict[str, Any]) -> None:
@@ -1013,17 +1036,7 @@ def _merge_world_profile(card: dict[str, Any], incoming: Any) -> None:
 
 def _merge_personality_palette(card: dict[str, Any], incoming: Any) -> None:
     current = card.setdefault("personality_palette", _default_personality_palette())
-    if not isinstance(incoming, dict):
-        return
-    metaphor = str(incoming.get("metaphor") or "").strip()
-    if metaphor:
-        current["metaphor"] = metaphor[:240]
-    base = str(incoming.get("base") or "").strip()
-    if base:
-        current["base"] = base[:40]
-    current["main_tones"] = _merge_limited_strings(current.get("main_tones") or [], incoming.get("main_tones") or [], limit=8)
-    current["accents"] = _merge_limited_strings(current.get("accents") or [], incoming.get("accents") or [], limit=10)
-    current["derivatives"] = _merge_derivatives(current.get("derivatives") or [], incoming.get("derivatives") or [], limit=32)
+    card["personality_palette"] = merge_palette_missing_fields(current, incoming)
 
 
 def _merge_records(existing: list[Any], incoming: list[Any], *, limit: int) -> list[dict[str, str]]:

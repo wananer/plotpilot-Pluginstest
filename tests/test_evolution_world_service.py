@@ -1860,14 +1860,14 @@ def _make_host_character_db(path):
         )
         """
     )
-    for character_id, name, description in [
-        ("char-linyuan", "林渊", "主角，擅长分析异常数据。"),
-        ("char-shenyu", "沈雨", "工程师，负责记录设备读数。"),
-        ("char-anuo", "阿诺", "安保机器人维护员。"),
+    for character_id, name, description, mental_state, verbal_tic, idle_behavior in [
+        ("char-linyuan", "林渊", "主角，擅长分析异常数据。", "警惕", "先看证据", "反复核对异常数据"),
+        ("char-shenyu", "沈雨", "工程师，负责记录设备读数。", "克制", "读数不对", "检查设备读数"),
+        ("char-anuo", "阿诺", "安保机器人维护员。", "守序", "按规程来", "巡检门禁"),
     ]:
         conn.execute(
-            "INSERT INTO bible_characters (id, novel_id, name, description) VALUES (?, ?, ?, ?)",
-            (character_id, "novel-canonical", name, description),
+            "INSERT INTO bible_characters (id, novel_id, name, description, mental_state, verbal_tic, idle_behavior) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (character_id, "novel-canonical", name, description, mental_state, verbal_tic, idle_behavior),
         )
     conn.execute(
         "INSERT INTO cast_snapshots (novel_id, data) VALUES (?, ?)",
@@ -2501,6 +2501,51 @@ async def test_structured_provider_persists_rich_character_profile(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_structured_palette_is_not_overwritten_by_native_fallback(tmp_path):
+    db_path = tmp_path / "host-palette.sqlite3"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        CREATE TABLE bible_characters (
+            id TEXT PRIMARY KEY,
+            novel_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            mental_state TEXT DEFAULT '',
+            verbal_tic TEXT DEFAULT '',
+            idle_behavior TEXT DEFAULT ''
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO bible_characters VALUES (?, ?, ?, ?, ?, ?, ?)",
+        ("char-rich", "novel-rich-native", "测试角色甲", "原生资料写她谨慎调查。", "谨慎", "先确认", "检查证据"),
+    )
+    conn.commit()
+    conn.close()
+    storage = PluginStorage(root=tmp_path / "plugin")
+    service = EvolutionWorldAssistantService(
+        storage=storage,
+        jobs=PluginJobRegistry(storage),
+        extractor_provider=PaletteStructuredProvider(),
+        host_database=ReadOnlyHostDatabase(db_path),
+    )
+
+    await service.after_commit(
+        {
+            "novel_id": "novel-rich-native",
+            "chapter_number": 1,
+            "payload": {"content": "测试角色甲在夜街舞台用吉他solo。"},
+        }
+    )
+
+    card = service.get_character("novel-rich-native", "测试角色甲")
+    assert card["personality_palette"]["base"] == "叛逆"
+    assert card["personality_palette"]["source"] == "structured_extraction"
+    assert "热情" in card["personality_palette"]["main_tones"]
+
+
+@pytest.mark.asyncio
 async def test_llm_structured_extractor_provider_generates_palette(tmp_path):
     fake_llm = FakePaletteLLM()
     storage = PluginStorage(root=tmp_path)
@@ -2564,6 +2609,28 @@ async def test_canonical_host_characters_filter_noise_and_normalize_aliases(tmp_
     assert anuo is not None
     assert "小诺" in anuo["aliases"]
     assert anuo["canonical_character_id"] == "char-anuo"
+    linyuan = service.get_character("novel-canonical", "林渊")
+    assert linyuan is not None
+    palette = linyuan["personality_palette"]
+    assert palette["source"] == "native_bible_derived"
+    assert palette["base"]
+    assert palette["main_tones"]
+    assert palette["derivatives"]
+
+    context = service.before_context_build(
+        {
+            "novel_id": "novel-canonical",
+            "chapter_number": 2,
+            "payload": {"outline": "林渊继续分析异常数据，沈雨记录读数。"},
+        }
+    )
+    content = _joined_context_blocks(context)
+    assert "性格调色盘" in content
+    assert "底色=" in content
+    status = service.get_agent_status("novel-canonical")
+    assert status["personality_palette_status"]["complete_count"] == 3
+    diagnostics = service.get_diagnostics("novel-canonical")
+    assert diagnostics["personality_palette_status"]["complete_count"] == 3
 
     timeline = service.list_timeline_events("novel-canonical")["items"]
     assert timeline[0]["participants"] == ["阿诺"]

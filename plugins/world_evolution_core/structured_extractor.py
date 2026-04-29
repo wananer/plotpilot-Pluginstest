@@ -521,13 +521,16 @@ def _parse_world_profile(value: Any) -> dict[str, Any]:
 def _parse_personality_palette(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         return {}
-    return {
+    palette = {
         "metaphor": str(value.get("metaphor") or "").strip()[:240],
         "base": str(value.get("base") or "").strip()[:40],
         "main_tones": _strings(value.get("main_tones"))[:6],
         "accents": _strings(value.get("accents"))[:8],
         "derivatives": _parse_palette_derivatives(value.get("derivatives"))[:24],
     }
+    if palette["base"] or palette["main_tones"] or palette["accents"] or palette["derivatives"]:
+        palette["source"] = "structured_extraction"
+    return palette
 
 
 def _parse_palette_derivatives(value: Any) -> list[dict[str, Any]]:

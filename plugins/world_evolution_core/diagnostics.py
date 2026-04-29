@@ -7,6 +7,8 @@ from typing import Any
 
 from plugins.platform.hook_dispatcher import list_hooks
 
+from .personality_palette import palette_missing_fields, personality_palette_status
+
 PLUGIN_NAME = "world_evolution_core"
 DIAGNOSTICS_SCHEMA_VERSION = 1
 TIER_T0 = "intended_t0"
@@ -60,6 +62,7 @@ def build_diagnostics(
     agent_takeover_health = _agent_takeover_health(agent_status)
     knowledge_coverage = agent_status.get("knowledge_base") if isinstance(agent_status.get("knowledge_base"), dict) else {}
     gene_mutation_audit = agent_status.get("auto_evolution") if isinstance(agent_status.get("auto_evolution"), dict) else {}
+    palette_status = agent_status.get("personality_palette_status") if isinstance(agent_status.get("personality_palette_status"), dict) else {}
     degraded_agent_tools = _degraded_agent_tools(agent_status)
 
     risks.sort(key=lambda item: (_severity_rank(item.get("severity")), str(item.get("source") or "")))
@@ -82,6 +85,7 @@ def build_diagnostics(
         "agent_takeover_health": _redact(agent_takeover_health),
         "knowledge_coverage": _redact(knowledge_coverage),
         "gene_mutation_audit": _redact(gene_mutation_audit),
+        "personality_palette_status": _redact(palette_status),
         "degraded_agent_tools": _redact(degraded_agent_tools),
         "degraded_sources": list(host_context_summary.get("degraded_sources") or []),
         "empty_sources": list(host_context_summary.get("empty_sources") or []),
@@ -354,6 +358,19 @@ def _check_character_pollution(risks: list[dict[str, Any]], repository: Any, nov
     if invalid:
         risks.append(_risk("warning", "character_cards", f"人物卡中有 {len(invalid)} 个污染实体已标记 invalid_entity。", "这些实体应只作为 world facts/props 参考，不进入角色卡主视图或上下文注入。", "character_cards", {"invalid_entities": [_invalid_character_evidence(card) for card in invalid[:8]], "invalid_count": len(invalid)}))
     active_cards = [card for card in cards if not _invalid_character_card(card)]
+    if active_cards:
+        status = personality_palette_status(active_cards)
+        if status.get("character_count"):
+            risks.append(
+                _risk(
+                    "info",
+                    "character_cards",
+                    f"性格调色盘覆盖率：{status.get('complete_count', 0)}/{status.get('character_count', 0)}。",
+                    "覆盖率低时，Evolution 会从原生 Bible 或章节行为中保守补全；完整后才注入具体调色盘短策略。",
+                    "personality_palette",
+                    status,
+                )
+            )
     missing_palette = [card for card in active_cards if _palette_missing(card)]
     if missing_palette:
         severity = "warning" if len(missing_palette) >= 3 else "info"
@@ -399,20 +416,17 @@ def _invalid_character_evidence(card: dict[str, Any]) -> dict[str, Any]:
 
 
 def _palette_missing(card: dict[str, Any]) -> bool:
-    palette = card.get("personality_palette") if isinstance(card.get("personality_palette"), dict) else {}
-    return not str(palette.get("base") or "").strip() or not palette.get("main_tones") or not palette.get("derivatives")
+    return bool(palette_missing_fields(card.get("personality_palette") if isinstance(card, dict) else {}))
 
 
 def _palette_evidence(card: dict[str, Any]) -> dict[str, Any]:
     palette = card.get("personality_palette") if isinstance(card.get("personality_palette"), dict) else {}
-    missing = []
-    if not str(palette.get("base") or "").strip():
-        missing.append("base")
-    if not palette.get("main_tones"):
-        missing.append("main_tones")
-    if not palette.get("derivatives"):
-        missing.append("derivatives")
-    return {"name": str(card.get("name") or ""), "last_seen_chapter": card.get("last_seen_chapter"), "missing_fields": missing}
+    return {
+        "name": str(card.get("name") or ""),
+        "last_seen_chapter": card.get("last_seen_chapter"),
+        "missing_fields": palette_missing_fields(palette),
+        "source": str(palette.get("source") or "unspecified"),
+    }
 
 
 def _check_recent_failures(risks: list[dict[str, Any]], status: dict[str, Any]) -> None:
