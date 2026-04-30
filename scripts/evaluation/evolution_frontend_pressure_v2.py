@@ -18,6 +18,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -38,6 +39,20 @@ PLUGIN_NAME = "world_evolution_core"
 
 MACRO_PROMPT_REQUIRED_TERMS = ("近未来悬疑群像", "海上城邦", "财阀学院", "旧AI")
 THEME_TERMS = ("雾港", "黑匣子", "坠塔", "旧AI", "圣像", "财阀学院", "海上城邦", "沈砚", "顾岚", "陆行舟")
+CORE_CLUE_TERMS = ("黑匣子", "坠塔", "旧AI", "圣像", "沈澜", "塔顶", "档案室", "监控", "水箱", "钥匙")
+REPETITIVE_PHRASES = (
+    "没有说话",
+    "没有回答",
+    "沉默了几秒",
+    "深吸一口气",
+    "指节因为用力而泛白",
+    "空气像是凝固了",
+    "像是某种",
+    "不是错觉",
+)
+ROUTE_MARKERS = ("回到", "再次", "重新", "又一次", "再一次", "仍在", "已经")
+LOCATION_TERMS = ("宿舍", "档案室", "电梯井", "塔顶", "水箱", "服务器", "礼堂", "观测平台", "机房")
+EXPECTED_CHARACTER_NAMES = {"沈砚", "顾岚", "陆行舟", "沈澜", "圣像"}
 
 ARM_CONTROL = "control_off"
 ARM_EXPERIMENT = "experiment_on"
@@ -1210,7 +1225,11 @@ def build_report(run_dir: Path, plans: list[ArmPlan], *, base_url: str = DEFAULT
 
     formal_control = next(plan for plan in plans if plan.run_kind == "formal" and plan.arm == ARM_CONTROL)
     formal_experiment = next(plan for plan in plans if plan.run_kind == "formal" and plan.arm == ARM_EXPERIMENT)
+    formal_plans = [formal_control, formal_experiment]
+    formal_macro = {plan.novel_id: macro[plan.novel_id] for plan in formal_plans}
     leakage_gate: dict[str, Any]
+    control_snapshots: dict[str, Any] = {}
+    experiment_snapshots: dict[str, Any] = {}
     try:
         control_snapshots = fetch_evolution_snapshots(base_url, formal_control.novel_id)
         experiment_snapshots = fetch_evolution_snapshots(base_url, formal_experiment.novel_id)
@@ -1230,15 +1249,38 @@ def build_report(run_dir: Path, plans: list[ArmPlan], *, base_url: str = DEFAULT
         and bool(audit_gate.get("ok"))
         and bool(leakage_gate.get("ok"))
         and bool(native_sync_gate.get("ok"))
-        and all(item.get("ok") for item in macro.values())
+        and all(item.get("ok") for item in formal_macro.values())
+    )
+    formal_acceptance = build_formal_acceptance(
+        run_dir=run_dir,
+        formal_plans=formal_plans,
+        audit_gate=audit_gate,
+        audit_manifest=audit_manifest,
+        leakage_gate=leakage_gate,
+        native_sync_gate=native_sync_gate,
+        formal_macro=formal_macro,
+        report_valid_experiment=valid,
+    )
+    quality_metrics = build_quality_metrics(
+        run_dir=run_dir,
+        formal_control=formal_control,
+        formal_experiment=formal_experiment,
+        audit_records=macro_records,
+        control_snapshots=control_snapshots,
+        experiment_snapshots=experiment_snapshots,
+        chapter_gate=_read_json(run_dir / "chapter_topic_alignment_gate.json", default={}) or {},
+        valid_experiment=valid,
     )
     metrics = {
         "schema_version": 1,
         "valid_experiment": valid,
+        "formal_acceptance": formal_acceptance,
         "base_input_gate": base_gate,
         "audit_gate": audit_gate,
         "macro_gate": macro,
         "native_sync_gate": native_sync_gate,
+        "quality_metrics_path": str(run_dir / "quality_metrics.json"),
+        "quality_report_path": str(run_dir / "quality_report.md"),
         "audit_manifest": audit_manifest,
         "generated_at": _utc_now(),
     }
@@ -1248,12 +1290,404 @@ def build_report(run_dir: Path, plans: list[ArmPlan], *, base_url: str = DEFAULT
         {
             "complete": valid,
             "valid_experiment": valid,
-            "invalid_reasons": _collect_invalid_reasons(base_gate, audit_gate, leakage_gate, macro, native_sync_gate),
+            "invalid_reasons": _collect_invalid_reasons(base_gate, audit_gate, leakage_gate, formal_macro, native_sync_gate),
             "reported_at": _utc_now(),
+            "quality_report": str(run_dir / "quality_report.md"),
+            "quality_metrics": str(run_dir / "quality_metrics.json"),
         }
     )
     _write_json(run_dir / "run_manifest.json", run_manifest)
+    _write_json(run_dir / "quality_metrics.json", quality_metrics)
+    (run_dir / "quality_report.md").write_text(render_quality_report(quality_metrics), encoding="utf-8")
     return metrics
+
+
+def build_formal_acceptance(
+    *,
+    run_dir: Path,
+    formal_plans: list[ArmPlan],
+    audit_gate: dict[str, Any],
+    audit_manifest: dict[str, Any],
+    leakage_gate: dict[str, Any],
+    native_sync_gate: dict[str, Any],
+    formal_macro: dict[str, Any],
+    report_valid_experiment: bool,
+) -> dict[str, Any]:
+    chapter_gate = _read_json(run_dir / "chapter_topic_alignment_gate.json", default={}) or {}
+    chapter_items = chapter_gate.get("items") if isinstance(chapter_gate.get("items"), dict) else {}
+    formal_chapter_counts = {
+        plan.novel_id: int(chapter_items.get(plan.novel_id, {}).get("chapter_count") or 0)
+        for plan in formal_plans
+    }
+    exports = {
+        "control_off.md": _file_size(run_dir / "exports" / "control_off.md"),
+        "experiment_on.md": _file_size(run_dir / "exports" / "experiment_on.md"),
+    }
+    formal_valid = (
+        bool(report_valid_experiment)
+        and all(formal_macro.get(plan.novel_id, {}).get("ok") for plan in formal_plans)
+        and all(formal_chapter_counts.get(plan.novel_id) == plan.chapter_count for plan in formal_plans)
+        and bool(audit_gate.get("ok"))
+        and bool(audit_manifest.get("complete", True))
+        and bool(leakage_gate.get("ok"))
+        and bool(native_sync_gate.get("ok"))
+    )
+    payload = {
+        "schema_version": 1,
+        "formal_valid_experiment": formal_valid,
+        "note": "Formal acceptance is computed only from formal control/experiment novels; calibration placeholders are excluded from final validity.",
+        "formal_novels": [plan.novel_id for plan in formal_plans],
+        "formal_macro_ok": {plan.novel_id: bool(formal_macro.get(plan.novel_id, {}).get("ok")) for plan in formal_plans},
+        "formal_chapter_counts": formal_chapter_counts,
+        "audit_ok": bool(audit_gate.get("ok")),
+        "audit_total_calls": int(audit_gate.get("total_calls") or 0),
+        "frontend_pressure_manifest_complete": bool(audit_manifest.get("complete", True)),
+        "leakage_ok": bool(leakage_gate.get("ok")),
+        "native_sync_ok": bool(native_sync_gate.get("ok")),
+        "exports": exports,
+        "report_valid_experiment": bool(report_valid_experiment),
+    }
+    _write_json(run_dir / "formal_acceptance.json", payload)
+    return payload
+
+
+def _file_size(path: Path) -> int:
+    return path.stat().st_size if path.exists() else 0
+
+
+def build_quality_metrics(
+    *,
+    run_dir: Path,
+    formal_control: ArmPlan,
+    formal_experiment: ArmPlan,
+    audit_records: list[dict[str, Any]],
+    control_snapshots: dict[str, Any],
+    experiment_snapshots: dict[str, Any],
+    chapter_gate: dict[str, Any],
+    valid_experiment: bool,
+) -> dict[str, Any]:
+    control_chapters = _load_chapters_from_sandbox(run_dir, formal_control.novel_id)
+    experiment_chapters = _load_chapters_from_sandbox(run_dir, formal_experiment.novel_id)
+    control_quality = analyze_chapter_quality(control_chapters)
+    experiment_quality = analyze_chapter_quality(experiment_chapters)
+    costs = build_cost_breakdown(audit_records)
+    experiment_agent_status = experiment_snapshots.get("agent_status") if isinstance(experiment_snapshots.get("agent_status"), dict) else {}
+    experiment_diagnostics = experiment_snapshots.get("diagnostics") if isinstance(experiment_snapshots.get("diagnostics"), dict) else {}
+    palette_status = _find_nested_dict(experiment_agent_status, "personality_palette_status") or _find_nested_dict(
+        experiment_diagnostics,
+        "personality_palette_status",
+    ) or {}
+    participation = {
+        "agent_api_call_count": _agent_api_call_count(experiment_agent_status),
+        "active_asset_counts": _active_leakage_counts(_agent_counts(experiment_agent_status)),
+        "context_injection_summary": _find_nested_dict(experiment_agent_status, "context_injection_summary") or {},
+        "agent_takeover_health": _find_nested_dict(experiment_diagnostics, "agent_takeover_health") or {},
+    }
+    residual_risks = build_quality_residual_risks(
+        control_quality=control_quality,
+        experiment_quality=experiment_quality,
+        palette_status=palette_status,
+        report_valid_experiment=valid_experiment,
+    )
+    return {
+        "schema_version": 1,
+        "generated_at": _utc_now(),
+        "validity": {
+            "formal_valid_experiment": bool(valid_experiment),
+            "chapter_gate_ok": bool(chapter_gate.get("ok")),
+            "native_sync_ok": bool(chapter_gate.get("native_sync_ok")),
+        },
+        "arms": {
+            ARM_CONTROL: control_quality,
+            ARM_EXPERIMENT: experiment_quality,
+        },
+        "comparison": compare_quality(control_quality, experiment_quality),
+        "evolution": {
+            "participation": participation,
+            "personality_palette_status": palette_status,
+            "cost": costs.get(ARM_EXPERIMENT, {}).get("evolution_agent_control_card", {}),
+        },
+        "costs": costs,
+        "residual_risks": residual_risks,
+        "artifact_refs": {
+            "control_export": str(run_dir / "exports" / "control_off.md"),
+            "experiment_export": str(run_dir / "exports" / "experiment_on.md"),
+            "audit_dir": str(run_dir / "llm_calls"),
+        },
+    }
+
+
+def _load_chapters_from_sandbox(run_dir: Path, novel_id: str) -> list[dict[str, Any]]:
+    db_path = run_dir / "data" / "aitext.db"
+    if not db_path.exists():
+        return []
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT number, title, content FROM chapters WHERE novel_id = ? AND length(coalesce(content, '')) > 0 ORDER BY number",
+            (novel_id,),
+        ).fetchall()
+    return [
+        {
+            "chapter_number": int(row["number"] or index),
+            "title": str(row["title"] or f"第{index}章"),
+            "content": str(row["content"] or ""),
+        }
+        for index, row in enumerate(rows, start=1)
+    ]
+
+
+def analyze_chapter_quality(chapters: list[dict[str, Any]]) -> dict[str, Any]:
+    total_chars = sum(len(chapter.get("content") or "") for chapter in chapters)
+    chapter_items: list[dict[str, Any]] = []
+    first_sentences: list[str] = []
+    for chapter in chapters:
+        text = str(chapter.get("content") or "")
+        topic = evaluate_chapter_topic_alignment(text)
+        repetition = phrase_counts(text, REPETITIVE_PHRASES)
+        route = route_signals(text)
+        first_sentence = normalize_sentence(first_sentence_of(text))
+        first_sentences.append(first_sentence)
+        chapter_items.append(
+            {
+                "chapter_number": int(chapter.get("chapter_number") or len(chapter_items) + 1),
+                "char_count": len(text),
+                "theme_hit_count": topic["theme_hit_count"],
+                "topic_alignment": topic["topic_alignment"],
+                "core_clue_hits": phrase_counts(text, CORE_CLUE_TERMS),
+                "core_clue_density_per_1k": round(sum(phrase_counts(text, CORE_CLUE_TERMS).values()) * 1000 / max(len(text), 1), 3),
+                "repetitive_phrase_count": sum(repetition.values()),
+                "repetitive_phrase_density_per_1k": round(sum(repetition.values()) * 1000 / max(len(text), 1), 3),
+                "route_marker_count": route["route_marker_count"],
+                "location_mentions": route["location_mentions"],
+                "opening": first_sentence[:80],
+            }
+        )
+    repeated_openings = repeated_items([item for item in first_sentences if item])
+    total_repetition = sum(item["repetitive_phrase_count"] for item in chapter_items)
+    total_clue_hits = sum(sum(item["core_clue_hits"].values()) for item in chapter_items)
+    return {
+        "chapter_count": len(chapters),
+        "total_chars": total_chars,
+        "avg_chars_per_chapter": round(total_chars / len(chapters), 1) if chapters else 0,
+        "topic_alignment_ok_chapters": sum(1 for item in chapter_items if item["topic_alignment"] == "ok"),
+        "low_theme_chapters": [item["chapter_number"] for item in chapter_items if item["topic_alignment"] != "ok"],
+        "core_clue_hits_total": total_clue_hits,
+        "core_clue_density_per_1k": round(total_clue_hits * 1000 / max(total_chars, 1), 3),
+        "repetitive_phrase_total": total_repetition,
+        "repetitive_phrase_density_per_1k": round(total_repetition * 1000 / max(total_chars, 1), 3),
+        "repeated_openings": repeated_openings,
+        "route_marker_total": sum(item["route_marker_count"] for item in chapter_items),
+        "route_reentry_candidates": route_reentry_candidates(chapter_items),
+        "chapters": chapter_items,
+    }
+
+
+def phrase_counts(text: str, phrases: tuple[str, ...]) -> dict[str, int]:
+    return {phrase: text.count(phrase) for phrase in phrases if text.count(phrase)}
+
+
+def route_signals(text: str) -> dict[str, Any]:
+    head = text[:260]
+    return {
+        "route_marker_count": sum(head.count(marker) for marker in ROUTE_MARKERS),
+        "location_mentions": phrase_counts(head, LOCATION_TERMS),
+    }
+
+
+def route_reentry_candidates(chapter_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    previous_locations: set[str] = set()
+    for item in chapter_items:
+        locations = set((item.get("location_mentions") or {}).keys())
+        repeated = sorted(locations & previous_locations)
+        if repeated and int(item.get("route_marker_count") or 0) > 0:
+            candidates.append(
+                {
+                    "chapter_number": item.get("chapter_number"),
+                    "repeated_locations": repeated,
+                    "route_marker_count": item.get("route_marker_count"),
+                }
+            )
+        previous_locations = locations
+    return candidates
+
+
+def first_sentence_of(text: str) -> str:
+    parts = re.split(r"[。！？\n]+", text.strip(), maxsplit=1)
+    return parts[0].strip() if parts else ""
+
+
+def normalize_sentence(text: str) -> str:
+    return re.sub(r"\s+", "", text or "")[:80]
+
+
+def repeated_items(values: list[str]) -> list[dict[str, Any]]:
+    counts = Counter(values)
+    return [{"text": text, "count": count} for text, count in counts.items() if count > 1]
+
+
+def build_cost_breakdown(audit_records: list[dict[str, Any]]) -> dict[str, dict[str, dict[str, Any]]]:
+    costs: dict[str, dict[str, dict[str, Any]]] = {}
+    for record in audit_records:
+        arm = str(record.get("arm") or "unknown")
+        phase = str(record.get("phase") or "unknown")
+        usage = record.get("token_usage") if isinstance(record.get("token_usage"), dict) else {}
+        bucket = costs.setdefault(arm, {}).setdefault(
+            phase,
+            {
+                "call_count": 0,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "total_tokens": 0,
+                "prompt_chars": 0,
+                "output_chars": 0,
+            },
+        )
+        bucket["call_count"] += 1
+        bucket["input_tokens"] += int(usage.get("input_tokens") or 0)
+        bucket["output_tokens"] += int(usage.get("output_tokens") or 0)
+        bucket["total_tokens"] += int(usage.get("total_tokens") or 0)
+        bucket["prompt_chars"] += int(record.get("prompt_chars") or 0)
+        bucket["output_chars"] += int(record.get("output_chars") or 0)
+    return costs
+
+
+def compare_quality(control: dict[str, Any], experiment: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "delta_total_chars": int(experiment.get("total_chars") or 0) - int(control.get("total_chars") or 0),
+        "delta_core_clue_density_per_1k": round(
+            float(experiment.get("core_clue_density_per_1k") or 0) - float(control.get("core_clue_density_per_1k") or 0),
+            3,
+        ),
+        "delta_repetitive_phrase_density_per_1k": round(
+            float(experiment.get("repetitive_phrase_density_per_1k") or 0)
+            - float(control.get("repetitive_phrase_density_per_1k") or 0),
+            3,
+        ),
+        "delta_route_reentry_candidates": len(experiment.get("route_reentry_candidates") or [])
+        - len(control.get("route_reentry_candidates") or []),
+        "control_low_theme_chapters": control.get("low_theme_chapters") or [],
+        "experiment_low_theme_chapters": experiment.get("low_theme_chapters") or [],
+    }
+
+
+def build_quality_residual_risks(
+    *,
+    control_quality: dict[str, Any],
+    experiment_quality: dict[str, Any],
+    palette_status: dict[str, Any],
+    report_valid_experiment: bool,
+) -> list[dict[str, Any]]:
+    risks: list[dict[str, Any]] = []
+    missing = palette_status.get("missing") if isinstance(palette_status.get("missing"), list) else []
+    polluted = [
+        item
+        for item in missing
+        if isinstance(item, dict) and str(item.get("name") or "") and str(item.get("name") or "") not in EXPECTED_CHARACTER_NAMES
+    ]
+    if polluted:
+        risks.append(
+            {
+                "id": "evolution_non_character_palette_entities",
+                "severity": "medium",
+                "summary": "Evolution character extraction still treats some objects/locations as palette-bearing characters.",
+                "evidence": polluted[:10],
+            }
+        )
+    if (experiment_quality.get("repetitive_phrase_density_per_1k") or 0) > (control_quality.get("repetitive_phrase_density_per_1k") or 0):
+        risks.append(
+            {
+                "id": "experiment_repetition_density_not_lower",
+                "severity": "low",
+                "summary": "Experiment did not reduce the heuristic repetitive phrase density versus control.",
+                "evidence": {
+                    ARM_CONTROL: control_quality.get("repetitive_phrase_density_per_1k"),
+                    ARM_EXPERIMENT: experiment_quality.get("repetitive_phrase_density_per_1k"),
+                },
+            }
+        )
+    if not report_valid_experiment:
+        risks.append(
+            {
+                "id": "formal_validity_failed",
+                "severity": "high",
+                "summary": "Formal validity gates failed; quality comparison should not be used as a conclusion.",
+                "evidence": {},
+            }
+        )
+    return risks
+
+
+def _find_nested_dict(payload: dict[str, Any], key: str) -> dict[str, Any]:
+    if key in payload and isinstance(payload[key], dict):
+        return payload[key]
+    for value in payload.values():
+        if isinstance(value, dict):
+            found = _find_nested_dict(value, key)
+            if found:
+                return found
+        elif isinstance(value, list):
+            for item in value:
+                if isinstance(item, dict):
+                    found = _find_nested_dict(item, key)
+                    if found:
+                        return found
+    return {}
+
+
+def render_quality_report(metrics: dict[str, Any]) -> str:
+    control = metrics.get("arms", {}).get(ARM_CONTROL, {})
+    experiment = metrics.get("arms", {}).get(ARM_EXPERIMENT, {})
+    comparison = metrics.get("comparison", {})
+    evolution = metrics.get("evolution", {})
+    palette = evolution.get("personality_palette_status") if isinstance(evolution.get("personality_palette_status"), dict) else {}
+    costs = metrics.get("costs", {})
+    evo_cost = evolution.get("cost") if isinstance(evolution.get("cost"), dict) else {}
+    lines = [
+        "# Evolution Frontend v2 Formal A/B Quality Report",
+        "",
+        "## Validity",
+        "",
+        f"- Formal valid experiment: `{metrics.get('validity', {}).get('formal_valid_experiment')}`",
+        f"- Native sync ok: `{metrics.get('validity', {}).get('native_sync_ok')}`",
+        f"- Chapter gate ok: `{metrics.get('validity', {}).get('chapter_gate_ok')}`",
+        "",
+        "## Quality Comparison",
+        "",
+        f"- Control: {control.get('chapter_count', 0)} chapters, {control.get('total_chars', 0)} chars, clue density {control.get('core_clue_density_per_1k', 0)}/1k, repetition density {control.get('repetitive_phrase_density_per_1k', 0)}/1k.",
+        f"- Experiment: {experiment.get('chapter_count', 0)} chapters, {experiment.get('total_chars', 0)} chars, clue density {experiment.get('core_clue_density_per_1k', 0)}/1k, repetition density {experiment.get('repetitive_phrase_density_per_1k', 0)}/1k.",
+        f"- Delta chars: `{comparison.get('delta_total_chars')}`; delta clue density: `{comparison.get('delta_core_clue_density_per_1k')}`; delta repetition density: `{comparison.get('delta_repetitive_phrase_density_per_1k')}`.",
+        f"- Route reentry candidates: control `{len(control.get('route_reentry_candidates') or [])}`, experiment `{len(experiment.get('route_reentry_candidates') or [])}`.",
+        "",
+        "## Evolution Participation And Cost",
+        "",
+        f"- Agent control-card calls: `{evo_cost.get('call_count', 0)}`; tokens: `{evo_cost.get('total_tokens', 0)}`; prompt chars: `{evo_cost.get('prompt_chars', 0)}`; output chars: `{evo_cost.get('output_chars', 0)}`.",
+        f"- Palette coverage: `{palette.get('coverage')}` ({palette.get('complete_count', 0)}/{palette.get('character_count', 0)} complete).",
+        "",
+        "## Residual Risks",
+        "",
+    ]
+    risks = metrics.get("residual_risks") or []
+    if risks:
+        for risk in risks:
+            lines.append(f"- `{risk.get('id')}` ({risk.get('severity')}): {risk.get('summary')}")
+    else:
+        lines.append("- No residual risks detected by the heuristic evaluator.")
+    lines.extend(
+        [
+            "",
+            "## Artifact References",
+            "",
+            f"- Control export: `{metrics.get('artifact_refs', {}).get('control_export')}`",
+            f"- Experiment export: `{metrics.get('artifact_refs', {}).get('experiment_export')}`",
+            f"- Audit dir: `{metrics.get('artifact_refs', {}).get('audit_dir')}`",
+            "",
+            "Note: this report uses deterministic heuristics and existing audit artifacts only; it does not trigger generation or rewrite story data.",
+            "",
+        ]
+    )
+    return "\n".join(lines)
 
 
 def _collect_invalid_reasons(

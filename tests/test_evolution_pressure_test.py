@@ -5,8 +5,12 @@ from types import SimpleNamespace
 from scripts.evaluation.evolution_frontend_pressure_v2 import (
     ARM_CONTROL,
     ARM_EXPERIMENT,
+    analyze_chapter_quality,
     build_base_input_gate,
+    build_cost_breakdown,
+    build_formal_acceptance,
     build_leakage_gate,
+    build_quality_residual_risks,
     build_seed_manifest,
     chapters_for_topic_alignment_gate,
     check_native_sync_health,
@@ -859,3 +863,83 @@ def test_frontend_pressure_v2_leakage_gate_requires_control_clean_and_experiment
     )
     assert leaked["ok"] is False
     assert "control_has_no_evolution_assets" in leaked["invalid_reasons"]
+
+
+def test_frontend_pressure_v2_formal_acceptance_ignores_calibration_placeholders(tmp_path):
+    (tmp_path / "exports").mkdir()
+    (tmp_path / "exports" / "control_off.md").write_text("control", encoding="utf-8")
+    (tmp_path / "exports" / "experiment_on.md").write_text("experiment", encoding="utf-8")
+    (tmp_path / "chapter_topic_alignment_gate.json").write_text(
+        json.dumps(
+            {
+                "items": {
+                    "calib-control": {"chapter_count": 0, "ok": True},
+                    "formal-control": {"chapter_count": 10, "ok": True},
+                    "formal-experiment": {"chapter_count": 10, "ok": True},
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    plans = [
+        SimpleNamespace(novel_id="formal-control", chapter_count=10),
+        SimpleNamespace(novel_id="formal-experiment", chapter_count=10),
+    ]
+
+    result = build_formal_acceptance(
+        run_dir=tmp_path,
+        formal_plans=plans,
+        audit_gate={"ok": True, "total_calls": 3},
+        audit_manifest={"complete": True},
+        leakage_gate={"ok": True},
+        native_sync_gate={"ok": True},
+        formal_macro={"formal-control": {"ok": True}, "formal-experiment": {"ok": True}},
+        report_valid_experiment=True,
+    )
+
+    assert result["formal_valid_experiment"] is True
+    assert result["formal_chapter_counts"] == {"formal-control": 10, "formal-experiment": 10}
+    assert "calib-control" not in result["formal_macro_ok"]
+
+
+def test_frontend_pressure_v2_quality_metrics_surface_repetition_and_palette_risks():
+    control_quality = analyze_chapter_quality(
+        [
+            {"chapter_number": 1, "content": "雾港里，沈砚带着黑匣子追查坠塔旧案。"},
+            {"chapter_number": 2, "content": "顾岚和陆行舟在财阀学院发现旧AI圣像线索。"},
+        ]
+    )
+    experiment_quality = analyze_chapter_quality(
+        [
+            {"chapter_number": 1, "content": "雾港里，沈砚带着黑匣子追查坠塔旧案。沈砚没有说话。"},
+            {"chapter_number": 2, "content": "顾岚和陆行舟在财阀学院发现旧AI圣像线索。顾岚没有回答。"},
+        ]
+    )
+    costs = build_cost_breakdown(
+        [
+            {
+                "arm": "experiment_on",
+                "phase": "evolution_agent_control_card",
+                "prompt_chars": 100,
+                "output_chars": 20,
+                "token_usage": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+            }
+        ]
+    )
+    risks = build_quality_residual_risks(
+        control_quality=control_quality,
+        experiment_quality=experiment_quality,
+        palette_status={
+            "missing": [
+                {"name": "水箱", "missing_fields": ["base"], "source": "unspecified"},
+                {"name": "沈砚", "missing_fields": ["base"], "source": "native_bible_derived"},
+            ]
+        },
+        report_valid_experiment=True,
+    )
+
+    assert control_quality["chapter_count"] == 2
+    assert experiment_quality["repetitive_phrase_total"] == 2
+    assert costs["experiment_on"]["evolution_agent_control_card"]["total_tokens"] == 15
+    assert any(risk["id"] == "evolution_non_character_palette_entities" for risk in risks)
