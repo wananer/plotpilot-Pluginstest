@@ -9,6 +9,8 @@ from scripts.evaluation.evolution_frontend_pressure_v2 import (
     build_leakage_gate,
     build_seed_manifest,
     chapters_for_topic_alignment_gate,
+    check_native_sync_health,
+    check_sandbox_foreign_keys,
     check_audit_completeness,
     evaluate_chapter_topic_alignment_series,
     evaluate_macro_planning_gate,
@@ -33,6 +35,7 @@ from scripts.evaluation.evolution_pressure_test import (
 from plugins.world_evolution_core.agent_orchestrator import AgentOrchestrator, decision_to_context_blocks
 from plugins.world_evolution_core.host_context import HostContextReader
 from infrastructure.persistence.mappers.foreshadowing_mapper import ForeshadowingMapper
+from infrastructure.persistence.database.sqlite_knowledge_repository import SqliteKnowledgeRepository
 
 
 def test_repetitive_phrase_metrics_catch_silent_templates():
@@ -461,7 +464,85 @@ def test_frontend_pressure_v2_seeds_identical_native_context_for_both_arms(tmp_p
     assert "api_key" not in json.dumps(manifest, ensure_ascii=False)
     with sqlite3.connect(db_path) as conn:
         setting_types = {row[0] for row in conn.execute("SELECT DISTINCT setting_type FROM bible_world_settings")}
+        seeded_chapters = {
+            row[0] for row in conn.execute("SELECT DISTINCT chapter_number FROM triples")
+        }
+        timeline_payload = json.loads(
+            conn.execute(
+                "SELECT data FROM timeline_registries WHERE novel_id = ?",
+                ("frontend-v2-control-off-test",),
+            ).fetchone()[0]
+        )
     assert setting_types == {"rule"}
+    assert seeded_chapters == {None}
+    assert timeline_payload["id"] == "timeline-frontend-v2-control-off-test"
+    assert timeline_payload["novel_id"] == "frontend-v2-control-off-test"
+    assert {event["timestamp_type"] for event in timeline_payload["events"]} == {"relative"}
+    assert {event["chapter_number"] for event in timeline_payload["events"]} == {1}
+
+
+def test_frontend_pressure_v2_fk_gate_detects_bad_global_triple_anchor(tmp_path):
+    db_path = tmp_path / "aitext.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.executescript(
+            """
+            PRAGMA foreign_keys = ON;
+            CREATE TABLE novels (id TEXT PRIMARY KEY);
+            CREATE TABLE chapters (
+                id TEXT PRIMARY KEY,
+                novel_id TEXT NOT NULL,
+                number INTEGER NOT NULL,
+                FOREIGN KEY (novel_id) REFERENCES novels(id),
+                UNIQUE(novel_id, number)
+            );
+            CREATE TABLE triples (
+                id TEXT PRIMARY KEY,
+                novel_id TEXT NOT NULL,
+                subject TEXT NOT NULL,
+                predicate TEXT NOT NULL,
+                object TEXT NOT NULL,
+                chapter_number INTEGER,
+                FOREIGN KEY (novel_id) REFERENCES novels(id),
+                FOREIGN KEY (novel_id, chapter_number) REFERENCES chapters(novel_id, number) ON DELETE SET NULL
+            );
+            INSERT INTO novels (id) VALUES ('novel-v2');
+            PRAGMA foreign_keys = OFF;
+            INSERT INTO triples (id, novel_id, subject, predicate, object, chapter_number)
+            VALUES ('bad-global', 'novel-v2', '黑匣子', '解锁规则', '每章一段', 0);
+            """
+        )
+
+    gate = check_sandbox_foreign_keys(db_path)
+
+    assert gate["ok"] is False
+    assert gate["violation_count"] == 1
+    assert gate["violations"][0]["table"] == "triples"
+
+
+def test_knowledge_repository_treats_non_positive_chapter_as_global_fact():
+    assert SqliteKnowledgeRepository._chapter_number_from_fact({"chapter_number": 0}) is None
+    assert SqliteKnowledgeRepository._chapter_number_from_fact({"chapter_number": -1}) is None
+    assert SqliteKnowledgeRepository._chapter_number_from_fact({"chapter_number": 2}) == 2
+
+
+def test_frontend_pressure_v2_native_sync_health_reads_log_and_fk(tmp_path):
+    run_dir = tmp_path / "run"
+    (run_dir / "logs").mkdir(parents=True)
+    (run_dir / "data").mkdir()
+    db_path = run_dir / "data" / "aitext.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("CREATE TABLE novels (id TEXT PRIMARY KEY)")
+        conn.commit()
+    (run_dir / "logs" / "aitext.log").write_text("all good", encoding="utf-8")
+
+    ok = check_native_sync_health(run_dir)
+    assert ok["ok"] is True
+
+    (run_dir / "logs" / "aitext.log").write_text("FOREIGN KEY constraint failed", encoding="utf-8")
+    bad = check_native_sync_health(run_dir)
+    assert bad["ok"] is False
+    assert bad["invalid_reasons"] == ["native_sync_log_errors"]
 
 
 def test_frontend_pressure_v2_seeds_native_foreshadow_registry_payload(tmp_path):

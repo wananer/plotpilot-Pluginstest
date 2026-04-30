@@ -332,10 +332,14 @@ def create_seeded_novels(run_dir: Path, plans: list[ArmPlan], *, base_url: str =
         seed_records.append(seed)
 
     manifest = build_seed_manifest(seed_records)
+    manifest["sandbox_foreign_key_check"] = check_sandbox_foreign_keys(db_path)
     manifest["created_novels"] = created
     _write_json(run_dir / "seed_manifest.json", manifest)
     run_manifest = _read_json(run_dir / "run_manifest.json", default={}) or {}
     run_manifest.update({"novels": created, "seed_manifest": str(run_dir / "seed_manifest.json")})
+    if not manifest["sandbox_foreign_key_check"]["ok"]:
+        run_manifest["debug_only"] = True
+        run_manifest["debug_only_reason"] = "sandbox_foreign_key_violation"
     _write_json(run_dir / "run_manifest.json", run_manifest)
     return manifest
 
@@ -542,9 +546,23 @@ def _rows_for_db_seed(novel_id: str, bundle: dict[str, Any], now: str) -> dict[s
                 "novel_id": novel_id,
                 "data": json.dumps(
                     {
+                        "id": f"timeline-{novel_id}",
+                        "novel_id": novel_id,
                         "events": [
-                            {"id": "v2-tl-1", "chapter_number": 0, "event": "沈澜十年前坠塔", "timestamp": "十年前"},
-                            {"id": "v2-tl-2", "chapter_number": 0, "event": "沈砚获得黑匣子线索", "timestamp": "第1章前"},
+                            {
+                                "id": "v2-tl-1",
+                                "chapter_number": 1,
+                                "event": "沈澜十年前坠塔",
+                                "timestamp": "十年前",
+                                "timestamp_type": "relative",
+                            },
+                            {
+                                "id": "v2-tl-2",
+                                "chapter_number": 1,
+                                "event": "沈砚获得黑匣子线索",
+                                "timestamp": "第1章前",
+                                "timestamp_type": "relative",
+                            },
                         ]
                     },
                     ensure_ascii=False,
@@ -627,7 +645,7 @@ def _triple(novel_id: str, subject: str, predicate: str, obj: str, description: 
         "subject": subject,
         "predicate": predicate,
         "object": obj,
-        "chapter_number": 0,
+        "chapter_number": None,
         "note": "",
         "entity_type": "fact",
         "importance": "high",
@@ -640,6 +658,26 @@ def _triple(novel_id: str, subject: str, predicate: str, obj: str, description: 
         "object_entity_id": "",
         "created_at": now,
         "updated_at": now,
+    }
+
+
+def check_sandbox_foreign_keys(db_path: Path) -> dict[str, Any]:
+    with sqlite3.connect(str(db_path)) as conn:
+        rows = conn.execute("PRAGMA foreign_key_check").fetchall()
+    violations = [
+        {
+            "table": str(row[0]),
+            "rowid": row[1],
+            "parent": str(row[2]),
+            "fk_index": row[3],
+        }
+        for row in rows
+    ]
+    return {
+        "schema_version": 1,
+        "ok": not violations,
+        "violation_count": len(violations),
+        "violations": violations[:50],
     }
 
 
@@ -705,6 +743,41 @@ def build_seed_manifest(seed_records: list[dict[str, Any]]) -> dict[str, Any]:
             "groups": group_gates,
         },
         "secret_copied_to_artifacts": False,
+    }
+
+
+def check_native_sync_health(run_dir: Path) -> dict[str, Any]:
+    log_path = run_dir / "logs" / "aitext.log"
+    log_text = log_path.read_text(encoding="utf-8", errors="ignore") if log_path.exists() else ""
+    error_patterns = [
+        "FOREIGN KEY constraint failed",
+        "StateUpdater 失败: 'timestamp_type'",
+    ]
+    log_hits = [
+        {"pattern": pattern, "count": log_text.count(pattern)}
+        for pattern in error_patterns
+        if pattern in log_text
+    ]
+    db_path = run_dir / "data" / "aitext.db"
+    if db_path.exists():
+        fk_check = check_sandbox_foreign_keys(db_path)
+    else:
+        fk_check = {
+            "schema_version": 1,
+            "ok": False,
+            "violation_count": 0,
+            "violations": [],
+            "missing_database": str(db_path),
+        }
+    ok = not log_hits and bool(fk_check.get("ok"))
+    return {
+        "schema_version": 1,
+        "ok": ok,
+        "native_sync_ok": ok,
+        "invalid_reasons": ([] if not log_hits else ["native_sync_log_errors"]) + ([] if fk_check.get("ok") else ["sandbox_foreign_key_violation"]),
+        "log_path": str(log_path),
+        "log_error_hits": log_hits,
+        "sandbox_foreign_key_check": fk_check,
     }
 
 
@@ -1108,6 +1181,10 @@ def gate_chapters_for_run(
         "stopped_novels": stopped,
         "generated_at": _utc_now(),
     }
+    report["native_sync_health"] = check_native_sync_health(run_dir)
+    report["native_sync_ok"] = bool(report["native_sync_health"].get("ok"))
+    if not report["native_sync_ok"]:
+        report["ok"] = False
     _write_json(run_dir / "chapter_topic_alignment_gate.json", report)
     return report
 
@@ -1146,11 +1223,13 @@ def build_report(run_dir: Path, plans: list[ArmPlan], *, base_url: str = DEFAULT
     except Exception as exc:
         leakage_gate = {"schema_version": 1, "ok": False, "invalid_reasons": ["snapshot_fetch_failed"], "error": str(exc)}
     _write_json(run_dir / "leakage_acceptance.json", leakage_gate)
+    native_sync_gate = check_native_sync_health(run_dir)
 
     valid = (
         bool(base_gate.get("ok"))
         and bool(audit_gate.get("ok"))
         and bool(leakage_gate.get("ok"))
+        and bool(native_sync_gate.get("ok"))
         and all(item.get("ok") for item in macro.values())
     )
     metrics = {
@@ -1159,6 +1238,7 @@ def build_report(run_dir: Path, plans: list[ArmPlan], *, base_url: str = DEFAULT
         "base_input_gate": base_gate,
         "audit_gate": audit_gate,
         "macro_gate": macro,
+        "native_sync_gate": native_sync_gate,
         "audit_manifest": audit_manifest,
         "generated_at": _utc_now(),
     }
@@ -1168,7 +1248,7 @@ def build_report(run_dir: Path, plans: list[ArmPlan], *, base_url: str = DEFAULT
         {
             "complete": valid,
             "valid_experiment": valid,
-            "invalid_reasons": _collect_invalid_reasons(base_gate, audit_gate, leakage_gate, macro),
+            "invalid_reasons": _collect_invalid_reasons(base_gate, audit_gate, leakage_gate, macro, native_sync_gate),
             "reported_at": _utc_now(),
         }
     )
@@ -1181,6 +1261,7 @@ def _collect_invalid_reasons(
     audit_gate: dict[str, Any],
     leakage_gate: dict[str, Any],
     macro: dict[str, Any],
+    native_sync_gate: dict[str, Any],
 ) -> list[str]:
     reasons: list[str] = []
     for prefix, gate in (("base", base_gate), ("audit", audit_gate), ("leakage", leakage_gate)):
@@ -1189,6 +1270,8 @@ def _collect_invalid_reasons(
     for novel_id, gate in macro.items():
         if not gate.get("ok"):
             reasons.extend(f"macro:{novel_id}:{reason}" for reason in gate.get("invalid_reasons", []))
+    if not native_sync_gate.get("ok"):
+        reasons.extend(f"native_sync:{reason}" for reason in native_sync_gate.get("invalid_reasons", []))
     return reasons
 
 

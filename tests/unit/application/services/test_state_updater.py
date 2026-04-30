@@ -1,4 +1,3 @@
-import pytest
 from unittest.mock import Mock
 from application.services.state_updater import StateUpdater
 from domain.novel.value_objects.chapter_state import ChapterState
@@ -16,6 +15,8 @@ from domain.novel.value_objects.foreshadowing import (
 )
 from domain.novel.repositories.foreshadowing_repository import ForeshadowingRepository
 from domain.bible.repositories.bible_repository import BibleRepository
+from infrastructure.persistence.database.connection import DatabaseConnection
+from infrastructure.persistence.database.sqlite_timeline_repository import SqliteTimelineRepository
 
 
 class TestStateUpdater:
@@ -59,6 +60,41 @@ class TestStateUpdater:
         # 验证没有保存操作（因为没有变化）
         assert self.bible_repository.save.call_count == 0
         assert self.foreshadowing_repository.save.call_count == 0
+
+    def test_update_from_chapter_reads_legacy_timeline_without_timestamp_type(self):
+        db = DatabaseConnection(":memory:")
+        timeline_repository = SqliteTimelineRepository(db)
+        db.execute(
+            "INSERT INTO timeline_registries (novel_id, data) VALUES (?, json(?))",
+            (
+                "novel-1",
+                '{"events":[{"id":"legacy-1","chapter_number":0,"event":"旧事件","timestamp":"第1章前"}]}',
+            ),
+        )
+        db.get_connection().commit()
+        updater = StateUpdater(
+            bible_repository=self.bible_repository,
+            foreshadowing_repository=self.foreshadowing_repository,
+            timeline_repository=timeline_repository,
+        )
+        chapter_state = ChapterState(
+            new_characters=[],
+            character_actions=[],
+            relationship_changes=[],
+            foreshadowing_planted=[],
+            foreshadowing_resolved=[],
+            events=[],
+            timeline_events=[
+                {"event": "新事件", "timestamp": "第2章", "timestamp_type": "relative"}
+            ],
+        )
+
+        updater.update_from_chapter("novel-1", 2, chapter_state)
+
+        registry = timeline_repository.get_by_novel_id(NovelId("novel-1"))
+        assert registry is not None
+        assert [event.timestamp_type for event in registry.events] == ["vague", "relative"]
+        assert [event.chapter_number for event in registry.events] == [1, 2]
 
     def test_update_from_chapter_with_new_characters(self):
         """测试更新包含新角色的状态"""
@@ -225,12 +261,13 @@ class TestStateUpdater:
         self.bible_repository.get_by_novel_id.return_value = None
         self.foreshadowing_repository.get_by_novel_id.return_value = self.foreshadowing_registry
 
-        with pytest.raises(ValueError, match="Bible not found"):
-            self.updater.update_from_chapter(
-                novel_id="novel-1",
-                chapter_number=5,
-                chapter_state=chapter_state
-            )
+        self.updater.update_from_chapter(
+            novel_id="novel-1",
+            chapter_number=5,
+            chapter_state=chapter_state
+        )
+
+        self.bible_repository.save.assert_not_called()
 
     def test_update_from_chapter_foreshadowing_registry_not_found(self):
         """测试 ForeshadowingRegistry 不存在时的处理"""
@@ -252,9 +289,13 @@ class TestStateUpdater:
         self.bible_repository.get_by_novel_id.return_value = self.bible
         self.foreshadowing_repository.get_by_novel_id.return_value = None
 
-        with pytest.raises(ValueError, match="ForeshadowingRegistry not found"):
-            self.updater.update_from_chapter(
-                novel_id="novel-1",
-                chapter_number=5,
-                chapter_state=chapter_state
-            )
+        self.updater.update_from_chapter(
+            novel_id="novel-1",
+            chapter_number=5,
+            chapter_state=chapter_state
+        )
+
+        self.foreshadowing_repository.save.assert_called_once()
+        saved_registry = self.foreshadowing_repository.save.call_args[0][0]
+        assert saved_registry.novel_id.value == "novel-1"
+        assert len(saved_registry.foreshadowings) == 1

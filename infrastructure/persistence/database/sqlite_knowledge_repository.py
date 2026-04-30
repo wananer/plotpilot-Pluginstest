@@ -318,9 +318,12 @@ class SqliteKnowledgeRepository:
         if v is None:
             return None
         try:
-            return int(v)
+            number = int(v)
         except (TypeError, ValueError):
             return None
+        if number <= 0:
+            return None
+        return number
 
     def _insert_triple_children(
         self,

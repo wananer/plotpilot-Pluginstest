@@ -72,19 +72,27 @@ class SqliteTimelineRepository(TimelineRepository):
         events = [
             TimelineEvent(
                 id=e["id"],
-                chapter_number=e["chapter_number"],
+                chapter_number=self._safe_chapter_number(e.get("chapter_number")),
                 event=e["event"],
                 timestamp=e["timestamp"],
-                timestamp_type=e["timestamp_type"]
+                timestamp_type=e.get("timestamp_type") or "vague"
             )
             for e in data.get("events", [])
         ]
 
         return TimelineRegistry(
-            id=data["id"],
-            novel_id=NovelId(data["novel_id"]),
+            id=data.get("id") or f"timeline-{novel_id.value}",
+            novel_id=NovelId(data.get("novel_id") or novel_id.value),
             events=events
         )
+
+    @staticmethod
+    def _safe_chapter_number(value) -> int:
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            return 1
+        return max(1, number)
 
     def delete(self, novel_id: NovelId) -> None:
         """删除时间线注册表"""
