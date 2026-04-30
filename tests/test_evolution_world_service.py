@@ -13,6 +13,7 @@ from plugins.world_evolution_core import service as evolution_service_module
 from plugins.world_evolution_core.host_context import HostContextReader
 from plugins.world_evolution_core.service import EvolutionWorldAssistantService
 from plugins.world_evolution_core.local_semantic_memory import LocalSemanticMemory
+from plugins.world_evolution_core.personality_palette import derive_palette_from_native_character, personality_palette_status
 from plugins.world_evolution_core.structured_extractor import LLMStructuredExtractorProvider
 from plugins.platform.host_database import ReadOnlyHostDatabase
 from plugins.platform.job_registry import PluginJobRegistry
@@ -1808,6 +1809,14 @@ class PaletteStructuredProvider:
                         "base": "叛逆",
                         "main_tones": ["热情", "不拘一格"],
                         "accents": ["依赖"],
+                        "pressure_triggers": ["演出被打断或校内伪装被揭穿时，会先用音乐和行动夺回主动权"],
+                        "relationship_tones": [
+                            {"target": "测试角色乙", "tone": "依赖但嘴硬", "behavior": "压力过大时靠近，却不直接承认求助"}
+                        ],
+                        "voice_signature": ["短句、反问多，情绪高时先说行动方案"],
+                        "gesture_signature": ["紧张时抓住衣角或拨片"],
+                        "negative_costs": ["过度叛逆时会忽略台下人的担心"],
+                        "presence_mode": "active_scene",
                         "derivatives": [
                             {
                                 "tone": "热情",
@@ -2558,6 +2567,11 @@ async def test_structured_provider_persists_rich_character_profile(tmp_path):
     assert card["personality_palette"]["base"] == "叛逆"
     assert card["personality_palette"]["main_tones"] == ["热情", "不拘一格"]
     assert card["personality_palette"]["derivatives"][1]["tone"] == "依赖"
+    assert card["personality_palette"]["pressure_triggers"]
+    assert card["personality_palette"]["relationship_tones"][0]["target"] == "测试角色乙"
+    assert card["personality_palette"]["voice_signature"]
+    assert card["personality_palette"]["gesture_signature"]
+    assert card["personality_palette"]["negative_costs"]
 
     context = service.before_context_build(
         {"novel_id": "novel-rich", "chapter_number": 2, "payload": {"outline": "测试角色甲结束演出后去找测试角色乙。"}}
@@ -2566,6 +2580,10 @@ async def test_structured_provider_persists_rich_character_profile(tmp_path):
     assert "外貌/出场识别" in content
     assert "性格调色盘" in content
     assert "底色=叛逆" in content
+    assert "本章压力=" in content
+    assert "关系反应=测试角色乙" in content
+    assert "声线/动作锚点=" in content
+    assert "禁止突变点=" in content
 
 
 @pytest.mark.asyncio
@@ -2699,6 +2717,10 @@ async def test_canonical_host_characters_filter_noise_and_normalize_aliases(tmp_
     assert status["personality_palette_status"]["complete_count"] == 3
     diagnostics = service.get_diagnostics("novel-canonical")
     assert diagnostics["personality_palette_status"]["complete_count"] == 3
+    assert diagnostics["personality_palette_status"]["depth_score"] > 0.5
+    assert diagnostics["personality_palette_status"]["pressure_trigger_count"] >= 1
+    assert diagnostics["personality_palette_status"]["relationship_tone_count"] >= 1
+    assert diagnostics["personality_palette_status"]["presence_mode_counts"]
 
     timeline = service.list_timeline_events("novel-canonical")["items"]
     assert timeline[0]["participants"] == ["阿诺"]
@@ -2739,6 +2761,46 @@ async def test_non_character_entities_are_ignored_in_palette_status(tmp_path):
         assert "水箱下方" not in missing
         assert palette_status["character_count"] == 1
         assert palette_status["complete_count"] == 1
+
+
+def test_personality_palette_derivation_is_generic_across_genres():
+    detective = derive_palette_from_native_character(
+        name="角色甲",
+        description="城市调查员，目标是查清委托真相，但资源受限，担心同伴暴露。",
+        mental_state="警惕",
+        verbal_tic="先确认事实",
+        idle_behavior="反复核对记录",
+    )
+    workplace = derive_palette_from_native_character(
+        name="角色乙",
+        description="项目负责人，承担团队责任，必须在上级规则和客户风险之间做判断。",
+        mental_state="克制",
+        verbal_tic="按优先级来",
+        idle_behavior="整理会议便签",
+    )
+
+    assert detective["base"] != workplace["base"]
+    for palette in (detective, workplace):
+        assert palette["pressure_triggers"]
+        assert palette["relationship_tones"]
+        assert palette["voice_signature"]
+        assert palette["gesture_signature"]
+        assert palette["negative_costs"]
+        assert palette["presence_mode"] in {"active_scene", "remote", "memory_trace", "record_only", "system_entity"}
+
+    status = personality_palette_status(
+        [
+            {"name": "角色甲", "personality_palette": detective},
+            {"name": "角色乙", "personality_palette": workplace},
+            {"name": "旧照片", "status": "invalid_entity", "entity_type": "non_person", "invalid_reason": "object"},
+        ]
+    )
+    assert status["character_count"] == 2
+    assert status["complete_count"] == 2
+    assert status["depth_score"] > 0.8
+    assert status["pressure_trigger_count"] >= 2
+    assert status["relationship_tone_count"] >= 2
+    assert status["ignored_non_character_entities"][0]["name"] == "旧照片"
 
 
 @pytest.mark.asyncio

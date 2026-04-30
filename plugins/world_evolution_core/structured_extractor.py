@@ -176,6 +176,25 @@ STRUCTURED_EXTRACTION_SCHEMA: dict[str, Any] = {
                             "base": {"type": "string"},
                             "main_tones": {"type": "array", "items": {"type": "string"}},
                             "accents": {"type": "array", "items": {"type": "string"}},
+                            "pressure_triggers": {"type": "array", "items": {"type": "string"}},
+                            "relationship_tones": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "target": {"type": "string"},
+                                        "tone": {"type": "string"},
+                                        "behavior": {"type": "string"},
+                                    },
+                                },
+                            },
+                            "voice_signature": {"type": "array", "items": {"type": "string"}},
+                            "gesture_signature": {"type": "array", "items": {"type": "string"}},
+                            "negative_costs": {"type": "array", "items": {"type": "string"}},
+                            "presence_mode": {
+                                "type": "string",
+                                "enum": ["active_scene", "remote", "memory_trace", "record_only", "system_entity"],
+                            },
                             "derivatives": {
                                 "type": "array",
                                 "items": {
@@ -325,6 +344,8 @@ async def extract_structured_chapter_facts(
             "world-specific profile fields, cognition, emotion, growth, capability limits, and personality palette. "
             "For personality_palette, model people as colors: base is the underlying color, main_tones are dominant colors, "
             "accents are smaller visible traits, and derivatives explain concrete behavior patterns caused by each color. "
+            "Also extract generic writing-useful fields when explicit evidence exists: pressure_triggers, relationship_tones, "
+            "voice_signature, gesture_signature, negative_costs, and presence_mode. "
             "Do not infer hidden motives, omniscient knowledge, or future events unless the text explicitly frames a future tendency."
         ),
     }
@@ -527,10 +548,54 @@ def _parse_personality_palette(value: Any) -> dict[str, Any]:
         "main_tones": _strings(value.get("main_tones"))[:6],
         "accents": _strings(value.get("accents"))[:8],
         "derivatives": _parse_palette_derivatives(value.get("derivatives"))[:24],
+        "pressure_triggers": _strings(value.get("pressure_triggers"))[:8],
+        "relationship_tones": _parse_relationship_tones(value.get("relationship_tones"))[:12],
+        "voice_signature": _strings(value.get("voice_signature"))[:6],
+        "gesture_signature": _strings(value.get("gesture_signature"))[:6],
+        "negative_costs": _strings(value.get("negative_costs"))[:8],
     }
-    if palette["base"] or palette["main_tones"] or palette["accents"] or palette["derivatives"]:
+    presence_mode = str(value.get("presence_mode") or "").strip()
+    if presence_mode in {"active_scene", "remote", "memory_trace", "record_only", "system_entity"}:
+        palette["presence_mode"] = presence_mode
+    if (
+        palette["base"]
+        or palette["main_tones"]
+        or palette["accents"]
+        or palette["derivatives"]
+        or palette["pressure_triggers"]
+        or palette["relationship_tones"]
+        or palette["voice_signature"]
+        or palette["gesture_signature"]
+        or palette["negative_costs"]
+    ):
         palette["source"] = "structured_extraction"
     return palette
+
+
+def _parse_relationship_tones(value: Any) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        return []
+    result: list[dict[str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for item in value:
+        if isinstance(item, str):
+            record = {"target": "相关对象", "tone": item.strip()[:80], "behavior": ""}
+        elif isinstance(item, dict):
+            record = {
+                "target": str(item.get("target") or item.get("object") or "相关对象").strip()[:80],
+                "tone": str(item.get("tone") or "").strip()[:80],
+                "behavior": str(item.get("behavior") or item.get("description") or "").strip()[:160],
+            }
+        else:
+            continue
+        if not record["tone"] and not record["behavior"]:
+            continue
+        key = (record["target"], record["tone"], record["behavior"])
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(record)
+    return result
 
 
 def _parse_palette_derivatives(value: Any) -> list[dict[str, Any]]:
@@ -581,6 +646,12 @@ def _default_personality_palette() -> dict[str, Any]:
         "main_tones": [],
         "accents": [],
         "derivatives": [],
+        "pressure_triggers": [],
+        "relationship_tones": [],
+        "voice_signature": [],
+        "gesture_signature": [],
+        "negative_costs": [],
+        "presence_mode": "active_scene",
     }
 
 

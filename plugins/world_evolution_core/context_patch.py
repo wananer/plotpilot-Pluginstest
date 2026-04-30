@@ -1,6 +1,7 @@
 """Budget-friendly context patch builder for Evolution World."""
 from __future__ import annotations
 
+import re
 from typing import Any, Optional
 
 from .agent_assets import render_agent_selection
@@ -384,10 +385,36 @@ def _is_recent(card: dict[str, Any], latest_chapter: int) -> bool:
 
 def _extract_context_terms(text: str) -> list[str]:
     terms: list[str] = []
-    for marker in ["黑塔", "雾城", "星港", "城门", "钥匙", "罗盘", "白鸦", "旧案", "密门"]:
-        if marker in text:
-            terms.append(marker)
+    seen: set[str] = set()
+    for match in re.finditer(r"[\u4e00-\u9fffA-Za-z0-9·]{2,14}", text or ""):
+        value = match.group(0).strip("的一是在了和与及中")
+        if len(value) < 2 or value in seen or _looks_like_generic_context_word(value):
+            continue
+        seen.add(value)
+        terms.append(value)
+        if len(terms) >= 12:
+            break
     return terms
+
+
+def _looks_like_generic_context_word(value: str) -> bool:
+    return value in {
+        "这一章",
+        "上一章",
+        "下一章",
+        "角色",
+        "人物",
+        "场景",
+        "地点",
+        "发现",
+        "进入",
+        "离开",
+        "来到",
+        "看见",
+        "继续",
+        "开始",
+        "结束",
+    }
 
 
 def _render_usage_protocol() -> str:
@@ -597,22 +624,62 @@ def _render_palette_brief(value: Any) -> str:
     base = _clean_display_text(value.get("base") or "")
     if base:
         parts.append(f"底色={base}")
-    main = _join_limited(value.get("main_tones"), 3)
+    presence_mode = _clean_display_text(value.get("presence_mode") or "")
+    if presence_mode and presence_mode != "active_scene":
+        parts.append(f"在场模式={_presence_mode_label(presence_mode)}")
+    pressure = _join_limited(value.get("pressure_triggers"), 1)
+    if pressure:
+        parts.append(f"本章压力={pressure}")
+    relationship = _render_relationship_tone(value.get("relationship_tones"))
+    if relationship:
+        parts.append(f"关系反应={relationship}")
+    signature = _join_limited(value.get("voice_signature"), 1) or _join_limited(value.get("gesture_signature"), 1)
+    if signature:
+        parts.append(f"声线/动作锚点={signature}")
+    costs = _join_limited(value.get("negative_costs"), 1)
+    if costs:
+        parts.append(f"禁止突变点={costs}")
+    main = _join_limited(value.get("main_tones"), 2)
     if main:
         parts.append(f"主色调={main}")
-    accents = _join_limited(value.get("accents"), 2)
+    accents = _join_limited(value.get("accents"), 1)
     if accents:
         parts.append(f"点缀={accents}")
     derivatives = value.get("derivatives") if isinstance(value.get("derivatives"), list) else []
     if derivatives:
         descriptions = []
-        for item in derivatives[:2]:
+        for item in derivatives[:1]:
             if isinstance(item, dict) and item.get("description"):
                 prefix = _clean_display_text(item.get("tone") or item.get("title") or "衍生")
                 descriptions.append(f"{prefix}:{_clean_display_text(item.get('description'))}")
         if descriptions:
             parts.append("行为衍生=" + " / ".join(descriptions))
     return "；".join(parts)
+
+
+def _render_relationship_tone(value: Any) -> str:
+    if not isinstance(value, list):
+        return ""
+    parts = []
+    for item in value[:1]:
+        if isinstance(item, dict):
+            target = _clean_display_text(item.get("target") or "相关对象")
+            tone = _clean_display_text(item.get("tone") or "")
+            behavior = _clean_display_text(item.get("behavior") or "")
+            if tone or behavior:
+                parts.append(f"{target}:{tone or behavior}")
+        elif str(item or "").strip():
+            parts.append(_clean_display_text(item))
+    return "、".join(parts)
+
+
+def _presence_mode_label(value: str) -> str:
+    return {
+        "remote": "远端",
+        "memory_trace": "记忆痕迹",
+        "record_only": "记录/遗留信息",
+        "system_entity": "系统型实体",
+    }.get(value, value)
 
 
 def _render_background_constraints(characters: list[dict[str, Any]]) -> str:

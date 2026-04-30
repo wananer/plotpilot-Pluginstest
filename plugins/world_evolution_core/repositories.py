@@ -884,7 +884,6 @@ _NON_CHARACTER_NAMES = {
     "访客卡",
     "臂章",
     "钥匙",
-    "黑匣子",
     "章节标题",
     "标题",
     "线索",
@@ -892,9 +891,7 @@ _NON_CHARACTER_NAMES = {
     "秘密",
     "记忆",
     "沉默",
-    "黑塔主线",
-    "水箱",
-    "水箱下方",
+    "主线",
 }
 
 _NON_CHARACTER_TOKENS = (
@@ -904,6 +901,8 @@ _NON_CHARACTER_TOKENS = (
     "编号",
     "防火门",
     "金属",
+    "箱",
+    "匣",
     "书籍",
     "钥匙",
     "教程",
@@ -914,7 +913,6 @@ _NON_CHARACTER_TOKENS = (
     "秘密",
     "记忆",
     "警报",
-    "水箱",
     "下方",
 )
 
@@ -1028,6 +1026,12 @@ def _default_personality_palette() -> dict[str, Any]:
         "main_tones": [],
         "accents": [],
         "derivatives": [],
+        "pressure_triggers": [],
+        "relationship_tones": [],
+        "voice_signature": [],
+        "gesture_signature": [],
+        "negative_costs": [],
+        "presence_mode": "active_scene",
     }
 
 
