@@ -182,6 +182,23 @@ class EvolutionWorldRepository:
             updated.append(current)
         return updated
 
+    def record_invalid_character_candidates(self, novel_id: str, names: list[str], *, chapter_number: int) -> None:
+        for name in _dedupe_strings(names):
+            if not name or _is_valid_character_entity(name):
+                continue
+            self.write_character_card(
+                novel_id,
+                {
+                    "character_id": _slug(name),
+                    "name": name,
+                    "first_seen_chapter": chapter_number,
+                    "last_seen_chapter": chapter_number,
+                    "status": "invalid_entity",
+                    "entity_type": "non_person",
+                    "invalid_reason": "filtered_non_character_entity",
+                },
+            )
+
     def merge_character_updates(self, novel_id: str, character_updates: list[dict[str, Any]], *, chapter_number: Optional[int] = None) -> list[dict[str, Any]]:
         updated: list[dict[str, Any]] = []
         for update in character_updates:
@@ -876,6 +893,8 @@ _NON_CHARACTER_NAMES = {
     "记忆",
     "沉默",
     "黑塔主线",
+    "水箱",
+    "水箱下方",
 }
 
 _NON_CHARACTER_TOKENS = (
@@ -895,9 +914,11 @@ _NON_CHARACTER_TOKENS = (
     "秘密",
     "记忆",
     "警报",
+    "水箱",
+    "下方",
 )
 
-_NON_CHARACTER_SUFFIXES = ("之谜", "真相", "记录", "线索", "计划", "任务", "报告")
+_NON_CHARACTER_SUFFIXES = ("之谜", "真相", "记录", "线索", "计划", "任务", "报告", "下方", "区域")
 
 
 def _is_valid_character_entity(name: str) -> bool:

@@ -469,7 +469,7 @@ def _render_style_repetition_board(state: Optional[dict[str, Any]]) -> str:
     phrases = [item for item in state.get("phrases") or [] if isinstance(item, dict)]
     if not phrases:
         return ""
-    lines = ["近3章/本章检测到高频反应模板；下一章优先改用动作、视线、空间调度、物件互动，不要继续机械复用。"]
+    lines = ["重复表达规避：近3章/本章检测到高频反应模板；下一章优先改用动作、视线、空间调度、物件互动，不要继续机械复用。"]
     for item in phrases[:6]:
         phrase = _clean_display_text(item.get("phrase") or "")
         count = item.get("count")

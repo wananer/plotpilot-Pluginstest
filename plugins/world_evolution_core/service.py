@@ -316,6 +316,17 @@ class EvolutionWorldAssistantService:
         character_updates = calibration.character_updates
         if calibration.warnings:
             extraction.warnings.extend(calibration.warnings)
+        invalid_character_candidates = [
+            str(name).strip()
+            for name in snapshot.characters
+            if str(name).strip() and not _valid_snapshot_character_name(str(name or ""))
+        ]
+        if invalid_character_candidates:
+            self.repository.record_invalid_character_candidates(
+                novel_id,
+                invalid_character_candidates,
+                chapter_number=chapter_number,
+            )
         snapshot.characters = _filter_snapshot_characters(snapshot.characters)
         snapshot.locations = _filter_snapshot_locations(snapshot.locations)
         character_updates = [
@@ -1481,6 +1492,8 @@ _NON_CHARACTER_ENTITY_NAMES = {
     "臂章",
     "钥匙",
     "黑匣子",
+    "水箱",
+    "水箱下方",
     "章节标题",
     "标题",
     "线索",
@@ -1506,8 +1519,10 @@ _NON_CHARACTER_ENTITY_TOKENS = (
     "秘密",
     "记忆",
     "警报",
+    "水箱",
+    "下方",
 )
-_NON_CHARACTER_ENTITY_SUFFIXES = ("之谜", "真相", "记录", "线索", "计划", "任务", "报告")
+_NON_CHARACTER_ENTITY_SUFFIXES = ("之谜", "真相", "记录", "线索", "计划", "任务", "报告", "下方", "区域")
 _BAD_LOCATION_NAMES = {"专门", "道防火门", "个信息站", "老板专门", "但他咬牙站"}
 _BAD_LOCATION_PARTS = ("咬牙", "老板", "专门", "那道", "这道")
 
@@ -1565,15 +1580,18 @@ def _build_style_repetition_state(
 ) -> dict[str, Any]:
     text = "\n".join([*(str(item.get("short_summary") or "") for item in recent_summaries[-3:]), str(content or "")])
     phrases = []
+    min_count = 2 if chapter_number >= 2 else 3
     for phrase in REPETITION_PHRASES:
         count = text.count(phrase)
-        if count >= 3:
+        if count >= min_count:
             phrases.append(
                 {
                     "phrase": phrase,
                     "count": count,
                     "chapters": [chapter_number],
                     "replacement_guidance": replacement_guidance_for_phrase(phrase),
+                    "source": "recent_repetition_scan",
+                    "strategy_tier": "intended_t1",
                 }
             )
     return {

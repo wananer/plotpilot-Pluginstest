@@ -108,6 +108,8 @@ def palette_missing_fields(palette: Any) -> list[str]:
 
 
 def personality_palette_status(cards: list[dict[str, Any]]) -> dict[str, Any]:
+    ignored = [_ignored_non_character_entity(card) for card in cards if _invalid_card(card)]
+    ignored = [item for item in ignored if item]
     active = [card for card in cards if not _invalid_card(card)]
     missing_cards = []
     source_counts: dict[str, int] = {}
@@ -133,6 +135,8 @@ def personality_palette_status(cards: list[dict[str, Any]]) -> dict[str, Any]:
         "coverage": round(complete / len(active), 4) if active else 0.0,
         "source_counts": dict(sorted(source_counts.items())),
         "missing": missing_cards[:12],
+        "ignored_non_character_entities": ignored[:12],
+        "ignored_non_character_count": len(ignored),
     }
 
 
@@ -306,6 +310,17 @@ def _merge_source_refs(existing: Any, incoming: Any) -> list[dict[str, Any]]:
 
 def _invalid_card(card: dict[str, Any]) -> bool:
     return str(card.get("status") or "") == "invalid_entity" or str(card.get("entity_type") or "") == "non_person"
+
+
+def _ignored_non_character_entity(card: dict[str, Any]) -> dict[str, Any]:
+    name = _clean(card.get("name"), limit=60)
+    if not name:
+        return {}
+    return {
+        "name": name,
+        "last_seen_chapter": card.get("last_seen_chapter"),
+        "reason": _clean(card.get("invalid_reason"), limit=120) or "filtered_non_character_entity",
+    }
 
 
 def _dedupe_strings(items: Any, *, limit: int) -> list[str]:

@@ -860,6 +860,39 @@ async def test_context_patch_injects_local_semantic_memory(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_context_patch_injects_repetition_guard_as_t1_strategy(tmp_path):
+    storage = PluginStorage(root=tmp_path)
+    service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage))
+
+    await service.after_commit(
+        {
+            "novel_id": "novel-repetition-guard",
+            "chapter_number": 2,
+            "payload": {
+                "content": "《沈砚》没有说话，只把黑匣子推到灯下。顾岚没有说话，视线停在旧AI遗迹的裂纹上。"
+            },
+        }
+    )
+
+    context = service.before_context_build(
+        {
+            "novel_id": "novel-repetition-guard",
+            "chapter_number": 3,
+            "payload": {"outline": "沈砚和顾岚继续追查黑匣子的来源。"},
+        }
+    )
+
+    block = next(block for block in context["context_patch"]["blocks"] if block["id"] == "style_repetition_guard")
+    assert block["tier"] == "intended_t1"
+    assert block["metadata"]["injection_layer"] == "t1_soft_strategy"
+    assert "重复表达规避" in block["content"]
+    assert "没有说话" in block["content"]
+    assert "手部动作" in block["content"]
+    assert "视线落点" in block["content"]
+    assert block["items"][0]["strategy_tier"] == "intended_t1"
+
+
+@pytest.mark.asyncio
 async def test_context_patch_dedupes_stable_protocol_but_keeps_handoff(tmp_path):
     storage = PluginStorage(root=tmp_path)
     service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage))
@@ -1819,6 +1852,41 @@ class NoisyCharacterStructuredProvider:
         }
 
 
+class NonCharacterPaletteStructuredProvider:
+    async def extract(self, request):
+        return {
+            "summary": "沈砚在水箱旁发现旧AI黑匣子，水箱下方传来震动。",
+            "characters": [
+                {
+                    "name": "沈砚",
+                    "summary": "追查旧AI黑匣子的主角",
+                    "personality_palette": {
+                        "base": "执念求真",
+                        "main_tones": ["冷静", "警惕"],
+                        "accents": ["克制"],
+                        "derivatives": [
+                            {
+                                "tone": "警惕",
+                                "title": "先证据后判断",
+                                "description": "面对异常先确认物证与时间线。",
+                            }
+                        ],
+                    },
+                },
+                {"name": "水箱", "summary": "误判成角色的物件"},
+                {"name": "水箱下方", "summary": "误判成角色的地点区域"},
+            ],
+            "locations": ["旧AI遗迹"],
+            "world_events": [
+                {
+                    "summary": "沈砚在水箱旁发现旧AI黑匣子",
+                    "characters": ["沈砚", "水箱", "水箱下方"],
+                    "locations": ["旧AI遗迹"],
+                }
+            ],
+        }
+
+
 def _make_host_character_db(path):
     conn = sqlite3.connect(path)
     conn.execute(
@@ -2635,6 +2703,42 @@ async def test_canonical_host_characters_filter_noise_and_normalize_aliases(tmp_
     timeline = service.list_timeline_events("novel-canonical")["items"]
     assert timeline[0]["participants"] == ["阿诺"]
     assert "很聪明" not in {card["name"] for card in cards}
+
+
+@pytest.mark.asyncio
+async def test_non_character_entities_are_ignored_in_palette_status(tmp_path):
+    storage = PluginStorage(root=tmp_path)
+    service = EvolutionWorldAssistantService(
+        storage=storage,
+        jobs=PluginJobRegistry(storage),
+        extractor_provider=NonCharacterPaletteStructuredProvider(),
+    )
+
+    result = await service.after_commit(
+        {
+            "novel_id": "novel-non-character-palette",
+            "chapter_number": 1,
+            "payload": {"content": "《沈砚》在水箱旁发现旧AI黑匣子，水箱下方传来震动。"},
+        }
+    )
+
+    assert result["ok"] is True
+    active_cards = service.list_characters("novel-non-character-palette")["items"]
+    assert {card["name"] for card in active_cards} == {"沈砚"}
+    all_cards = service.repository.list_all_character_cards("novel-non-character-palette")["items"]
+    invalid_names = {card["name"] for card in all_cards if card.get("status") == "invalid_entity"}
+    assert {"水箱", "水箱下方"} <= invalid_names
+
+    status = service.get_agent_status("novel-non-character-palette")["personality_palette_status"]
+    diagnostics = service.get_diagnostics("novel-non-character-palette")["personality_palette_status"]
+    for palette_status in (status, diagnostics):
+        ignored = {item["name"] for item in palette_status["ignored_non_character_entities"]}
+        missing = {item["name"] for item in palette_status["missing"]}
+        assert {"水箱", "水箱下方"} <= ignored
+        assert "水箱" not in missing
+        assert "水箱下方" not in missing
+        assert palette_status["character_count"] == 1
+        assert palette_status["complete_count"] == 1
 
 
 @pytest.mark.asyncio
