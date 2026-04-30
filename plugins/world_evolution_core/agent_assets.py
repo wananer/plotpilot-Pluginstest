@@ -66,10 +66,10 @@ DEFAULT_GENES: list[dict[str, Any]] = [
         "type": "Gene",
         "id": "gene_repetition_phrase_guard",
         "category": "style",
-        "title": "重复模板句守卫",
+        "title": "重复表达规避守卫",
         "signals_match": ["repetition_phrase", "style_repetition", "phrase_guard", "dialogue_voice_context"],
         "strategy": [
-            "避免复用高频模板句，尤其是没有说话、没有回答、沉默了几秒、深吸一口气。",
+            "重复表达规避：避免复用高频模板句，尤其是没有说话、没有回答、沉默了几秒、深吸一口气。",
             "用动作、视线、空间调度或具体物件替代空泛反应。",
         ],
         "priority": 68,
