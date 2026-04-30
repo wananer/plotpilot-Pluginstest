@@ -681,6 +681,7 @@ def summarize_agent_status(
     latest_learning = [event for event in events if event.get("intent") in {"solidify", "evaluate", "reflect", "candidate"}][-8:]
     return {
         "schema_version": AGENT_SCHEMA_VERSION,
+        "architecture_mode": "agent_first_hybrid",
         "asset_counts": {
             "genes": len(genes),
             "capsules": len(capsules),

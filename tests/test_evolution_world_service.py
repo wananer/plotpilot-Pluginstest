@@ -1448,6 +1448,149 @@ def test_agent_takeover_reflection_applies_gene_patch_immediately(tmp_path):
     assert any(event.get("intent") == "evolve_gene" for event in service.repository.list_agent_events("novel-agent-takeover"))
 
 
+@pytest.mark.asyncio
+async def test_agent_first_hybrid_architecture_records_all_decision_hooks(tmp_path):
+    storage = PluginStorage(root=tmp_path)
+    agent_llm = FakeAgentTakeoverLLM()
+    service = EvolutionWorldAssistantService(
+        storage=storage,
+        jobs=PluginJobRegistry(storage),
+        agent_llm_service=agent_llm,
+    )
+    service.update_settings(
+        {
+            "agent_api": {
+                "enabled": True,
+                "provider_mode": "custom",
+                "custom_profile": {"api_key": "agent-key", "model": "agent-model"},
+            }
+        }
+    )
+
+    planning = service.before_story_planning(
+        {
+            "novel_id": "novel-agent-architecture",
+            "payload": {
+                "purpose": "story_planning",
+                "premise": "角色甲追查失踪档案。",
+                "genre": "悬疑",
+                "world_preset": "近未来城市",
+            },
+        }
+    )
+    await service.after_commit(
+        {
+            "novel_id": "novel-agent-architecture",
+            "chapter_number": 1,
+            "payload": {"content": "《角色甲》进入档案室，并不知道钥匙代价。"},
+        }
+    )
+    context = service.before_context_build(
+        {
+            "novel_id": "novel-agent-architecture",
+            "chapter_number": 2,
+            "payload": {"outline": "角色甲继续追查钥匙代价。"},
+        }
+    )
+    review = service.review_chapter(
+        {
+            "novel_id": "novel-agent-architecture",
+            "chapter_number": 2,
+            "payload": {"content": "角色甲知道钥匙代价，并直接解决机关。"},
+        }
+    )
+    after = service.after_chapter_review(
+        {
+            "novel_id": "novel-agent-architecture",
+            "chapter_number": 2,
+            "payload": {"review_result": {"issues": review["data"]["issues"]}},
+        }
+    )
+
+    records = service.repository.list_agent_decision_records("novel-agent-architecture", limit=20)
+    phases = {record["phase"] for record in records}
+    status = service.get_agent_status("novel-agent-architecture")
+    diagnostics = service.get_diagnostics("novel-agent-architecture")
+
+    assert planning["ok"] is True
+    assert context["ok"] is True
+    assert after["data"]["gene_versions"]
+    assert {
+        "before_story_planning",
+        "after_commit",
+        "before_context_build",
+        "review_chapter",
+        "after_chapter_review",
+    } <= phases
+    assert all(record["type"] == "AgentDecisionRecord" for record in records)
+    assert status["architecture_mode"] == "agent_first_hybrid"
+    assert status["agent_orchestration"]["architecture_mode"] == "agent_first_hybrid"
+    assert status["agent_orchestration"]["decision_boundary"] == "agent_orchestrator"
+    assert status["agent_orchestration"]["phase_counts"]["before_context_build"] >= 1
+    assert status["auto_evolution"]["gene_version_count"] >= 1
+    assert diagnostics["architecture_mode"] == "agent_first_hybrid"
+    assert diagnostics["agent_takeover_health"]["mode"] == "agent_first_hybrid"
+
+
+@pytest.mark.asyncio
+async def test_agent_context_uses_truncated_knowledge_evidence_package(tmp_path):
+    storage = PluginStorage(root=tmp_path)
+    agent_llm = FakeAgentTakeoverLLM()
+    service = EvolutionWorldAssistantService(
+        storage=storage,
+        jobs=PluginJobRegistry(storage),
+        agent_llm_service=agent_llm,
+    )
+    service.update_settings(
+        {
+            "agent_api": {
+                "enabled": True,
+                "provider_mode": "custom",
+                "custom_profile": {"api_key": "agent-key", "model": "agent-model"},
+            }
+        }
+    )
+    await service.after_commit(
+        {
+            "novel_id": "novel-agent-knowledge-package",
+            "chapter_number": 1,
+            "payload": {"content": "《角色甲》确认目标受阻。"},
+        }
+    )
+    long_text = "证据包开头" + "A" * 500 + "证据包不应完整进入prompt"
+
+    def fake_search(*args, **kwargs):
+        return {
+            "item_count": 1,
+            "source_types": ["chapter_full_text"],
+            "items": [
+                {
+                    "chunk_id": "chk-long",
+                    "source_type": "chapter_full_text",
+                    "chapter_number": 1,
+                    "title": "长正文证据",
+                    "text": long_text,
+                    "score": 1.0,
+                    "source_refs": [{"source_type": "chapter_full_text", "chapter_number": 1}],
+                }
+            ],
+        }
+
+    service.agent_knowledge.search = fake_search
+    service.before_context_build(
+        {
+            "novel_id": "novel-agent-knowledge-package",
+            "chapter_number": 2,
+            "payload": {"outline": "角色甲继续确认目标。"},
+        }
+    )
+
+    prompt_text = str(agent_llm.calls[-1]["prompt"].user)
+    assert "knowledge_items" in prompt_text
+    assert "证据包开头" in prompt_text
+    assert "证据包不应完整进入prompt" not in prompt_text
+
+
 def test_agent_decision_rejects_sensitive_structured_output(tmp_path):
     storage = PluginStorage(root=tmp_path)
     agent_llm = FakeSensitiveAgentLLM()

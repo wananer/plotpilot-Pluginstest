@@ -69,6 +69,7 @@ def build_diagnostics(
     return {
         "schema_version": DIAGNOSTICS_SCHEMA_VERSION,
         "novel_id": novel_id,
+        "architecture_mode": "agent_first_hybrid",
         "generated_at": _now(),
         "summary": _risk_summary(risks),
         "runtime": {
@@ -213,7 +214,8 @@ def _agent_takeover_health(agent_status: dict[str, Any]) -> dict[str, Any]:
     decision_count = int(orchestration.get("decision_count") or 0)
     degraded = int(orchestration.get("degraded_decision_count") or 0)
     return {
-        "mode": "agent_orchestrator_takeover",
+        "mode": "agent_first_hybrid",
+        "decision_boundary": orchestration.get("decision_boundary") or "agent_orchestrator",
         "decision_count": decision_count,
         "degraded_decision_count": degraded,
         "healthy": bool(decision_count and int(knowledge.get("chunk_count") or 0) > 0),

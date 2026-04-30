@@ -131,6 +131,9 @@ def agent_orchestration_summary(records: list[dict[str, Any]]) -> dict[str, Any]
         if str(record.get("status") or "") != "succeeded":
             degraded += 1
     return {
+        "architecture_mode": "agent_first_hybrid",
+        "decision_boundary": "agent_orchestrator",
+        "deterministic_role": "tools_storage_validation_fallback",
         "enabled": True,
         "decision_count": len(records),
         "phase_counts": phase_counts,
