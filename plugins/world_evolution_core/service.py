@@ -1580,7 +1580,7 @@ def _build_style_repetition_state(
 ) -> dict[str, Any]:
     text = "\n".join([*(str(item.get("short_summary") or "") for item in recent_summaries[-3:]), str(content or "")])
     phrases = []
-    min_count = 2 if chapter_number >= 2 else 3
+    min_count = 2
     for phrase in REPETITION_PHRASES:
         count = text.count(phrase)
         if count >= min_count:

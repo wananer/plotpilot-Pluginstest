@@ -867,7 +867,7 @@ async def test_context_patch_injects_repetition_guard_as_t1_strategy(tmp_path):
     await service.after_commit(
         {
             "novel_id": "novel-repetition-guard",
-            "chapter_number": 2,
+            "chapter_number": 1,
             "payload": {
                 "content": "《沈砚》没有说话，只把黑匣子推到灯下。顾岚没有说话，视线停在旧AI遗迹的裂纹上。"
             },
@@ -877,7 +877,7 @@ async def test_context_patch_injects_repetition_guard_as_t1_strategy(tmp_path):
     context = service.before_context_build(
         {
             "novel_id": "novel-repetition-guard",
-            "chapter_number": 3,
+            "chapter_number": 2,
             "payload": {"outline": "沈砚和顾岚继续追查黑匣子的来源。"},
         }
     )
