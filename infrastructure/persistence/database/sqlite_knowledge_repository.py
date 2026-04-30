@@ -653,12 +653,30 @@ class SqliteKnowledgeRepository:
         self.db.execute(sql, (summary_id, knowledge_id, chapter_number, summary, now, now))
         self.db.get_connection().commit()
 
+    @staticmethod
+    def _knowledge_id_for_novel(
+        conn: sqlite3.Connection,
+        novel_id: str,
+        fallback: str,
+    ) -> str:
+        row = conn.execute(
+            "SELECT id FROM knowledge WHERE novel_id = ? LIMIT 1",
+            (novel_id,),
+        ).fetchone()
+        if row:
+            return row["id"] if isinstance(row, sqlite3.Row) else row[0]
+        return fallback
+
     def save(self, knowledge: StoryKnowledge) -> None:
         novel_id = knowledge.novel_id
-        knowledge_id = f"{novel_id}-knowledge"
         now = datetime.utcnow().isoformat()
 
         with self.db.transaction() as conn:
+            knowledge_id = self._knowledge_id_for_novel(
+                conn,
+                novel_id,
+                f"{novel_id}-knowledge",
+            )
             conn.execute(
                 """
                 INSERT INTO knowledge (id, novel_id, version, premise_lock, created_at, updated_at)
@@ -739,15 +757,19 @@ class SqliteKnowledgeRepository:
 
     def save_all(self, novel_id: str, data: dict) -> None:
         logger.info("save_all called for %s, facts count: %s", novel_id, len(data.get("facts", [])))
-        knowledge_id = f"{novel_id}-knowledge"
         now = datetime.utcnow().isoformat()
 
         with self.db.transaction() as conn:
+            knowledge_id = self._knowledge_id_for_novel(
+                conn,
+                novel_id,
+                f"{novel_id}-knowledge",
+            )
             conn.execute(
                 """
                 INSERT INTO knowledge (id, novel_id, version, premise_lock, created_at, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET
+                ON CONFLICT(novel_id) DO UPDATE SET
                     premise_lock = excluded.premise_lock,
                     updated_at = excluded.updated_at
                 """,
