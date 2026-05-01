@@ -63,6 +63,18 @@ export interface AddCharacterRequest {
   description: string
 }
 
+function emptyBible(novelId: string): BibleDTO {
+  return {
+    id: '',
+    novel_id: novelId,
+    characters: [],
+    world_settings: [],
+    locations: [],
+    timeline_notes: [],
+    style_notes: [],
+  }
+}
+
 export const bibleApi = {
   /**
    * Create bible for a novel
@@ -82,11 +94,38 @@ export const bibleApi = {
     apiClient.get<BibleDTO>(`/bible/novels/${novelId}/bible`, config) as Promise<BibleDTO>,
 
   /**
+   * Read bible as an optional setup artifact. Missing Bible is a normal empty state.
+   */
+  getBibleOptional: async (novelId: string, config?: AxiosRequestConfig): Promise<BibleDTO> => {
+    const status = await bibleApi.getBibleStatus(novelId)
+    if (!status.exists) {
+      return emptyBible(novelId)
+    }
+    return bibleApi.getBible(novelId, config)
+  },
+
+  /**
+   * Ensure editable Bible storage exists before loading a panel that writes it.
+   */
+  ensureBible: async (novelId: string, config?: AxiosRequestConfig): Promise<BibleDTO> => {
+    const status = await bibleApi.getBibleStatus(novelId)
+    if (!status.exists) {
+      return bibleApi.createBible(novelId, `bible-${novelId}`)
+    }
+    return bibleApi.getBible(novelId, config)
+  },
+
+  /**
    * List all characters in a bible
    * GET /api/v1/bible/novels/{novelId}/bible/characters
    */
   listCharacters: (novelId: string) =>
     apiClient.get<CharacterDTO[]>(`/bible/novels/${novelId}/bible/characters`) as Promise<CharacterDTO[]>,
+
+  listCharactersOptional: async (novelId: string): Promise<CharacterDTO[]> => {
+    const bible = await bibleApi.getBibleOptional(novelId)
+    return bible.characters || []
+  },
 
   /**
    * Add character to bible

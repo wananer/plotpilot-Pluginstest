@@ -122,12 +122,10 @@ const sortedEvents = computed(() => {
 const loadTimeline = async () => {
   loading.value = true
   try {
-    const bible = await bibleApi.getBible(props.slug)
+    const bible = await bibleApi.getBibleOptional(props.slug)
     timelineEvents.value = bible.timeline_notes || []
   } catch (error: any) {
-    if (error?.response?.status !== 404) {
-      message.error(error.response?.data?.detail || '加载时间线失败')
-    }
+    message.error(error.response?.data?.detail || '加载时间线失败')
   } finally {
     loading.value = false
   }
@@ -177,7 +175,7 @@ const deleteEvent = async (index: number) => {
 
 const saveTimeline = async () => {
   try {
-    const bible = await bibleApi.getBible(props.slug)
+    const bible = await bibleApi.ensureBible(props.slug)
     await bibleApi.updateBible(props.slug, {
       ...bible,
       timeline_notes: timelineEvents.value

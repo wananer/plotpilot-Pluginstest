@@ -352,27 +352,15 @@ const loadCreationLock = async () => {
 const load = async () => {
   await loadCreationLock()
   try {
-    const bible = await bibleApi.getBible(props.slug)
+    const bible = await bibleApi.ensureBible(props.slug)
     state.value = fromApiFormat(bible)
     const matched = matchPresetValue(state.value.style_notes)
     if (!matched && !(state.value.style_notes || '').trim()) {
       applyStylePresetByValue(MARKET_STYLE_PRESETS[0]?.value ?? 'xianxia_hot')
     }
     syncJsonFromState()
-  } catch (err: any) {
-    // If Bible doesn't exist, create it
-    if (err?.response?.status === 404) {
-      try {
-        await bibleApi.createBible(props.slug, `bible-${props.slug}`)
-        state.value = emptyState()
-        applyStylePresetByValue(MARKET_STYLE_PRESETS[0]?.value ?? 'xianxia_hot')
-        syncJsonFromState()
-      } catch {
-        message.error('创建设定失败')
-      }
-    } else {
-      message.error('加载设定失败')
-    }
+  } catch {
+    message.error('加载设定失败')
   }
   await loadPremiseLock()
 }

@@ -118,7 +118,7 @@ async function loadCharacters() {
 
   loadingCharacters.value = true
   try {
-    characters.value = await bibleApi.listCharacters(props.novelId)
+    characters.value = await bibleApi.listCharactersOptional(props.novelId)
   } catch (error) {
     console.error('Failed to load characters:', error)
     message.error('加载角色列表失败')

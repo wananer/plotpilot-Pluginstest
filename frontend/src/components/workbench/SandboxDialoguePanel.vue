@@ -255,7 +255,7 @@ const filteredDialogues = computed<DialogueEntry[]>(() => {
 async function loadCharacters() {
   charLoading.value = true
   try {
-    characters.value = await bibleApi.listCharacters(props.slug)
+    characters.value = await bibleApi.listCharactersOptional(props.slug)
   } catch {
     characters.value = []
   } finally {

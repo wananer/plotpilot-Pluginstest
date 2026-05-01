@@ -1,12 +1,13 @@
 """
 API routes for Worldbuilding
 """
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 from typing import Optional
 
 from application.world.services.worldbuilding_service import WorldbuildingService
 from infrastructure.persistence.database.worldbuilding_repository import WorldbuildingRepository
+from domain.worldbuilding.worldbuilding import Worldbuilding
 from application.paths import get_db_path
 
 
@@ -68,7 +69,7 @@ def get_worldbuilding(
     worldbuilding = service.get_worldbuilding(slug)
 
     if not worldbuilding:
-        raise HTTPException(status_code=404, detail="Worldbuilding not found")
+        return Worldbuilding(id="", novel_id=slug).to_dict()
 
     return worldbuilding.to_dict()
 

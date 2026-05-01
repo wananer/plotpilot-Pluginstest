@@ -1,4 +1,4 @@
-import { apiClient } from './config'
+import { apiAxios, apiClient } from './config'
 
 export interface CoreRules {
   power_system: string
@@ -43,9 +43,36 @@ export interface Worldbuilding {
   updated_at: string
 }
 
+function emptyWorldbuilding(slug: string): Worldbuilding {
+  const emptyCoreRules = { power_system: '', physics_rules: '', magic_tech: '' }
+  const emptyGeography = { terrain: '', climate: '', resources: '', ecology: '' }
+  const emptySociety = { politics: '', economy: '', class_system: '' }
+  const emptyCulture = { history: '', religion: '', taboos: '' }
+  const emptyDailyLife = { food_clothing: '', language_slang: '', entertainment: '' }
+  return {
+    id: '',
+    novel_id: slug,
+    core_rules: emptyCoreRules,
+    geography: emptyGeography,
+    society: emptySociety,
+    culture: emptyCulture,
+    daily_life: emptyDailyLife,
+    created_at: '',
+    updated_at: '',
+  }
+}
+
 export const worldbuildingApi = {
   getWorldbuilding: (slug: string): Promise<Worldbuilding> =>
-    apiClient.get<Worldbuilding>(`novels/${slug}/worldbuilding`),
+    apiAxios.get<Worldbuilding | { detail?: unknown }>(`novels/${slug}/worldbuilding`, {
+      validateStatus: status => (status >= 200 && status < 300) || status === 404,
+    }).then(response => {
+      const data = response as unknown as Worldbuilding | { detail?: unknown }
+      if (data && typeof data === 'object' && 'detail' in data) {
+        return emptyWorldbuilding(slug)
+      }
+      return data as Worldbuilding
+    }),
 
   updateWorldbuilding: (slug: string, data: Partial<Worldbuilding>): Promise<Worldbuilding> =>
     apiClient.put<Worldbuilding>(`novels/${slug}/worldbuilding`, data),

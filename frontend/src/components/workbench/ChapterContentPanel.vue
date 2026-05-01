@@ -358,7 +358,7 @@ async function loadKnowledgeChapter() {
 // 加载 Bible 数据用于名称映射
 async function loadBible() {
   try {
-    const bible = await bibleApi.getBible(props.slug)
+    const bible = await bibleApi.getBibleOptional(props.slug)
     bibleCharacters.value = bible.characters || []
   } catch {
     bibleCharacters.value = []
