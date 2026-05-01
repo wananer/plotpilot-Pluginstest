@@ -1896,6 +1896,29 @@ async def test_rollback_removes_snapshot_and_rebuilds_character_cards(tmp_path):
     assert any(run["hook_name"] == "rollback" for run in runs["items"])
 
 
+@pytest.mark.asyncio
+async def test_rebuild_and_rollback_dry_run_do_not_mutate_storage(tmp_path):
+    storage = PluginStorage(root=tmp_path)
+    service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage))
+    await service.manual_rebuild(
+        {
+            "novel_id": "novel-dry-run",
+            "chapters": [{"number": 1, "content": "《林澈》抵达雾城。"}],
+        }
+    )
+    runs_before = service.list_runs("novel-dry-run")["items"]
+    snapshots_before = service.list_snapshots("novel-dry-run")["items"]
+
+    rebuild_preview = await service.manual_rebuild({"novel_id": "novel-dry-run", "dry_run": True})
+    rollback_preview = await service.rollback({"novel_id": "novel-dry-run", "chapter_number": 1, "dry_run": True})
+
+    assert rebuild_preview["dry_run"] is True
+    assert rollback_preview["dry_run"] is True
+    assert "audit_state_preserved" in rollback_preview["data"]["affected_scopes"]
+    assert service.list_runs("novel-dry-run")["items"] == runs_before
+    assert service.list_snapshots("novel-dry-run")["items"] == snapshots_before
+
+
 class FakeStructuredProvider:
     async def extract(self, request):
         assert request["schema"]["required"] == ["summary", "characters", "locations", "world_events"]
@@ -1908,6 +1931,55 @@ class FakeStructuredProvider:
             "locations": ["雾城", "黑塔"],
             "world_events": [
                 {"summary": "林澈获得黑色钥匙", "event_type": "item", "characters": ["林澈"], "locations": ["黑塔"]}
+            ],
+        }
+
+
+class LowConfidenceStructuredProvider:
+    async def extract(self, request):
+        return {
+            "summary": "低置信角色短暂出现。",
+            "characters": [
+                {"name": "低置信角色", "summary": "疑似出现在门口", "confidence": 0.42},
+            ],
+            "locations": ["门口"],
+            "world_events": [],
+        }
+
+
+class ExplicitHighRiskStructuredProvider:
+    async def extract(self, request):
+        return {
+            "summary": "林澈意识到钥匙有认知边界。",
+            "characters": [
+                {
+                    "name": "林澈",
+                    "summary": "显式高风险认知状态更新",
+                    "unknowns": ["不知道钥匙会消耗记忆"],
+                    "misbeliefs": ["误以为钥匙没有代价"],
+                    "capability_limits": ["不能凭空知道钥匙规则"],
+                    "confidence": 0.91,
+                },
+            ],
+            "locations": ["黑塔"],
+            "world_events": [],
+        }
+
+
+class HighRiskWorldEventStructuredProvider:
+    async def extract(self, request):
+        return {
+            "summary": "雾城规则被改写。",
+            "characters": [],
+            "locations": ["雾城"],
+            "world_events": [
+                {
+                    "summary": "雾城从此禁止夜间出城",
+                    "event_type": "world_rule",
+                    "locations": ["雾城"],
+                    "scene_order": "later",
+                    "confidence": 0.92,
+                },
             ],
         }
 
@@ -2682,6 +2754,139 @@ async def test_structured_provider_overrides_deterministic_extraction(tmp_path):
     assert result["data"]["facts"]["locations"] == ["雾城", "黑塔"]
     runs = service.list_runs("novel-4")
     assert runs["items"][-1]["output"]["extraction_source"] == "structured"
+
+
+@pytest.mark.asyncio
+async def test_low_confidence_character_update_enters_review_inbox(tmp_path):
+    storage = PluginStorage(root=tmp_path)
+    service = EvolutionWorldAssistantService(
+        storage=storage,
+        jobs=PluginJobRegistry(storage),
+        extractor_provider=LowConfidenceStructuredProvider(),
+    )
+
+    result = await service.after_commit(
+        {
+            "novel_id": "novel-review-inbox",
+            "chapter_number": 1,
+            "payload": {"content": "门口似乎站着一个看不清的人影。"},
+        }
+    )
+
+    assert result["ok"] is True
+    assert service.get_character("novel-review-inbox", "低置信角色") is None
+    candidates = service.list_review_candidates("novel-review-inbox", status="pending")["items"]
+    assert len(candidates) == 1
+    assert candidates[0]["candidate_type"] == "character_update"
+    assert candidates[0]["reason"].startswith("explicit_confidence_below_threshold")
+
+    context = service.before_context_build(
+        {"novel_id": "novel-review-inbox", "chapter_number": 2, "payload": {"outline": "继续调查门口人影。"}}
+    )
+    joined = _joined_context_blocks(context)
+    assert "本章焦点角色" not in joined
+    assert context["context_injection_record"]["gate_decision"]["pending_review_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_approving_review_candidate_applies_character_update(tmp_path):
+    storage = PluginStorage(root=tmp_path)
+    service = EvolutionWorldAssistantService(
+        storage=storage,
+        jobs=PluginJobRegistry(storage),
+        extractor_provider=LowConfidenceStructuredProvider(),
+    )
+    await service.after_commit(
+        {
+            "novel_id": "novel-review-approve",
+            "chapter_number": 1,
+            "payload": {"content": "门口似乎站着一个看不清的人影。"},
+        }
+    )
+    candidate = service.list_review_candidates("novel-review-approve", status="pending")["items"][0]
+
+    approved = service.approve_review_candidate("novel-review-approve", candidate["id"])
+
+    assert approved["ok"] is True
+    card = service.get_character("novel-review-approve", "低置信角色")
+    assert card is not None
+    assert card["name"] == "低置信角色"
+    assert service.list_review_candidates("novel-review-approve", status="pending")["items"] == []
+
+
+@pytest.mark.asyncio
+async def test_explicit_high_risk_character_update_enters_review_inbox(tmp_path):
+    storage = PluginStorage(root=tmp_path)
+    service = EvolutionWorldAssistantService(
+        storage=storage,
+        jobs=PluginJobRegistry(storage),
+        extractor_provider=ExplicitHighRiskStructuredProvider(),
+    )
+
+    await service.after_commit(
+        {
+            "novel_id": "novel-high-risk-inbox",
+            "chapter_number": 1,
+            "payload": {"content": "林澈发现自己仍不知道钥匙的代价。"},
+        }
+    )
+
+    assert service.get_character("novel-high-risk-inbox", "林澈") is None
+    candidate = service.list_review_candidates("novel-high-risk-inbox", status="pending")["items"][0]
+    assert candidate["risk_level"] == "high"
+    assert candidate["reason"].startswith("high_risk_fields")
+
+
+@pytest.mark.asyncio
+async def test_approving_world_event_candidate_writes_timeline_event(tmp_path):
+    storage = PluginStorage(root=tmp_path)
+    service = EvolutionWorldAssistantService(
+        storage=storage,
+        jobs=PluginJobRegistry(storage),
+        extractor_provider=HighRiskWorldEventStructuredProvider(),
+    )
+
+    await service.after_commit(
+        {
+            "novel_id": "novel-world-event-review",
+            "chapter_number": 1,
+            "payload": {"content": "雾城的城规在钟声后改变。"},
+        }
+    )
+
+    assert service.list_timeline_events("novel-world-event-review")["items"] == []
+    candidate = service.list_review_candidates("novel-world-event-review", status="pending")["items"][0]
+    approved = service.approve_review_candidate("novel-world-event-review", candidate["id"])
+
+    assert approved["ok"] is True
+    events = service.list_timeline_events("novel-world-event-review")["items"]
+    assert len(events) == 1
+    assert events[0]["summary"] == "雾城从此禁止夜间出城"
+    assert events[0]["source"] == "review_approved"
+
+
+@pytest.mark.asyncio
+async def test_approved_continuity_constraint_and_rollback_use_chapter_boundary(tmp_path):
+    storage = PluginStorage(root=tmp_path)
+    service = EvolutionWorldAssistantService(storage=storage, jobs=PluginJobRegistry(storage))
+    candidate = service._upsert_pending_review_candidate(
+        novel_id="novel-constraint-review",
+        chapter_number=2,
+        candidate_type="continuity_constraint",
+        risk_level="high",
+        payload={"subject": "雾城", "type": "world_rule", "rule": "雾城夜间禁止出城。"},
+        evidence=[{"source_type": "manual_test", "chapter_number": 2}],
+        reason="manual_constraint_review",
+    )
+
+    approved = service.approve_review_candidate("novel-constraint-review", candidate["id"])
+    constraints = service.list_continuity_constraints("novel-constraint-review")["items"]
+    rollback = await service.rollback({"novel_id": "novel-constraint-review", "chapter_number": 2})
+
+    assert approved["ok"] is True
+    assert constraints[0]["chapter_number"] == 2
+    assert rollback["data"]["continuity_constraints_removed"] == 1
+    assert service.list_continuity_constraints("novel-constraint-review")["items"] == []
 
 
 @pytest.mark.asyncio

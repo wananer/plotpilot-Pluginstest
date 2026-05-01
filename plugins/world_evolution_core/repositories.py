@@ -399,6 +399,16 @@ class EvolutionWorldRepository:
         items = sorted(items, key=lambda item: (int(item.get("chapter_number") or 0), int(item.get("scene_order") or 0), str(item.get("event_id") or "")))
         return items[-limit:] if limit > 0 else items
 
+    def delete_timeline_events_for_chapter(self, novel_id: str, chapter_number: int) -> int:
+        removed = 0
+        for event in self.list_timeline_events(novel_id, limit=0):
+            if int(event.get("chapter_number") or 0) != chapter_number:
+                continue
+            event_id = str(event.get("event_id") or _slug(str(event.get("summary") or "")))
+            if self._delete_scope(["novels", novel_id, "timeline", "events", f"chapter_{chapter_number}", f"{event_id}.json"]):
+                removed += 1
+        return removed
+
     def save_continuity_constraints(self, novel_id: str, constraints: list[dict[str, Any]]) -> None:
         for constraint in constraints:
             constraint_id = str(constraint.get("constraint_id") or _slug(str(constraint.get("rule") or "")))
@@ -414,6 +424,17 @@ class EvolutionWorldRepository:
         items = [data for data in self.storage.list_json(PLUGIN_NAME, ["novels", novel_id, "timeline", "constraints"]) if isinstance(data, dict)]
         items = sorted(items, key=lambda item: (str(item.get("subject") or ""), str(item.get("type") or ""), str(item.get("constraint_id") or "")))
         return items[-limit:] if limit > 0 else items
+
+    def delete_continuity_constraints_for_chapter(self, novel_id: str, chapter_number: int) -> int:
+        removed = 0
+        for constraint in self.list_continuity_constraints(novel_id, limit=0):
+            constraint_chapter = int(constraint.get("chapter_number") or constraint.get("created_or_updated_chapter") or 0)
+            if constraint_chapter != chapter_number:
+                continue
+            constraint_id = str(constraint.get("constraint_id") or _slug(str(constraint.get("rule") or "")))
+            if self._delete_scope(["novels", novel_id, "timeline", "constraints", f"{constraint_id}.json"]):
+                removed += 1
+        return removed
 
     def save_story_graph_chapter(self, novel_id: str, chapter_number: int, graph: dict[str, Any]) -> None:
         self.storage.write_json(
@@ -487,6 +508,44 @@ class EvolutionWorldRepository:
     def list_review_records(self, novel_id: str, limit: int = 30) -> list[dict[str, Any]]:
         return self.storage.read_jsonl(PLUGIN_NAME, ["novels", novel_id, "timeline", "review_records.jsonl"], limit=limit)
 
+    def upsert_review_candidate(self, novel_id: str, candidate: dict[str, Any]) -> dict[str, Any]:
+        candidate_id = str(candidate.get("id") or "")
+        if not candidate_id:
+            raise ValueError("review candidate id is required")
+        prepared = dict(candidate)
+        prepared["novel_id"] = novel_id
+        self.storage.write_json(
+            PLUGIN_NAME,
+            ["novels", novel_id, "review_candidates", f"{candidate_id}.json"],
+            prepared,
+        )
+        return prepared
+
+    def get_review_candidate(self, novel_id: str, candidate_id: str) -> dict[str, Any] | None:
+        data = self.storage.read_json(
+            PLUGIN_NAME,
+            ["novels", novel_id, "review_candidates", f"{candidate_id}.json"],
+            default=None,
+        )
+        return data if isinstance(data, dict) else None
+
+    def list_review_candidates(
+        self,
+        novel_id: str,
+        *,
+        status: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        items = [
+            item
+            for item in self.storage.list_json(PLUGIN_NAME, ["novels", novel_id, "review_candidates"])
+            if isinstance(item, dict)
+        ]
+        if status:
+            items = [item for item in items if str(item.get("status") or "") == status]
+        items.sort(key=lambda item: (str(item.get("created_at") or ""), str(item.get("id") or "")))
+        return items[-limit:] if limit > 0 else items
+
     def append_context_injection_record(self, novel_id: str, record: dict[str, Any]) -> None:
         self.storage.append_jsonl(PLUGIN_NAME, ["novels", novel_id, "context", "injection_records.jsonl"], record)
 
@@ -528,6 +587,19 @@ class EvolutionWorldRepository:
         ]
         items.sort(key=lambda item: (int(item.get("chapter_number") or 0), str(item.get("source_type") or ""), str(item.get("chunk_id") or "")))
         return items[-limit:] if limit > 0 else items
+
+    def clear_agent_knowledge(self, novel_id: str) -> dict[str, int]:
+        documents = 0
+        chunks = 0
+        for document in self.list_agent_knowledge_documents(novel_id, limit=0):
+            doc_id = str(document.get("id") or "")
+            if doc_id and self._delete_scope(["novels", novel_id, "agent", "knowledge", "documents", f"{doc_id}.json"]):
+                documents += 1
+        for chunk in self.list_agent_knowledge_chunks(novel_id, limit=0):
+            chunk_id = str(chunk.get("chunk_id") or "")
+            if chunk_id and self._delete_scope(["novels", novel_id, "agent", "knowledge", "chunks", f"{chunk_id}.json"]):
+                chunks += 1
+        return {"documents": documents, "chunks": chunks}
 
     def append_agent_decision_record(self, novel_id: str, record: dict[str, Any]) -> None:
         self.storage.append_jsonl(PLUGIN_NAME, ["novels", novel_id, "agent", "decisions.jsonl"], record)

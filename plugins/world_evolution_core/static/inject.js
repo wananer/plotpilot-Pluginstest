@@ -48,6 +48,7 @@
         <button type="button" data-tab="characters" class="active">角色卡</button>
         <button type="button" data-tab="events">世界线</button>
         <button type="button" data-tab="routes">路线图</button>
+        <button type="button" data-tab="review">审核</button>
         <button type="button" data-tab="agent">智能体</button>
         <button type="button" data-tab="diagnostics">风险审查</button>
         <button type="button" data-tab="status">运行态</button>
@@ -82,7 +83,7 @@
       return;
     }
     try {
-      const [characters, status, runs, snapshots, importedFlows, settings, routeMap, agentStatus, diagnostics] = await Promise.all([
+      const [characters, status, runs, snapshots, importedFlows, settings, routeMap, agentStatus, diagnostics, reviewCandidates] = await Promise.all([
         runtime.fetchJson(`/api/v1/plugins/evolution-world/novels/${encodeURIComponent(novelId)}/characters`),
         runtime.fetchJson('/api/v1/plugins/evolution-world/status'),
         runtime.fetchJson(`/api/v1/plugins/evolution-world/novels/${encodeURIComponent(novelId)}/runs?limit=8`),
@@ -92,8 +93,9 @@
         runtime.fetchJson(`/api/v1/plugins/evolution-world/novels/${encodeURIComponent(novelId)}/routes/global`),
         runtime.fetchJson(`/api/v1/plugins/evolution-world/novels/${encodeURIComponent(novelId)}/agent/status`),
         runtime.fetchJson(`/api/v1/plugins/evolution-world/novels/${encodeURIComponent(novelId)}/diagnostics`),
+        runtime.fetchJson(`/api/v1/plugins/evolution-world/novels/${encodeURIComponent(novelId)}/review-candidates?status=pending&limit=50`),
       ]);
-      state.lastPayload = { novelId, characters, status, runs, snapshots, importedFlows, settings, routeMap, agentStatus, diagnostics };
+      state.lastPayload = { novelId, characters, status, runs, snapshots, importedFlows, settings, routeMap, agentStatus, diagnostics, reviewCandidates };
       renderPanel(drawer);
     } catch (error) {
       console.warn('[EvolutionWorld] panel request failed:', error);
@@ -108,6 +110,7 @@
     }
     if (state.activeTab === 'events') return renderEvents(drawer, state.lastPayload);
     if (state.activeTab === 'routes') return renderRoutes(drawer, state.lastPayload);
+    if (state.activeTab === 'review') return renderReview(drawer, state.lastPayload);
     if (state.activeTab === 'agent') return renderAgent(drawer, state.lastPayload);
     if (state.activeTab === 'diagnostics') return renderDiagnostics(drawer, state.lastPayload);
     if (state.activeTab === 'status') return renderStatus(drawer, state.lastPayload);
@@ -469,6 +472,9 @@
     if (!plotpilotUsage.mode) observabilityNotes.push('PlotPilot 原生资料策略模式暂未写入，已按 strategy_only 展示');
     const diagnostics = payload.diagnostics || {};
     const budget = diagnostics.context_budget_summary || {};
+    const gate = diagnostics.injection_gate_summary || {};
+    const review = diagnostics.review_candidate_summary || {};
+    const freshness = diagnostics.knowledge_freshness || {};
     const injectionSummary = agent.context_injection_summary || {};
     const t0Blocks = budget.t0_block_count ?? injectionSummary.t0_block_count ?? 0;
     const t1Blocks = budget.t1_block_count ?? injectionSummary.t1_block_count ?? 0;
@@ -796,6 +802,9 @@
           <div><dt>上下文块</dt><dd>${escapeHtml(budget.block_count || 0)} · budget ${escapeHtml(budget.token_budget || 0)}</dd></div>
           <div><dt>T0 硬约束</dt><dd>${escapeHtml(budget.t0_block_count || 0)} 块 · ${escapeHtml(budget.t0_chars || 0)} 字</dd></div>
           <div><dt>T1 软策略</dt><dd>${escapeHtml(budget.t1_block_count || 0)} 块 · ${escapeHtml(budget.t1_chars || 0)} 字</dd></div>
+          <div><dt>门控</dt><dd>${gate.has_decision ? (gate.should_inject ? '注入' : '跳过') : '暂无'} · pending ${escapeHtml(gate.pending_review_count || review.pending || 0)}</dd></div>
+          <div><dt>门控原因</dt><dd>${escapeHtml([...(gate.reasons || []), ...(gate.skipped_reasons || [])].join('、') || '无')}</dd></div>
+          <div><dt>知识新鲜度</dt><dd>${freshness.is_stale ? '落后' : '同步'} · facts ${escapeHtml(freshness.latest_fact_chapter || 0)} / knowledge ${escapeHtml(freshness.latest_knowledge_chapter || 0)}</dd></div>
           <div><dt>未分层</dt><dd>${escapeHtml(budget.tier_unknown_count || 0)} 块</dd></div>
           <div><dt>重复块</dt><dd>${escapeHtml((budget.duplicate_block_ids || []).join('、') || '无')}</dd></div>
           <div><dt>短策略模式</dt><dd>${budget.strategy_only ? '是' : '否'}</dd></div>
@@ -831,6 +840,83 @@
         </ol>
       </section>
     `;
+  }
+
+  function renderReview(drawer, payload) {
+    const content = drawer.querySelector('[data-content]');
+    const candidates = Array.isArray(payload.reviewCandidates?.items) ? payload.reviewCandidates.items : [];
+    if (!candidates.length) {
+      setEmpty(drawer, '暂无待审核状态', '低置信或高风险的 Evolution 状态投影会在这里等待批准。');
+      return;
+    }
+    content.innerHTML = `
+      <section class="ewa-summary-grid">
+        <article><b>${escapeHtml(candidates.length)}</b><span>待审核</span></article>
+        <article><b>${escapeHtml(candidates.filter((item) => item.risk_level === 'high').length)}</b><span>高风险</span></article>
+        <article><b>${escapeHtml(payload.reviewCandidates?.pending_count || candidates.length)}</b><span>Pending</span></article>
+      </section>
+      <section class="ewa-section ewa-run-section">
+        <div class="ewa-section-head">
+          <h3>状态审核收件箱</h3>
+          <p>批准后才写入长期角色卡、约束或 Agent 资产</p>
+        </div>
+        <div class="ewa-run-list">
+          ${candidates.map(renderReviewCandidate).join('')}
+        </div>
+      </section>
+    `;
+    bindReviewButtons(content);
+  }
+
+  function renderReviewCandidate(candidate) {
+    const summary = summarizeCandidatePayload(candidate.payload || {});
+    const evidence = Array.isArray(candidate.evidence) ? candidate.evidence : [];
+    return `
+      <article class="ewa-run-card">
+        <div class="ewa-run-head">
+          <strong>${escapeHtml(candidate.candidate_type || 'candidate')}</strong>
+          <span>${escapeHtml(candidate.risk_level || 'unknown')} · 第${escapeHtml(candidate.chapter_number || '-')}章</span>
+        </div>
+        <p>${escapeHtml(summary || candidate.reason || '无摘要')}</p>
+        <dl class="ewa-mini-list">
+          <div><dt>原因</dt><dd>${escapeHtml(candidate.reason || '-')}</dd></div>
+          <div><dt>证据</dt><dd>${escapeHtml(evidence.map((item) => item.content_hash || item.source_type || item.chapter_number).filter(Boolean).join('、') || '-')}</dd></div>
+        </dl>
+        <div class="ewa-inline-actions">
+          <button type="button" class="ewa-mini-action" data-review-approve="${escapeAttr(candidate.id)}">批准</button>
+          <button type="button" class="ewa-mini-action is-danger" data-review-reject="${escapeAttr(candidate.id)}">拒绝</button>
+        </div>
+      </article>
+    `;
+  }
+
+  function summarizeCandidatePayload(payload) {
+    if (!payload || typeof payload !== 'object') return '';
+    return payload.summary || payload.name || payload.rule || payload.title || JSON.stringify(payload).slice(0, 160);
+  }
+
+  function bindReviewButtons(root) {
+    root.querySelectorAll('[data-review-approve], [data-review-reject]').forEach((button) => {
+      if (button.dataset.boundReview === 'true') return;
+      button.dataset.boundReview = 'true';
+      button.addEventListener('click', async () => {
+        const candidateId = button.dataset.reviewApprove || button.dataset.reviewReject;
+        const action = button.dataset.reviewApprove ? 'approve' : 'reject';
+        if (!candidateId || !state.lastPayload?.novelId) return;
+        button.disabled = true;
+        button.textContent = action === 'approve' ? '批准中...' : '拒绝中...';
+        try {
+          const response = await fetch(`/api/v1/plugins/evolution-world/novels/${encodeURIComponent(state.lastPayload.novelId)}/review-candidates/${encodeURIComponent(candidateId)}/${action}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
+          if (!response.ok) throw new Error(await response.text());
+          await openPanel();
+          state.activeTab = 'review';
+          renderPanel(document.getElementById('ewa-drawer'));
+        } catch (error) {
+          const drawer = document.getElementById('ewa-drawer');
+          setEmpty(drawer, '审核操作失败', String(error));
+        }
+      });
+    });
   }
 
   function formatDependencyStatus(status) {
@@ -1302,9 +1388,10 @@
         button.textContent = `回滚第${chapterNumber}章中...`;
         try {
           const response = await fetch(`/api/v1/plugins/evolution-world/novels/${encodeURIComponent(state.lastPayload.novelId)}/chapters/${encodeURIComponent(chapterNumber)}/rollback`, { method: 'POST' });
-          if (!response.ok) throw new Error(`Rollback failed: ${response.status}`);
-        } finally {
+          if (!response.ok) throw new Error(await response.text());
           await refreshStatusTab();
+        } catch (error) {
+          setEmpty(document.getElementById('ewa-drawer'), '回滚失败', String(error));
         }
       });
     });

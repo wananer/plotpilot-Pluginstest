@@ -36,6 +36,7 @@ class StructuredCharacterUpdate:
     capability_limits: list[str] = field(default_factory=list)
     decision_biases: list[str] = field(default_factory=list)
     confidence: float = 0.7
+    confidence_explicit: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -57,6 +58,7 @@ class StructuredWorldEvent:
     capability_limits: list[str] = field(default_factory=list)
     decision_biases: list[str] = field(default_factory=list)
     confidence: float = 0.7
+    confidence_explicit: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -454,6 +456,7 @@ def _parse_character(value: Any) -> StructuredCharacterUpdate | None:
         capability_limits=_strings(value.get("capability_limits"))[:10],
         decision_biases=_strings(value.get("decision_biases"))[:8],
         confidence=_confidence(value.get("confidence")),
+        confidence_explicit="confidence" in value,
     )
 
 
@@ -481,6 +484,7 @@ def _parse_event(value: Any) -> StructuredWorldEvent | None:
         capability_limits=_strings(value.get("capability_limits"))[:10],
         decision_biases=_strings(value.get("decision_biases"))[:8],
         confidence=_confidence(value.get("confidence")),
+        confidence_explicit="confidence" in value,
     )
 
 

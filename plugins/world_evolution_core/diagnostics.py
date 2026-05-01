@@ -56,11 +56,14 @@ def build_diagnostics(
     _check_recent_failures(risks, agent_status)
     _check_settings_conflict(risks, repository)
     context_budget_summary = _context_budget_summary(repository, novel_id)
+    review_candidate_summary = _review_candidate_summary(repository, novel_id)
+    injection_gate_summary = _injection_gate_summary(repository, novel_id)
     plugin_leakage_check = _plugin_leakage_check(repository, novel_id, agent_status)
     planning_alignment = agent_status.get("planning_alignment") if isinstance(agent_status.get("planning_alignment"), dict) else {}
     native_context_alignment = agent_status.get("native_context_alignment") if isinstance(agent_status.get("native_context_alignment"), dict) else {}
     agent_takeover_health = _agent_takeover_health(agent_status)
     knowledge_coverage = agent_status.get("knowledge_base") if isinstance(agent_status.get("knowledge_base"), dict) else {}
+    knowledge_freshness = _knowledge_freshness(repository, novel_id, knowledge_coverage)
     gene_mutation_audit = agent_status.get("auto_evolution") if isinstance(agent_status.get("auto_evolution"), dict) else {}
     palette_status = agent_status.get("personality_palette_status") if isinstance(agent_status.get("personality_palette_status"), dict) else {}
     degraded_agent_tools = _degraded_agent_tools(agent_status)
@@ -96,6 +99,9 @@ def build_diagnostics(
         "agent_asset_counts": dict(agent_status.get("asset_counts") or {}),
         "plugin_leakage_check": plugin_leakage_check,
         "context_budget_summary": context_budget_summary,
+        "review_candidate_summary": review_candidate_summary,
+        "injection_gate_summary": injection_gate_summary,
+        "knowledge_freshness": knowledge_freshness,
         "risks": risks,
     }
 
@@ -205,6 +211,58 @@ def _context_blocks_from_record(record: Any) -> list[dict[str, Any]]:
         if blocks:
             return blocks
     return []
+
+
+def _review_candidate_summary(repository: Any, novel_id: str) -> dict[str, Any]:
+    try:
+        candidates = repository.list_review_candidates(novel_id, limit=500)
+    except Exception:
+        candidates = []
+    by_status: dict[str, int] = {}
+    by_type: dict[str, int] = {}
+    by_risk: dict[str, int] = {}
+    for candidate in candidates:
+        by_status[str(candidate.get("status") or "unknown")] = by_status.get(str(candidate.get("status") or "unknown"), 0) + 1
+        by_type[str(candidate.get("candidate_type") or "unknown")] = by_type.get(str(candidate.get("candidate_type") or "unknown"), 0) + 1
+        by_risk[str(candidate.get("risk_level") or "unknown")] = by_risk.get(str(candidate.get("risk_level") or "unknown"), 0) + 1
+    return {
+        "total": len(candidates),
+        "pending": by_status.get("pending", 0),
+        "by_status": by_status,
+        "by_type": by_type,
+        "by_risk": by_risk,
+    }
+
+
+def _injection_gate_summary(repository: Any, novel_id: str) -> dict[str, Any]:
+    records = repository.list_context_injection_records(novel_id, limit=1)
+    latest = records[-1] if records else {}
+    decision = latest.get("gate_decision") if isinstance(latest, dict) and isinstance(latest.get("gate_decision"), dict) else {}
+    return {
+        "has_decision": bool(decision),
+        "should_inject": bool(decision.get("should_inject")),
+        "reasons": list(decision.get("reasons") or []),
+        "skipped_reasons": list(decision.get("skipped_reasons") or []),
+        "pending_review_count": int(decision.get("pending_review_count") or 0),
+        "t0_chars": int(decision.get("t0_chars") or 0),
+        "t1_chars": int(decision.get("t1_chars") or 0),
+        "skipped_block_count": int(decision.get("skipped_block_count") or latest.get("skipped_count") or 0),
+        "latest_chapter": latest.get("chapter_number") if isinstance(latest, dict) else None,
+    }
+
+
+def _knowledge_freshness(repository: Any, novel_id: str, coverage: dict[str, Any]) -> dict[str, Any]:
+    facts = repository.list_fact_snapshots(novel_id, limit=0)
+    latest_fact = max((_int_or_none(item.get("chapter_number")) or 0 for item in facts), default=0)
+    chunks = repository.list_agent_knowledge_chunks(novel_id, limit=0)
+    latest_chunk = max((_int_or_none(item.get("chapter_number")) or 0 for item in chunks), default=0)
+    return {
+        "latest_fact_chapter": latest_fact,
+        "latest_knowledge_chapter": latest_chunk,
+        "is_stale": bool(latest_fact and latest_chunk < latest_fact),
+        "document_count": int(coverage.get("document_count") or 0),
+        "chunk_count": int(coverage.get("chunk_count") or 0),
+    }
 
 
 def _agent_takeover_health(agent_status: dict[str, Any]) -> dict[str, Any]:
@@ -515,6 +573,14 @@ def _redact(value: Any) -> Any:
 
 def _severity_rank(value: Any) -> int:
     return {"critical": 0, "warning": 1, "info": 2}.get(str(value), 3)
+
+
+def _int_or_none(value: Any) -> int | None:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
 
 
 def _now() -> str:

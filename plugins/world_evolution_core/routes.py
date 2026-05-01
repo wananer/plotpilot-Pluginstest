@@ -178,6 +178,27 @@ async def list_review_records(novel_id: str, limit: int = 30):
     return _service.list_review_records(novel_id, limit=limit)
 
 
+@router.get("/novels/{novel_id}/review-candidates")
+async def list_review_candidates(novel_id: str, status: Optional[str] = None, limit: int = 100):
+    return _service.list_review_candidates(novel_id, status=status, limit=limit)
+
+
+@router.post("/novels/{novel_id}/review-candidates/{candidate_id}/approve")
+async def approve_review_candidate(novel_id: str, candidate_id: str):
+    result = _service.approve_review_candidate(novel_id, candidate_id)
+    if not result.get("ok"):
+        raise HTTPException(status_code=404, detail=result.get("error") or "review candidate not found")
+    return result
+
+
+@router.post("/novels/{novel_id}/review-candidates/{candidate_id}/reject")
+async def reject_review_candidate(novel_id: str, candidate_id: str, payload: Optional[dict] = None):
+    result = _service.reject_review_candidate(novel_id, candidate_id, note=str((payload or {}).get("note") or ""))
+    if not result.get("ok"):
+        raise HTTPException(status_code=404, detail=result.get("error") or "review candidate not found")
+    return result
+
+
 @router.get("/novels/{novel_id}/agent/status")
 async def get_agent_status(novel_id: str):
     return _service.get_agent_status(novel_id)

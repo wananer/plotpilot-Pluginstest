@@ -658,6 +658,13 @@
   margin: 10px 0;
 }
 
+.ewa-inline-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
 .ewa-mini-action {
   border: 1px solid rgba(34, 211, 238, 0.24);
   border-radius: 999px;
