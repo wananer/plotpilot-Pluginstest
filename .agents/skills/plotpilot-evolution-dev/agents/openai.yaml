@@ -1,0 +1,4 @@
+interface:
+  display_name: "PlotPilot Evolution Dev"
+  short_description: "Evolution development loop for PlotPilot"
+  default_prompt: "Use the PlotPilot Evolution development loop for this task."
