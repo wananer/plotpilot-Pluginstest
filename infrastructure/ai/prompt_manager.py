@@ -48,6 +48,17 @@ def _uid() -> str:
     return uuid.uuid4().hex[:12]
 
 
+def _runtime_meta(entry: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize prompt runtime registry metadata from seed/import entries."""
+    return {
+        "owner": str(entry.get("owner") or "native"),
+        "runtime_status": str(entry.get("runtime_status") or "asset"),
+        "authority_domain": str(entry.get("authority_domain") or ""),
+        "runtime_reader": str(entry.get("runtime_reader") or "hardcoded"),
+        "editable": 1 if bool(entry.get("editable", True)) else 0,
+    }
+
+
 class VersionInfo:
     """单个版本信息。"""
 
@@ -103,7 +114,8 @@ class NodeInfo:
     __slots__ = (
         "id", "node_key", "name", "description", "category", "source",
         "output_format", "contract_module", "contract_model",
-        "tags", "variables", "system_file", "is_builtin", "sort_order",
+        "tags", "variables", "system_file", "owner", "runtime_status",
+        "authority_domain", "runtime_reader", "editable", "is_builtin", "sort_order",
         "template_id", "active_version_id", "version_count",
         "_active_version",
     )
@@ -124,6 +136,11 @@ class NodeInfo:
                 row.get("variables"), []
             )
             self.system_file: Optional[str] = row.get("system_file")
+            self.owner: str = row.get("owner") or "native"
+            self.runtime_status: str = row.get("runtime_status") or "asset"
+            self.authority_domain: str = row.get("authority_domain") or ""
+            self.runtime_reader: str = row.get("runtime_reader") or "hardcoded"
+            self.editable: bool = bool(row.get("editable", 1))
             self.is_builtin: bool = bool(row.get("is_builtin", 0))
             self.sort_order: int = row.get("sort_order", 0)
             self.template_id: str = row["template_id"]
@@ -142,6 +159,11 @@ class NodeInfo:
             self.tags = []
             self.variables = []
             self.system_file = None
+            self.owner = "native"
+            self.runtime_status = "asset"
+            self.authority_domain = ""
+            self.runtime_reader = "hardcoded"
+            self.editable = True
             self.is_builtin = False
             self.sort_order = 0
             self.template_id = ""
@@ -196,6 +218,11 @@ class NodeInfo:
             "variables": self.variables,
             "variable_names": [v.get("name", "") for v in self.variables],
             "system_file": self.system_file,
+            "owner": self.owner,
+            "runtime_status": self.runtime_status,
+            "authority_domain": self.authority_domain,
+            "runtime_reader": self.runtime_reader,
+            "editable": self.editable,
             "is_builtin": self.is_builtin,
             "sort_order": self.sort_order,
             "template_id": self.template_id,
@@ -312,6 +339,7 @@ class PromptManager:
             "SELECT id FROM prompt_templates WHERE is_builtin=1 LIMIT 1"
         ).fetchone()
         if row:
+            self._sync_seed_runtime_metadata(conn)
             self._seeded = True
             logger.info("PromptManager: 内置种子已存在，跳过初始化")
             return True
@@ -353,13 +381,15 @@ class PromptManager:
             ver_id = _uid()
             tags_json = json.dumps(p.get("tags", []), ensure_ascii=False)
             vars_json = json.dumps(p.get("variables", []), ensure_ascii=False)
+            meta = _runtime_meta(p)
 
             conn.execute("""
                 INSERT INTO prompt_nodes
                 (id, template_id, node_key, name, description, category, source,
                  output_format, contract_module, contract_model, tags, variables,
-                 system_file, is_builtin, sort_order, active_version_id, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
+                 system_file, owner, runtime_status, authority_domain, runtime_reader,
+                 editable, is_builtin, sort_order, active_version_id, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
             """, (
                 node_id, template_id,
                 p.get("id", f"node-{idx}"),
@@ -372,6 +402,11 @@ class PromptManager:
                 p.get("contract_model"),
                 tags_json, vars_json,
                 p.get("system_file"),
+                meta["owner"],
+                meta["runtime_status"],
+                meta["authority_domain"],
+                meta["runtime_reader"],
+                meta["editable"],
                 idx,
                 ver_id, now, now,
             ))
@@ -390,6 +425,39 @@ class PromptManager:
         count = len(prompts)
         logger.info("PromptManager: 已导入 %d 个内置提示词种子", count)
         return True
+
+    def _sync_seed_runtime_metadata(self, conn) -> None:
+        """Keep runtime registry metadata current for built-in seed rows."""
+        seed_path = _DEFAULT_SEED_PATH
+        if not seed_path.exists():
+            return
+        try:
+            seed_data = json.loads(seed_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.debug("PromptManager: seed metadata sync skipped: %s", exc)
+            return
+        for p in seed_data.get("prompts", []):
+            node_key = p.get("id")
+            if not node_key:
+                continue
+            meta = _runtime_meta(p)
+            conn.execute(
+                """
+                UPDATE prompt_nodes
+                SET owner = ?, runtime_status = ?, authority_domain = ?,
+                    runtime_reader = ?, editable = ?, updated_at = updated_at
+                WHERE node_key = ?
+                """,
+                (
+                    meta["owner"],
+                    meta["runtime_status"],
+                    meta["authority_domain"],
+                    meta["runtime_reader"],
+                    meta["editable"],
+                    node_key,
+                ),
+            )
+        conn.commit()
 
     # ------------------------------------------------------------------
     # 模板包 CRUD
@@ -435,6 +503,141 @@ class PromptManager:
         conn.commit()
         return TemplateInfo({"id": tid, "name": name, "description": description,
                              "category": category, "node_count": 0})
+
+    def ensure_template(self, name: str, description: str = "",
+                        category: str = "plugin", **kwargs) -> TemplateInfo:
+        """按名称/分类幂等获取或创建模板包。"""
+        for template in self.list_templates():
+            if template.name == name and template.category == category:
+                return template
+        db = self._get_db()
+        tid = _uid()
+        now = datetime.now().isoformat()
+        metadata = kwargs.get("metadata") or {}
+        db.execute("""
+            INSERT INTO prompt_templates
+            (id, name, description, category, version, author, icon, color,
+             is_builtin, metadata, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            tid,
+            name,
+            description,
+            category,
+            kwargs.get("version", "1.0.0"),
+            kwargs.get("author", ""),
+            kwargs.get("icon", "🧩"),
+            kwargs.get("color", "#0f766e"),
+            1 if bool(kwargs.get("is_builtin", True)) else 0,
+            json.dumps(metadata, ensure_ascii=False),
+            now,
+            now,
+        ))
+        db.commit()
+        return self.get_template(tid) or TemplateInfo({
+            "id": tid,
+            "name": name,
+            "description": description,
+            "category": category,
+            "node_count": 0,
+        })
+
+    def seed_prompt_entries(
+        self,
+        prompts: List[Dict[str, Any]],
+        *,
+        template_name: str,
+        template_description: str = "",
+        template_category: str = "plugin",
+        template_metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, int]:
+        """幂等注册运行时提示词；存在时只同步元数据，不覆盖用户版本。"""
+        self.ensure_seeded()
+        template = self.ensure_template(
+            template_name,
+            template_description,
+            category=template_category,
+            metadata=template_metadata or {},
+            is_builtin=True,
+        )
+        created = 0
+        updated = 0
+        for idx, entry in enumerate(prompts):
+            node_key = entry.get("id") or entry.get("node_key")
+            if not node_key:
+                continue
+            existing = self.get_node(str(node_key), by_key=True)
+            meta = _runtime_meta(entry)
+            if existing:
+                self.update_node_metadata(
+                    existing.id,
+                    name=entry.get("name") or None,
+                    description=entry.get("description"),
+                    tags=entry.get("tags"),
+                    variables=entry.get("variables"),
+                    output_format=entry.get("output_format"),
+                    contract_module=entry.get("contract_module"),
+                    contract_model=entry.get("contract_model"),
+                    source=entry.get("source"),
+                    category=entry.get("category"),
+                    owner=meta["owner"],
+                    runtime_status=meta["runtime_status"],
+                    authority_domain=meta["authority_domain"],
+                    runtime_reader=meta["runtime_reader"],
+                    editable=bool(meta["editable"]),
+                )
+                updated += 1
+                continue
+            self.create_node(
+                template_id=template.id,
+                node_key=str(node_key),
+                name=entry.get("name") or str(node_key),
+                system_prompt=entry.get("system", ""),
+                user_template=entry.get("user_template", ""),
+                description=entry.get("description", ""),
+                category=entry.get("category", "generation"),
+                tags=entry.get("tags", []),
+                variables=entry.get("variables", []),
+                output_format=entry.get("output_format", "text"),
+                contract_module=entry.get("contract_module"),
+                contract_model=entry.get("contract_model"),
+                source=entry.get("source", ""),
+                owner=meta["owner"],
+                runtime_status=meta["runtime_status"],
+                authority_domain=meta["authority_domain"],
+                runtime_reader=meta["runtime_reader"],
+                editable=bool(meta["editable"]),
+                is_builtin=True,
+                sort_order=10000 + idx,
+            )
+            created += 1
+        return {"created": created, "updated": updated}
+
+    def update_node_metadata(self, node_id: str, **kwargs) -> None:
+        """只更新节点元数据，不创建提示词版本。"""
+        set_clauses = ["updated_at = ?"]
+        params: List[Any] = [datetime.now().isoformat()]
+        json_fields = {"tags", "variables"}
+        allowed = {
+            "name", "description", "tags", "variables", "output_format",
+            "contract_module", "contract_model", "source", "category",
+            "owner", "runtime_status", "authority_domain", "runtime_reader",
+            "editable",
+        }
+        for field in allowed:
+            if field not in kwargs or kwargs[field] is None:
+                continue
+            value = kwargs[field]
+            if field in json_fields:
+                value = json.dumps(value, ensure_ascii=False)
+            elif field == "editable":
+                value = 1 if bool(value) else 0
+            set_clauses.append(f"{field} = ?")
+            params.append(value)
+        params.append(node_id)
+        db = self._get_db()
+        db.execute(f"UPDATE prompt_nodes SET {', '.join(set_clauses)} WHERE id = ?", params)
+        db.commit()
 
     # ------------------------------------------------------------------
     # 节点 CRUD
@@ -538,17 +741,23 @@ class PromptManager:
         src = kwargs.get("source") or ""
         cm = kwargs.get("contract_module")
         cmodel = kwargs.get("contract_model")
+        meta = _runtime_meta(kwargs)
+        is_builtin = 1 if bool(kwargs.get("is_builtin", False)) else 0
+        sort_order = int(kwargs.get("sort_order", 0) or 0)
 
         db.execute("""
             INSERT INTO prompt_nodes
             (id, template_id, node_key, name, description, category,
              source, output_format, contract_module, contract_model, tags, variables,
+             owner, runtime_status, authority_domain, runtime_reader, editable,
              is_builtin, sort_order, active_version_id, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             node_id, template_id, node_key, name,
             kwargs.get("description", ""), kwargs.get("category", "generation"),
             src, out_fmt, cm, cmodel, tags_s, vars_s,
+            meta["owner"], meta["runtime_status"], meta["authority_domain"],
+            meta["runtime_reader"], meta["editable"], is_builtin, sort_order,
             ver_id, now, now,
         ))
 
@@ -665,6 +874,13 @@ class PromptManager:
         if kwargs.get("category") is not None:
             set_clauses.append("category = ?")
             params.append(kwargs["category"])
+        for field in ("owner", "runtime_status", "authority_domain", "runtime_reader"):
+            if kwargs.get(field) is not None:
+                set_clauses.append(f"{field} = ?")
+                params.append(str(kwargs[field]))
+        if kwargs.get("editable") is not None:
+            set_clauses.append("editable = ?")
+            params.append(1 if bool(kwargs["editable"]) else 0)
 
         params.append(node_id)
         sql = f"UPDATE prompt_nodes SET {', '.join(set_clauses)} WHERE id = ?"

@@ -554,6 +554,11 @@ CREATE TABLE IF NOT EXISTS prompt_nodes (
     tags TEXT NOT NULL DEFAULT '[]',   -- JSON 数组
     variables TEXT NOT NULL DEFAULT '[]',  -- JSON: 变量定义列表
     system_file TEXT,                  -- 预留，可为空（正文在 prompt_versions.system_prompt）
+    owner TEXT NOT NULL DEFAULT 'native', -- native / plugin:<name>
+    runtime_status TEXT NOT NULL DEFAULT 'asset', -- active / fallback / asset / deprecated
+    authority_domain TEXT NOT NULL DEFAULT '', -- chapter_generation / review / planning / ...
+    runtime_reader TEXT NOT NULL DEFAULT 'hardcoded', -- prompt_manager / prompt_loader / hardcoded
+    editable INTEGER NOT NULL DEFAULT 1,
     is_builtin INTEGER NOT NULL DEFAULT 0,
     sort_order INTEGER NOT NULL DEFAULT 0,
     active_version_id TEXT,            -- 当前激活版本 ID
@@ -630,6 +635,5 @@ CREATE TABLE IF NOT EXISTS llm_profiles (
 );
 
 CREATE INDEX IF NOT EXISTS idx_llm_profiles_sort ON llm_profiles(sort_order);
-
 
 

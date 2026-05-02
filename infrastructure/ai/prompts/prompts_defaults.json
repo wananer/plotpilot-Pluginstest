@@ -124,7 +124,12 @@
           "required": false,
           "default": ""
         }
-      ]
+      ],
+      "owner": "native",
+      "runtime_status": "asset",
+      "runtime_reader": "hardcoded",
+      "authority_domain": "chapter_generation",
+      "editable": true
     },
     {
       "id": "chapter-generation-basic",
@@ -172,7 +177,12 @@
           "required": false,
           "default": ""
         }
-      ]
+      ],
+      "owner": "native",
+      "runtime_status": "asset",
+      "runtime_reader": "hardcoded",
+      "authority_domain": "chapter_generation",
+      "editable": true
     },
     {
       "id": "scene-generation",
@@ -238,7 +248,12 @@
           "type": "string",
           "default": ""
         }
-      ]
+      ],
+      "owner": "native",
+      "runtime_status": "asset",
+      "runtime_reader": "hardcoded",
+      "authority_domain": "chapter_generation",
+      "editable": true
     },
     {
       "id": "dialogue-generation",
@@ -306,7 +321,12 @@
           "desc": "当前场景",
           "type": "string"
         }
-      ]
+      ],
+      "owner": "native",
+      "runtime_status": "asset",
+      "runtime_reader": "hardcoded",
+      "authority_domain": "creative",
+      "editable": true
     },
     {
       "id": "autopilot-stream-beat",
@@ -346,7 +366,12 @@
           "desc": "节拍分解",
           "type": "string"
         }
-      ]
+      ],
+      "owner": "native",
+      "runtime_status": "asset",
+      "runtime_reader": "hardcoded",
+      "authority_domain": "chapter_generation",
+      "editable": true
     },
     {
       "id": "chapter-state-extraction",
@@ -372,7 +397,12 @@
           "type": "string",
           "required": true
         }
-      ]
+      ],
+      "owner": "native",
+      "runtime_status": "fallback",
+      "runtime_reader": "hardcoded",
+      "authority_domain": "chapter_facts",
+      "editable": true
     },
     {
       "id": "tension-scoring",
@@ -401,7 +431,12 @@
           "type": "number",
           "default": 50
         }
-      ]
+      ],
+      "owner": "native",
+      "runtime_status": "active",
+      "runtime_reader": "prompt_manager",
+      "authority_domain": "chapter_facts",
+      "editable": true
     },
     {
       "id": "chapter-narrative-sync",
@@ -431,7 +466,12 @@
           "type": "string",
           "default": ""
         }
-      ]
+      ],
+      "owner": "native",
+      "runtime_status": "fallback",
+      "runtime_reader": "hardcoded",
+      "authority_domain": "chapter_facts",
+      "editable": true
     },
     {
       "id": "style-analysis",
@@ -455,7 +495,12 @@
           "type": "string",
           "required": true
         }
-      ]
+      ],
+      "owner": "native",
+      "runtime_status": "asset",
+      "runtime_reader": "hardcoded",
+      "authority_domain": "chapter_facts",
+      "editable": true
     },
     {
       "id": "knowledge-initial",
@@ -484,7 +529,12 @@
           "desc": "已有设定信息",
           "type": "string"
         }
-      ]
+      ],
+      "owner": "native",
+      "runtime_status": "asset",
+      "runtime_reader": "hardcoded",
+      "authority_domain": "chapter_facts",
+      "editable": true
     },
     {
       "id": "scene-director",
@@ -507,7 +557,12 @@
           "type": "string",
           "required": true
         }
-      ]
+      ],
+      "owner": "native",
+      "runtime_status": "asset",
+      "runtime_reader": "hardcoded",
+      "authority_domain": "chapter_facts",
+      "editable": true
     },
     {
       "id": "chapter-summarizer",
@@ -535,7 +590,12 @@
           "type": "number",
           "default": 300
         }
-      ]
+      ],
+      "owner": "native",
+      "runtime_status": "asset",
+      "runtime_reader": "hardcoded",
+      "authority_domain": "chapter_facts",
+      "editable": true
     },
     {
       "id": "review-character-consistency",
@@ -568,7 +628,12 @@
           "desc": "章节内容",
           "type": "string"
         }
-      ]
+      ],
+      "owner": "native",
+      "runtime_status": "fallback",
+      "runtime_reader": "hardcoded",
+      "authority_domain": "review",
+      "editable": true
     },
     {
       "id": "review-timeline-consistency",
@@ -600,7 +665,12 @@
           "desc": "章节内容（截断）",
           "type": "string"
         }
-      ]
+      ],
+      "owner": "native",
+      "runtime_status": "fallback",
+      "runtime_reader": "hardcoded",
+      "authority_domain": "review",
+      "editable": true
     },
     {
       "id": "review-storyline-consistency",
@@ -627,7 +697,12 @@
           "desc": "章节内容（截断）",
           "type": "string"
         }
-      ]
+      ],
+      "owner": "native",
+      "runtime_status": "fallback",
+      "runtime_reader": "hardcoded",
+      "authority_domain": "review",
+      "editable": true
     },
     {
       "id": "review-foreshadowing-usage",
@@ -653,7 +728,12 @@
           "desc": "章节内容（截断）",
           "type": "string"
         }
-      ]
+      ],
+      "owner": "native",
+      "runtime_status": "fallback",
+      "runtime_reader": "hardcoded",
+      "authority_domain": "review",
+      "editable": true
     },
     {
       "id": "review-improvement-suggestions",
@@ -684,7 +764,12 @@
           "desc": "问题列表",
           "type": "string"
         }
-      ]
+      ],
+      "owner": "native",
+      "runtime_status": "fallback",
+      "runtime_reader": "hardcoded",
+      "authority_domain": "review",
+      "editable": true
     },
     {
       "id": "refactor-proposal",
@@ -722,7 +807,12 @@
           "desc": "事件ID",
           "type": "string"
         }
-      ]
+      ],
+      "owner": "native",
+      "runtime_status": "asset",
+      "runtime_reader": "hardcoded",
+      "authority_domain": "review",
+      "editable": true
     },
     {
       "id": "beat-sheet-decomposition",
@@ -784,7 +874,12 @@
           "type": "string",
           "default": ""
         }
-      ]
+      ],
+      "owner": "native",
+      "runtime_status": "asset",
+      "runtime_reader": "hardcoded",
+      "authority_domain": "planning",
+      "editable": true
     },
     {
       "id": "planning-quick-macro",
@@ -827,7 +922,12 @@
           "type": "string",
           "default": ""
         }
-      ]
+      ],
+      "owner": "native",
+      "runtime_status": "asset",
+      "runtime_reader": "hardcoded",
+      "authority_domain": "planning",
+      "editable": true
     },
     {
       "id": "planning-act",
@@ -857,7 +957,12 @@
           "type": "integer",
           "required": true
         }
-      ]
+      ],
+      "owner": "native",
+      "runtime_status": "asset",
+      "runtime_reader": "hardcoded",
+      "authority_domain": "planning",
+      "editable": true
     },
     {
       "id": "planning-main-plot-suggest",
@@ -890,7 +995,12 @@
           "desc": "核心地点",
           "type": "string"
         }
-      ]
+      ],
+      "owner": "native",
+      "runtime_status": "asset",
+      "runtime_reader": "hardcoded",
+      "authority_domain": "planning",
+      "editable": true
     },
     {
       "id": "summary-act",
@@ -927,7 +1037,12 @@
           "type": "string",
           "default": ""
         }
-      ]
+      ],
+      "owner": "native",
+      "runtime_status": "asset",
+      "runtime_reader": "hardcoded",
+      "authority_domain": "planning",
+      "editable": true
     },
     {
       "id": "summary-volume",
@@ -958,7 +1073,12 @@
           "desc": "幕摘要汇总",
           "type": "string"
         }
-      ]
+      ],
+      "owner": "native",
+      "runtime_status": "asset",
+      "runtime_reader": "hardcoded",
+      "authority_domain": "planning",
+      "editable": true
     },
     {
       "id": "summary-part",
@@ -989,7 +1109,12 @@
           "desc": "卷摘要汇总",
           "type": "string"
         }
-      ]
+      ],
+      "owner": "native",
+      "runtime_status": "asset",
+      "runtime_reader": "hardcoded",
+      "authority_domain": "planning",
+      "editable": true
     },
     {
       "id": "summary-checkpoint",
@@ -1017,7 +1142,12 @@
           "type": "string",
           "required": true
         }
-      ]
+      ],
+      "owner": "native",
+      "runtime_status": "asset",
+      "runtime_reader": "hardcoded",
+      "authority_domain": "planning",
+      "editable": true
     },
     {
       "id": "bible-all",
@@ -1048,7 +1178,12 @@
           "desc": "故事类型",
           "type": "string"
         }
-      ]
+      ],
+      "owner": "native",
+      "runtime_status": "asset",
+      "runtime_reader": "hardcoded",
+      "authority_domain": "worldbuilding",
+      "editable": true
     },
     {
       "id": "bible-worldbuilding",
@@ -1076,7 +1211,12 @@
           "type": "string",
           "default": ""
         }
-      ]
+      ],
+      "owner": "native",
+      "runtime_status": "asset",
+      "runtime_reader": "hardcoded",
+      "authority_domain": "worldbuilding",
+      "editable": true
     },
     {
       "id": "bible-characters",
@@ -1110,7 +1250,12 @@
           "type": "string",
           "default": ""
         }
-      ]
+      ],
+      "owner": "native",
+      "runtime_status": "asset",
+      "runtime_reader": "hardcoded",
+      "authority_domain": "worldbuilding",
+      "editable": true
     },
     {
       "id": "bible-locations",
@@ -1145,7 +1290,12 @@
           "type": "string",
           "default": ""
         }
-      ]
+      ],
+      "owner": "native",
+      "runtime_status": "asset",
+      "runtime_reader": "hardcoded",
+      "authority_domain": "worldbuilding",
+      "editable": true
     },
     {
       "id": "tension-analysis-diagnosis",
@@ -1189,7 +1339,12 @@
           "type": "string",
           "default": ""
         }
-      ]
+      ],
+      "owner": "native",
+      "runtime_status": "asset",
+      "runtime_reader": "hardcoded",
+      "authority_domain": "creative",
+      "editable": true
     },
     {
       "id": "lifecycle-phase-directives",
@@ -1217,13 +1372,43 @@
       "system": "",
       "user_template": "{directive}\n\n——\n📊 全局进度：第 {chapter_number} 章 / 约 {total_chapters} 章 ({progress_pct})\n🎯 当前阶段：{phase_name}\n{extra_hint}",
       "variables": [
-        {"name": "directive", "desc": "阶段基准指令文本", "type": "string"},
-        {"name": "chapter_number", "desc": "当前章节号", "type": "integer"},
-        {"name": "total_chapters", "desc": "预估总章节数", "type": "integer"},
-        {"name": "progress_pct", "desc": "进度百分比", "type": "string"},
-        {"name": "phase_name", "desc": "阶段名称", "type": "string"},
-        {"name": "extra_hint", "desc": "额外压力提示（收敛/终局时非空）", "type": "string", "default": ""}
-      ]
+        {
+          "name": "directive",
+          "desc": "阶段基准指令文本",
+          "type": "string"
+        },
+        {
+          "name": "chapter_number",
+          "desc": "当前章节号",
+          "type": "integer"
+        },
+        {
+          "name": "total_chapters",
+          "desc": "预估总章节数",
+          "type": "integer"
+        },
+        {
+          "name": "progress_pct",
+          "desc": "进度百分比",
+          "type": "string"
+        },
+        {
+          "name": "phase_name",
+          "desc": "阶段名称",
+          "type": "string"
+        },
+        {
+          "name": "extra_hint",
+          "desc": "额外压力提示（收敛/终局时非空）",
+          "type": "string",
+          "default": ""
+        }
+      ],
+      "owner": "native",
+      "runtime_status": "active",
+      "runtime_reader": "prompt_manager",
+      "authority_domain": "chapter_generation",
+      "editable": true
     },
     {
       "id": "beat-focus-instructions",
@@ -1263,15 +1448,52 @@
       "system": "",
       "user_template": "【节拍 {beat_index}/{total_beats}】\n目标字数：约 {target_words} 字\n聚焦点：{focus}\n\n{instruction}\n\n节拍内容：\n{description}\n\n密度与可检查要求：\n- {anchor_line}\n- {obligation}\n\n⚠️ 篇幅控制与收尾规则（必须遵守）：\n- 当剧情已交代完毕，立即用完整的句子结束本节拍，不要拖沓\n- 禁止无意义的对话重复或空洞感叹来凑字数\n- 若已达到目标字数附近，主动收束场景，给出干净利落的段落结尾\n- 结尾必须完整（有句号），绝不允许中途截断\n\n注意：\n- 这是完整章节的一部分，不要写章节标题\n- 不要在节拍结尾强行总结全章\n- 专注于当前节拍的内容，自然衔接到下一节拍",
       "variables": [
-        {"name": "beat_index", "desc": "节拍序号（从1开始）", "type": "integer"},
-        {"name": "total_beats", "desc": "总节拍数", "type": "integer"},
-        {"name": "target_words", "desc": "目标字数", "type": "integer"},
-        {"name": "focus", "desc": "聚焦类型", "type": "string"},
-        {"name": "instruction", "desc": "聚焦指令", "type": "string"},
-        {"name": "description", "desc": "节拍内容描述", "type": "string"},
-        {"name": "anchor_line", "desc": "环境锚点轮转行", "type": "string"},
-        {"name": "obligation", "desc": "叙事义务", "type": "string"}
-      ]
+        {
+          "name": "beat_index",
+          "desc": "节拍序号（从1开始）",
+          "type": "integer"
+        },
+        {
+          "name": "total_beats",
+          "desc": "总节拍数",
+          "type": "integer"
+        },
+        {
+          "name": "target_words",
+          "desc": "目标字数",
+          "type": "integer"
+        },
+        {
+          "name": "focus",
+          "desc": "聚焦类型",
+          "type": "string"
+        },
+        {
+          "name": "instruction",
+          "desc": "聚焦指令",
+          "type": "string"
+        },
+        {
+          "name": "description",
+          "desc": "节拍内容描述",
+          "type": "string"
+        },
+        {
+          "name": "anchor_line",
+          "desc": "环境锚点轮转行",
+          "type": "string"
+        },
+        {
+          "name": "obligation",
+          "desc": "叙事义务",
+          "type": "string"
+        }
+      ],
+      "owner": "native",
+      "runtime_status": "active",
+      "runtime_reader": "prompt_manager",
+      "authority_domain": "chapter_generation",
+      "editable": true
     },
     {
       "id": "workflow-chapter-generation",
@@ -1290,16 +1512,63 @@
       "system_template": "你是一位专业的网络小说作家。根据以下上下文撰写章节内容。\n\n{planning_section}{voice_block}{context}\n\n{fact_lock}\n写作要求：\n1. 必须有多个人物互动（至少2-3个角色出场）\n2. 必须有对话（不能只有独白和叙述）\n3. 必须有冲突或张力（人物之间的矛盾、目标阻碍、悬念等）\n4. 保持人物性格一致\n5. 推进情节发展\n6. 使用生动的场景描写和细节\n{length_rule}\n8. 用中文写作，使用第三人称叙事{beat_extra}",
       "user_template": "请根据以下大纲撰写本章内容：\n\n{outline}\n\n关键要求（必须遵守）：\n- 至少2-3个角色出场并互动\n- 必须包含对话场景（不少于3段对话）\n- 必须有明确的冲突或戏剧张力\n- 场景要具体生动，不要空泛叙述\n- 推进主线情节，不要原地踏步\n- 结尾要有悬念或转折{prior_draft}{beat_section}",
       "variables": [
-        {"name": "planning_section", "desc": "故事线/张力/风格约束块", "type": "string", "default": ""},
-        {"name": "voice_block", "desc": "角色声线与肢体语言锚点", "type": "string", "default": ""},
-        {"name": "context", "desc": "完整上下文（Bible摘要+前情提要）", "type": "string"},
-        {"name": "fact_lock", "desc": "记忆引擎事实锁块", "type": "string", "default": ""},
-        {"name": "length_rule", "desc": "字数规则（第7条）", "type": "string"},
-        {"name": "beat_extra", "desc": "节拍模式附加说明（第9条）", "type": "string", "default": ""},
-        {"name": "outline", "desc": "章节大纲", "type": "string"},
-        {"name": "prior_draft", "desc": "本章已生成正文（续写模式）", "type": "string", "default": ""},
-        {"name": "beat_section", "desc": "当前节拍说明", "type": "string", "default": ""}
-      ]
+        {
+          "name": "planning_section",
+          "desc": "故事线/张力/风格约束块",
+          "type": "string",
+          "default": ""
+        },
+        {
+          "name": "voice_block",
+          "desc": "角色声线与肢体语言锚点",
+          "type": "string",
+          "default": ""
+        },
+        {
+          "name": "context",
+          "desc": "完整上下文（Bible摘要+前情提要）",
+          "type": "string"
+        },
+        {
+          "name": "fact_lock",
+          "desc": "记忆引擎事实锁块",
+          "type": "string",
+          "default": ""
+        },
+        {
+          "name": "length_rule",
+          "desc": "字数规则（第7条）",
+          "type": "string"
+        },
+        {
+          "name": "beat_extra",
+          "desc": "节拍模式附加说明（第9条）",
+          "type": "string",
+          "default": ""
+        },
+        {
+          "name": "outline",
+          "desc": "章节大纲",
+          "type": "string"
+        },
+        {
+          "name": "prior_draft",
+          "desc": "本章已生成正文（续写模式）",
+          "type": "string",
+          "default": ""
+        },
+        {
+          "name": "beat_section",
+          "desc": "当前节拍说明",
+          "type": "string",
+          "default": ""
+        }
+      ],
+      "owner": "native",
+      "runtime_status": "active",
+      "runtime_reader": "prompt_manager",
+      "authority_domain": "chapter_generation",
+      "editable": true
     }
   ]
 }

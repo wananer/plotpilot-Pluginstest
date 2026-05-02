@@ -19,6 +19,7 @@ from application.ai.llm_control_service import (
 )
 from infrastructure.ai.provider_factory import LLMProviderFactory
 from infrastructure.ai.prompt_manager import get_prompt_manager
+from infrastructure.ai.prompt_resolver import resolve_prompt
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix='/llm-control', tags=['llm-control'])
@@ -199,6 +200,11 @@ class PromptUpdateRequest(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
     tags: Optional[List[str]] = None
+    owner: Optional[str] = None
+    runtime_status: Optional[str] = None
+    authority_domain: Optional[str] = None
+    runtime_reader: Optional[str] = None
+    editable: Optional[bool] = None
     change_summary: str = ""
 
 
@@ -216,6 +222,11 @@ class CreateNodeRequest(BaseModel):
     category: str = "generation"
     system: str = ""
     user_template: str = ""
+    owner: str = "native"
+    runtime_status: str = "asset"
+    authority_domain: str = ""
+    runtime_reader: str = "prompt_manager"
+    editable: bool = True
 
 
 class CreateTemplateRequest(BaseModel):
@@ -346,6 +357,11 @@ async def export_prompts() -> Dict[str, Any]:
                 "output_format": detail.get("output_format", "text"),
                 "contract_module": detail.get("contract_module"),
                 "contract_model": detail.get("contract_model"),
+                "owner": detail.get("owner", "native"),
+                "runtime_status": detail.get("runtime_status", "asset"),
+                "authority_domain": detail.get("authority_domain", ""),
+                "runtime_reader": detail.get("runtime_reader", "hardcoded"),
+                "editable": detail.get("editable", True),
                 "system": detail.get("system", ""),
                 "user_template": detail.get("user_template", ""),
             }
@@ -422,6 +438,11 @@ async def import_prompts(payload: ImportPayload) -> Dict[str, Any]:
                 "contract_model",
                 "source",
                 "category",
+                "owner",
+                "runtime_status",
+                "authority_domain",
+                "runtime_reader",
+                "editable",
             ):
                 if k in p:
                     meta[k] = p.get(k)
@@ -451,6 +472,11 @@ async def import_prompts(payload: ImportPayload) -> Dict[str, Any]:
                     source=p.get("source", ""),
                     contract_module=p.get("contract_module"),
                     contract_model=p.get("contract_model"),
+                    owner=p.get("owner", "native"),
+                    runtime_status=p.get("runtime_status", "asset"),
+                    authority_domain=p.get("authority_domain", ""),
+                    runtime_reader=p.get("runtime_reader", "prompt_manager"),
+                    editable=p.get("editable", True),
                 )
                 created_count += 1
 
@@ -513,6 +539,11 @@ async def create_node(payload: CreateNodeRequest) -> Dict[str, Any]:
         user_template=payload.user_template,
         description=payload.description,
         category=payload.category,
+        owner=payload.owner,
+        runtime_status=payload.runtime_status,
+        authority_domain=payload.authority_domain,
+        runtime_reader=payload.runtime_reader,
+        editable=payload.editable,
     )
     return {"status": "ok", "node": node.to_dict()}
 
@@ -574,6 +605,11 @@ async def update_node(node_key: str, payload: PromptUpdateRequest) -> Dict[str, 
         name=payload.name,
         description=payload.description,
         tags=payload.tags,
+        owner=payload.owner,
+        runtime_status=payload.runtime_status,
+        authority_domain=payload.authority_domain,
+        runtime_reader=payload.runtime_reader,
+        editable=payload.editable,
     )
     return {
         "status": "ok",
@@ -624,7 +660,8 @@ async def render_prompt(
     """渲染指定提示词（传入变量，返回渲染后的 system/user）。"""
     mgr = get_prompt_manager()
     mgr.ensure_seeded()
-    result = mgr.render(node_key, payload.variables)
-    if result is None:
+    node = mgr.get_node(node_key, by_key=True)
+    if node is None:
         raise HTTPException(status_code=404, detail=f"Prompt '{node_key}' not found")
-    return result
+    resolved = resolve_prompt(node_key, payload.variables)
+    return {"system": resolved.system, "user": resolved.user}

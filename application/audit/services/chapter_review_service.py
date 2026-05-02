@@ -152,31 +152,38 @@ class ChapterReviewService:
         issues: List[ConsistencyIssue] = []
         plugin_review_context = await self._collect_plugin_review_context(novel_id, chapter)
 
-        # 1. 人物一致性检查
-        character_issues = await self._check_character_consistency(novel_id, chapter, plugin_review_context)
-        issues.extend(character_issues)
-
-        # 2. 时间线一致性检查
-        timeline_issues = await self._check_timeline_consistency(novel_id, chapter, plugin_review_context)
-        issues.extend(timeline_issues)
-
-        # 3. 故事线连贯性检查
-        storyline_issues = await self._check_storyline_consistency(novel_id, chapter, plugin_review_context)
-        issues.extend(storyline_issues)
-
-        # 4. 伏笔使用检查
-        foreshadowing_issues = await self._check_foreshadowing_usage(novel_id, chapter, plugin_review_context)
-        issues.extend(foreshadowing_issues)
-
-        # 5. 插件协作审稿（如 Evolution 人物认知/成长/逻辑补强）
-        plugin_issues, plugin_suggestions = await self._review_with_plugins(novel_id, chapter)
+        # 1. 插件协作审稿优先；Evolution 启用时作为连续性/路线/认知边界权威检查。
+        plugin_issues, plugin_suggestions, evolution_reviewed = await self._review_with_plugins_detailed(novel_id, chapter)
         issues.extend(plugin_issues)
 
-        # 6. 生成改进建议
+        if not evolution_reviewed:
+            # 2. 插件不可用时使用原生审稿作为 fallback。
+            character_issues = await self._check_character_consistency(novel_id, chapter, plugin_review_context)
+            issues.extend(character_issues)
+
+            timeline_issues = await self._check_timeline_consistency(novel_id, chapter, plugin_review_context)
+            issues.extend(timeline_issues)
+
+            storyline_issues = await self._check_storyline_consistency(novel_id, chapter, plugin_review_context)
+            issues.extend(storyline_issues)
+
+            foreshadowing_issues = await self._check_foreshadowing_usage(novel_id, chapter, plugin_review_context)
+            issues.extend(foreshadowing_issues)
+        else:
+            # Evolution 覆盖连续性、路线、认知/能力边界；原生只补充尚未被接管的伏笔机会检查。
+            foreshadowing_issues = await self._check_foreshadowing_usage(novel_id, chapter, plugin_review_context)
+            issues.extend(foreshadowing_issues)
+            logger.debug(
+                "章节审稿由 Evolution 接管，原生审稿仅补充伏笔检查 novel=%s ch=%s",
+                novel_id,
+                chapter_number,
+            )
+
+        # 3. 生成改进建议
         improvement_suggestions = await self._generate_improvement_suggestions(chapter, issues)
         improvement_suggestions.extend(plugin_suggestions)
 
-        # 7. 计算总体评分
+        # 4. 计算总体评分
         overall_score = self._calculate_overall_score(issues)
 
         result = ChapterReviewResult(
@@ -226,6 +233,11 @@ class ChapterReviewService:
             logger.warning("Plugin after_chapter_review notification failed: %s", exc)
 
     async def _review_with_plugins(self, novel_id: str, chapter: Chapter) -> tuple[List[ConsistencyIssue], List[str]]:
+        """Backward-compatible plugin review contribution API."""
+        issues, suggestions, _ = await self._review_with_plugins_detailed(novel_id, chapter)
+        return issues, suggestions
+
+    async def _review_with_plugins_detailed(self, novel_id: str, chapter: Chapter) -> tuple[List[ConsistencyIssue], List[str], bool]:
         """Collect plugin review contributions through the plugin platform."""
         plugin_results = await review_chapter_with_plugins(
             novel_id,
@@ -235,9 +247,12 @@ class ChapterReviewService:
         )
         issues: List[ConsistencyIssue] = []
         suggestions: List[str] = []
+        evolution_reviewed = False
         for result in plugin_results:
             if not result.get("ok", True) or result.get("skipped"):
                 continue
+            if result.get("plugin_name") == "world_evolution_core":
+                evolution_reviewed = True
             data = result.get("data") or {}
             plugin_name = result.get("plugin_name") or "plugin"
             for item in data.get("issues") or []:
@@ -259,7 +274,7 @@ class ChapterReviewService:
                     )
                 )
             suggestions.extend(str(item) for item in (data.get("suggestions") or []) if str(item).strip())
-        return issues, suggestions
+        return issues, suggestions, evolution_reviewed
 
     async def _check_character_consistency(
         self,

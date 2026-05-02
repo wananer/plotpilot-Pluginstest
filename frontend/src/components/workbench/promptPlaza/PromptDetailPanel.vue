@@ -7,11 +7,19 @@
           {{ nodeDetail?.is_builtin ? '内置' : '自定义' }}
         </n-tag>
         <n-tag v-if="nodeDetail?.output_format === 'json'" type="success" size="small" :bordered="false">JSON</n-tag>
+        <n-tag :type="runtimeTagType" size="small" :bordered="false">{{ runtimeLabel }}</n-tag>
+        <n-tag v-if="nodeDetail?.owner?.startsWith('plugin:')" type="success" size="small" :bordered="false">插件</n-tag>
+        <n-tag v-if="isEvolutionTakeover" type="success" size="small" :bordered="false">Evolution接管</n-tag>
         <span class="version-info">共 {{ nodeDetail?.version_count || 0 }} 个版本</span>
+      </div>
+      <div class="runtime-grid">
+        <span>Owner: <code>{{ nodeDetail?.owner || 'native' }}</code></span>
+        <span>Domain: <code>{{ nodeDetail?.authority_domain || '-' }}</code></span>
+        <span>Reader: <code>{{ nodeDetail?.runtime_reader || '-' }}</code></span>
       </div>
       <p class="meta-tip">
         <span class="meta-tip-icon" aria-hidden="true">✎</span>
-        内置与自定义提示词<strong>均可直接修改</strong>；点「保存为新版本」写入数据库，历史保留在「版本历史」中，可随时回滚。
+        生效节点会被运行时读取；资产节点只作为提示词库管理。点「保存为新版本」写入数据库，历史保留在「版本历史」中，可随时回滚。
       </p>
       <p class="desc-text">{{ nodeDetail?.description || '（无描述）' }}</p>
       <div class="source-line" v-if="nodeDetail?.source">
@@ -233,6 +241,27 @@ const selectedVersionFull = ref<PromptVersionDetail | null>(null)
 
 const variables = computed<PromptVariable[]>(() => nodeDetail.value?.variables || [])
 
+const runtimeLabel = computed(() => {
+  const status = nodeDetail.value?.runtime_status || 'asset'
+  if (status === 'active') return '运行生效'
+  if (status === 'fallback') return '兜底'
+  if (status === 'deprecated') return '废弃'
+  return '资产'
+})
+
+const runtimeTagType = computed(() => {
+  const status = nodeDetail.value?.runtime_status || 'asset'
+  if (status === 'active') return 'success'
+  if (status === 'fallback') return 'warning'
+  if (status === 'deprecated') return 'error'
+  return 'default'
+})
+
+const isEvolutionTakeover = computed(() => (
+  nodeDetail.value?.owner === 'plugin:world_evolution_core' &&
+  (nodeDetail.value?.runtime_status || 'asset') === 'active'
+))
+
 // ---- 方法 ----
 
 async function loadDetail() {
@@ -410,6 +439,18 @@ onMounted(() => { loadDetail() })
   color: var(--app-text-muted);
   margin-left: auto;
   font-weight: 500;
+}
+.runtime-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  margin: 0 0 10px;
+  font-size: 11.5px;
+  color: var(--app-text-muted);
+}
+.runtime-grid code {
+  font-family: var(--font-mono);
+  color: var(--app-text-secondary);
 }
 .meta-tip {
   display: flex;

@@ -6,6 +6,8 @@ import re
 from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol
 
+from infrastructure.ai.prompt_resolver import resolve_prompt
+
 if TYPE_CHECKING:
     from domain.ai.services.llm_service import LLMService
 else:
@@ -262,8 +264,6 @@ def _create_active_llm_service() -> LLMService:
 
 
 def _build_structured_extraction_prompt(request: dict[str, Any]) -> Any:
-    from domain.ai.value_objects.prompt import Prompt
-
     schema = request.get("schema") or STRUCTURED_EXTRACTION_SCHEMA
     chapter_number = request.get("chapter_number")
     content = str(request.get("content") or "")
@@ -292,7 +292,16 @@ JSON schema:
 正文：
 {content[:12000]}
 """
-    return Prompt(system=system, user=user)
+    return resolve_prompt(
+        "plugin.world_evolution_core.structured-extraction",
+        {
+            "chapter_number": chapter_number,
+            "schema": json.dumps(schema, ensure_ascii=False),
+            "content": content[:12000],
+        },
+        fallback_system=system,
+        fallback_user=user,
+    ).to_prompt()
 
 
 def _parse_llm_json(raw: str) -> tuple[dict[str, Any] | None, list[str]]:

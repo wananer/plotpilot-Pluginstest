@@ -318,8 +318,7 @@ class ContextBuilder:
         else:
             obligation = "叙事义务：推进情节或深化人物。"
 
-        # 使用 PromptLoader 渲染模板
-        return loader.render(self._BEAT_PROMPT_ID, template_field="user_template", variables={
+        variables = {
             "beat_index": beat_index + 1,
             "total_beats": total_beats,
             "target_words": beat.target_words,
@@ -328,4 +327,13 @@ class ContextBuilder:
             "description": beat.description,
             "anchor_line": anchor_line,
             "obligation": obligation,
-        })
+        }
+        fallback = loader.render(self._BEAT_PROMPT_ID, template_field="user_template", variables=variables)
+        from infrastructure.ai.prompt_resolver import resolve_prompt
+
+        return resolve_prompt(
+            self._BEAT_PROMPT_ID,
+            variables,
+            fallback_system="你是节拍聚焦指令渲染器。",
+            fallback_user=fallback,
+        ).user

@@ -17,7 +17,7 @@ from application.ai.tension_scoring_contract import (
     tension_scoring_response_format,
 )
 from application.ai.structured_json_pipeline import structured_json_generate
-from infrastructure.ai.prompt_manager import get_prompt_manager
+from infrastructure.ai.prompt_resolver import resolve_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -73,9 +73,10 @@ class TensionScoringService:
         if len(body) > _MAX_CONTENT_LENGTH:
             body = body[:_MAX_CONTENT_LENGTH] + "\n\n…（正文过长已截断）"
 
-        prompt = Prompt(
-            system=self._build_system_prompt(prev_chapter_tension),
-            user=f"第 {chapter_number} 章正文如下：\n\n{body}",
+        prompt = self._build_prompt(
+            body,
+            chapter_number=chapter_number,
+            prev_tension=prev_chapter_tension,
         )
         config = GenerationConfig(
             max_tokens=512,
@@ -112,11 +113,13 @@ class TensionScoringService:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _build_system_prompt(prev_tension: float) -> str:
-        mgr = get_prompt_manager()
-        mgr.ensure_seeded()
+    def _build_prompt(content: str, *, chapter_number: int, prev_tension: float) -> Prompt:
         prev = f"{prev_tension:.0f}"
-        rendered = mgr.render("tension-scoring", {"prev_tension": prev})
-        if rendered and (rendered.get("system") or "").strip():
-            return rendered["system"]
-        return _FALLBACK_TEMPLATE.format(prev_tension=prev)
+        fallback_system = _FALLBACK_TEMPLATE.format(prev_tension=prev)
+        fallback_user = f"第 {chapter_number} 章正文如下：\n\n{content}"
+        return resolve_prompt(
+            "tension-scoring",
+            {"prev_tension": prev, "content": content, "chapter_number": chapter_number},
+            fallback_system=fallback_system,
+            fallback_user=fallback_user,
+        ).to_prompt()

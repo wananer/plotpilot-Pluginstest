@@ -14,6 +14,7 @@ from typing import Any, Callable, Optional
 from urllib.parse import urlparse, urlunparse
 
 from application.ai.llm_audit import audit_generate_call
+from infrastructure.ai.prompt_resolver import resolve_prompt
 
 from .agent_assets import build_reflection_record
 
@@ -86,10 +87,12 @@ class AgentRuntime:
         started_at = _now()
         try:
             llm_service = self.resolve_llm_service(settings)
-            prompt = make_text_prompt(
-                system="你是 Evolution Agent Orchestrator。只输出 JSON，不写正文，不泄露密钥。",
-                user=prompt_text,
-            )
+            prompt = resolve_prompt(
+                "plugin.world_evolution_core.agent-decision",
+                {"prompt_text": prompt_text},
+                fallback_system="你是 Evolution Agent Orchestrator。只输出 JSON，不写正文，不泄露密钥。",
+                fallback_user=prompt_text,
+            ).to_prompt()
             config = make_generation_config(
                 model=str(settings.get("model") or ""),
                 max_tokens=_clamp_int(settings.get("max_tokens"), 256, 4096, 1200),
@@ -358,17 +361,12 @@ def gemini_models_base(base_url: str) -> str:
 
 
 def build_llm_connection_test_prompt() -> Any:
-    try:
-        from domain.ai.value_objects.prompt import Prompt
-
-        return Prompt(system="你是 API 连接测试器。", user="请只回复 OK 两个字母，不要添加任何解释。")
-    except Exception:
-        class PromptFallback:
-            def __init__(self) -> None:
-                self.system = "你是 API 连接测试器。"
-                self.user = "请只回复 OK 两个字母，不要添加任何解释。"
-
-        return PromptFallback()
+    return resolve_prompt(
+        "plugin.world_evolution_core.connection-test",
+        {},
+        fallback_system="你是 API 连接测试器。",
+        fallback_user="请只回复 OK 两个字母，不要添加任何解释。",
+    ).to_prompt()
 
 
 def build_agent_reflection_prompt(*, chapter_number: int, capsules: list[dict[str, Any]], issues: list[dict[str, Any]]) -> Any:
@@ -408,17 +406,16 @@ def build_agent_reflection_prompt(*, chapter_number: int, capsules: list[dict[st
 2. 不复述完整剧情。
 3. 不新增事实设定。
 4. 优先处理章节承接、人物路线、认知边界、能力边界、性格调色盘。"""
-    try:
-        from domain.ai.value_objects.prompt import Prompt
-
-        return Prompt(system=system, user=user)
-    except Exception:
-        class PromptFallback:
-            def __init__(self) -> None:
-                self.system = system
-                self.user = user
-
-        return PromptFallback()
+    return resolve_prompt(
+        "plugin.world_evolution_core.agent-reflection",
+        {
+            "chapter_number": chapter_number,
+            "capsule_lines": capsule_lines or "无",
+            "issue_lines": issue_lines or "无",
+        },
+        fallback_system=system,
+        fallback_user=user,
+    ).to_prompt()
 
 
 def parse_agent_json(content: str) -> dict[str, Any]:

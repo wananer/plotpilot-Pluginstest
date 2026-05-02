@@ -875,8 +875,14 @@ class ContextBudgetAllocator:
                     mentioned_names.add(char.name)
         
         # 如果有场记分析，合并场记中的角色
-        if scene_director and scene_director.get("characters"):
-            mentioned_names.update(scene_director["characters"])
+        scene_characters = []
+        if scene_director:
+            if isinstance(scene_director, dict):
+                scene_characters = scene_director.get("characters") or []
+            else:
+                scene_characters = getattr(scene_director, "characters", []) or []
+        if scene_characters:
+            mentioned_names.update(scene_characters)
         
         # Step 2: 从 chapter_elements 表查询最近出场的角色
         recent_characters = self._get_recent_characters(novel_id, chapter_number)
@@ -1653,10 +1659,7 @@ class ContextBudgetAllocator:
         directives = self._get_phase_directives()
         base_directive = directives.get(phase, "")
 
-        directive = f"{base_directive}\n\n"
-        directive += f"——\n"
-        directive += f"📊 全局进度：第 {chapter_number} 章 / 约 {total} 章 ({progress:.0%})\n"
-        directive += f"🎯 当前阶段：{phase.value}\n"
+        extra_hint = ""
 
         from infrastructure.ai.prompt_loader import get_prompt_loader
         loader = get_prompt_loader()
@@ -1664,10 +1667,31 @@ class ContextBudgetAllocator:
         if phase == StoryPhase.CONVERGENCE:
             remaining = total - chapter_number
             extra_tpl = loader.get_field(self._LIFECYCLE_PROMPT_ID, "_convergence_extra", "")
-            directive += (extra_tpl.format(remaining=remaining) if extra_tpl else f"⚠️ 剩余约 {remaining} 章完成收束，时间紧迫。\n")
+            extra_hint = extra_tpl.format(remaining=remaining) if extra_tpl else f"⚠️ 剩余约 {remaining} 章完成收束，时间紧迫。\n"
         elif phase == StoryPhase.FINALE:
             remaining = total - chapter_number
             extra_tpl = loader.get_field(self._LIFECYCLE_PROMPT_ID, "_finale_extra", "")
-            directive += (extra_tpl.format(remaining=remaining) if extra_tpl else f"🔥 剩余约 {remaining} 章，这是最后的冲刺。\n")
+            extra_hint = extra_tpl.format(remaining=remaining) if extra_tpl else f"🔥 剩余约 {remaining} 章，这是最后的冲刺。\n"
 
-        return directive
+        fallback = (
+            f"{base_directive}\n\n"
+            "——\n"
+            f"📊 全局进度：第 {chapter_number} 章 / 约 {total} 章 ({progress:.0%})\n"
+            f"🎯 当前阶段：{phase.value}\n"
+            f"{extra_hint}"
+        )
+        from infrastructure.ai.prompt_resolver import resolve_prompt
+
+        return resolve_prompt(
+            self._LIFECYCLE_PROMPT_ID,
+            {
+                "directive": base_directive,
+                "chapter_number": chapter_number,
+                "total_chapters": total,
+                "progress_pct": f"{progress:.0%}",
+                "phase_name": phase.value,
+                "extra_hint": extra_hint,
+            },
+            fallback_system="你是全局收敛沙漏指令渲染器。",
+            fallback_user=fallback,
+        ).user

@@ -103,36 +103,61 @@ class ChapterAftermathPipeline:
             logger.debug("aftermath 跳过：正文为空 novel=%s ch=%s", novel_id, chapter_number)
             return out
 
-        # 1) 叙事 + 向量 + 故事线 + 张力 + 对话（与 chapter_narrative_sync 一致）
-        try:
-            from application.world.services.chapter_narrative_sync import (
-                sync_chapter_narrative_after_save,
-            )
+        # 1) 插件平台 after_commit：Evolution 成功时作为章节事实权威源。
+        plugin_results = await notify_chapter_committed(
+            novel_id,
+            chapter_number,
+            content,
+            source="chapter_aftermath_pipeline",
+        )
+        out["plugin_after_commit_ok"] = all(result.get("ok", True) for result in plugin_results)
+        out["plugin_after_commit_results"] = plugin_results
+        evolution_authoritative = any(
+            result.get("plugin_name") == "world_evolution_core"
+            and result.get("ok", True)
+            and not result.get("skipped")
+            for result in plugin_results
+        )
 
-            sync_flags = await sync_chapter_narrative_after_save(
-                novel_id,
-                chapter_number,
-                content,
-                self._knowledge,
-                self._indexing,
-                self._llm,
-                triple_repository=self._triple_repository,
-                foreshadowing_repo=self._foreshadowing_repository,
-                storyline_repository=self._storyline_repository,
-                chapter_repository=self._chapter_repository,
-                plot_arc_repository=self._plot_arc_repository,
-                narrative_event_repository=self._narrative_event_repository,
-            )
+        # 2) 原生叙事 + 向量 + 故事线 + 张力 + 对话：
+        # Evolution 成功时跳过，避免章节事实抽取和图谱写入重复；插件不可用时作为 fallback。
+        if evolution_authoritative:
             out["narrative_sync_ok"] = True
-            out["vector_stored"] = bool(sync_flags.get("vector_stored"))
-            out["foreshadow_stored"] = bool(sync_flags.get("foreshadow_stored"))
-            out["triples_extracted"] = bool(sync_flags.get("triples_extracted"))
-        except Exception as e:
-            logger.warning(
-                "叙事同步/向量失败 novel=%s ch=%s: %s", novel_id, chapter_number, e
+            out["narrative_sync_source"] = "evolution"
+            logger.debug(
+                "叙事同步由 Evolution 接管 novel=%s ch=%s", novel_id, chapter_number
             )
+        else:
+            try:
+                from application.world.services.chapter_narrative_sync import (
+                    sync_chapter_narrative_after_save,
+                )
 
-        # 2) 文风（落库 chapter_style_scores）
+                sync_flags = await sync_chapter_narrative_after_save(
+                    novel_id,
+                    chapter_number,
+                    content,
+                    self._knowledge,
+                    self._indexing,
+                    self._llm,
+                    triple_repository=self._triple_repository,
+                    foreshadowing_repo=self._foreshadowing_repository,
+                    storyline_repository=self._storyline_repository,
+                    chapter_repository=self._chapter_repository,
+                    plot_arc_repository=self._plot_arc_repository,
+                    narrative_event_repository=self._narrative_event_repository,
+                )
+                out["narrative_sync_ok"] = True
+                out["narrative_sync_source"] = "native_fallback"
+                out["vector_stored"] = bool(sync_flags.get("vector_stored"))
+                out["foreshadow_stored"] = bool(sync_flags.get("foreshadow_stored"))
+                out["triples_extracted"] = bool(sync_flags.get("triples_extracted"))
+            except Exception as e:
+                logger.warning(
+                    "叙事同步/向量失败 novel=%s ch=%s: %s", novel_id, chapter_number, e
+                )
+
+        # 3) 文风（落库 chapter_style_scores）
         # 支持 LLM 模式（异步）和统计模式（同步）
         if self._voice:
             try:
@@ -162,17 +187,7 @@ class ChapterAftermathPipeline:
             except Exception as e:
                 logger.warning("文风评分失败 novel=%s ch=%s: %s", novel_id, chapter_number, e)
 
-        # 3) 结构树 KG 推断
+        # 4) 结构树 KG 推断
         await infer_kg_from_chapter(novel_id, chapter_number)
-
-        # 4) 插件平台 after_commit：由平台分发给已安装插件
-        plugin_results = await notify_chapter_committed(
-            novel_id,
-            chapter_number,
-            content,
-            source="chapter_aftermath_pipeline",
-        )
-        out["plugin_after_commit_ok"] = all(result.get("ok", True) for result in plugin_results)
-        out["plugin_after_commit_results"] = plugin_results
 
         return out

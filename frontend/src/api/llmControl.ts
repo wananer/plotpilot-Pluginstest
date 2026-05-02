@@ -142,6 +142,11 @@ export interface PromptNode {
   variables: PromptVariable[]
   variable_names: string[]
   system_file: string | null
+  owner: string
+  runtime_status: 'active' | 'fallback' | 'asset' | 'deprecated' | string
+  authority_domain: string
+  runtime_reader: string
+  editable: boolean
   is_builtin: boolean
   sort_order: number
   template_id: string
@@ -208,6 +213,11 @@ export interface PromptUpdatePayload {
   name?: string
   description?: string
   tags?: string[]
+  owner?: string
+  runtime_status?: string
+  authority_domain?: string
+  runtime_reader?: string
+  editable?: boolean
   change_summary?: string
 }
 
@@ -219,6 +229,11 @@ export interface CreateNodePayload {
   category?: string
   system?: string
   user_template?: string
+  owner?: string
+  runtime_status?: string
+  authority_domain?: string
+  runtime_reader?: string
+  editable?: boolean
 }
 
 export interface CreateTemplatePayload {

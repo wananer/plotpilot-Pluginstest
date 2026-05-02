@@ -1271,38 +1271,32 @@ class AutopilotDaemon:
         except Exception as e:
             logger.warning(f"[{novel_id}] 宏观诊断后台任务失败: {e}", exc_info=True)
 
-    async def _score_tension(self, content: str, *, novel_id: str = "", chapter_number: int | None = None) -> int:
+    async def _score_tension(self, content: str, *, novel_id: str = "", chapter_number: Optional[int] = None) -> int:
         """给章节打张力分（1-10），用于判断是否插入缓冲章"""
         if not content or len(content) < 200:
             return 5  # 默认中等张力
 
-        snippet = content[:500]  # 只取前 500 字，节省 token
-
         try:
-            prompt = Prompt(
-                system="你是小说节奏分析师，只输出一个 1-10 的整数，不要解释。",
-                user=f"""根据以下章节开头，打分当前剧情的张力值（1=日常/轻松，10=生死对决/高潮）：
+            from application.analyst.services.tension_scoring_service import TensionScoringService
 
-{snippet}
-
-张力分（只输出数字）："""
-            )
-            config = GenerationConfig(max_tokens=5, temperature=0.1)
             with llm_audit_context(
                 novel_id=novel_id,
                 chapter_number=chapter_number,
-                phase="chapter_narrative_sync",
+                phase="chapter_tension_scoring",
                 source="autopilot_daemon._score_tension",
             ):
-                result = await self.llm_service.generate(prompt, config)
-            raw = result.content.strip() if hasattr(result, "content") else str(result).strip()
-            score = int(''.join(filter(str.isdigit, raw[:3])))
-            return max(1, min(10, score))
-        except Exception:
+                dims = await TensionScoringService(self.llm_service).score_chapter(
+                    content[:24000],
+                    chapter_number=chapter_number or 0,
+                    prev_chapter_tension=50.0,
+                )
+            return max(1, min(10, round(dims.composite_score / 10)))
+        except Exception as exc:
+            logger.debug("张力评分降级为默认值: %s", exc)
             return 5  # 解析失败，返回默认值
 
     async def _stream_llm_with_stop_watch(
-        self, prompt: Prompt, config: GenerationConfig, novel=None, chapter_number: int | None = None
+        self, prompt: Prompt, config: GenerationConfig, novel=None, chapter_number: Optional[int] = None
     ) -> str:
         """与 workflow 共用同一套 Prompt + LLM；novel 传入时并行轮询 DB 是否已停止。
         
@@ -1371,7 +1365,7 @@ class AutopilotDaemon:
         outline: str,
         chapter_draft_so_far: str,
         novel=None,
-        chapter_number: int | None = None,
+        chapter_number: Optional[int] = None,
     ) -> str:
         """V8: 截断检测与自动续写（软着陆）
 
@@ -1453,7 +1447,7 @@ class AutopilotDaemon:
         novel=None,
         voice_anchors: str = "",
         chapter_draft_so_far: str = "",
-        chapter_number: int | None = None,
+        chapter_number: Optional[int] = None,
     ) -> str:
         """无 AutoNovelGenerationWorkflow 时的降级：爽文短 Prompt + 流式。"""
         va = (voice_anchors or "").strip()

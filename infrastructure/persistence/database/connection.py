@@ -228,6 +228,29 @@ def _apply_chapter_summaries_enhancements(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _apply_prompt_registry_columns(conn: sqlite3.Connection) -> None:
+    """为提示词广场补齐运行时注册元数据列（幂等）。"""
+    cur = conn.execute("PRAGMA table_info(prompt_nodes)")
+    cols = {row[1] for row in cur.fetchall()}
+    if not cols:
+        return
+    migrations = {
+        "owner": "ALTER TABLE prompt_nodes ADD COLUMN owner TEXT NOT NULL DEFAULT 'native'",
+        "runtime_status": "ALTER TABLE prompt_nodes ADD COLUMN runtime_status TEXT NOT NULL DEFAULT 'asset'",
+        "authority_domain": "ALTER TABLE prompt_nodes ADD COLUMN authority_domain TEXT NOT NULL DEFAULT ''",
+        "runtime_reader": "ALTER TABLE prompt_nodes ADD COLUMN runtime_reader TEXT NOT NULL DEFAULT 'hardcoded'",
+        "editable": "ALTER TABLE prompt_nodes ADD COLUMN editable INTEGER NOT NULL DEFAULT 1",
+    }
+    for col, sql in migrations.items():
+        if col not in cols:
+            try:
+                conn.execute(sql)
+                logger.info("prompt_nodes migration: added column %s", col)
+            except sqlite3.OperationalError as e:
+                logger.warning("prompt_nodes migration skip %s: %s", col, e)
+    conn.commit()
+
+
 
 def _apply_migration_files(conn: sqlite3.Connection) -> None:
     """应用 migrations 目录下全部 .sql（幂等执行，依赖优先于文件名排序）。"""
@@ -338,6 +361,7 @@ class DatabaseConnection:
         _apply_last_chapter_audit_columns(conn)
         _apply_character_enhancements(conn)
         _apply_chapter_summaries_enhancements(conn)
+        _apply_prompt_registry_columns(conn)
         _ensure_triple_provenance_table(conn)
         _apply_migration_files(conn)
         conn.close()

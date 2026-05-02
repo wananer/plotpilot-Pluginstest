@@ -16,6 +16,17 @@
           type="warning"
           :bordered="false"
         >已修改</n-tag>
+        <n-tag
+          size="tiny"
+          :type="runtimeTagType"
+          :bordered="false"
+        >{{ runtimeLabel }}</n-tag>
+        <n-tag
+          v-if="isEvolutionTakeover"
+          size="tiny"
+          type="success"
+          :bordered="false"
+        >Evolution接管</n-tag>
       </div>
       <div class="card-key">{{ node.node_key }}</div>
     </div>
@@ -60,6 +71,7 @@
         {{ sourceLabel }}
       </span>
       <span v-if="node.is_builtin" class="builtin-badge">内置</span>
+      <span v-if="node.owner?.startsWith('plugin:')" class="plugin-badge">插件</span>
     </div>
   </div>
 </template>
@@ -78,6 +90,27 @@ defineEmits<{
 }>()
 
 const displayedVars = computed(() => props.node.variable_names.slice(0, 3))
+
+const runtimeLabel = computed(() => {
+  const status = props.node.runtime_status || 'asset'
+  if (status === 'active') return '生效'
+  if (status === 'fallback') return '兜底'
+  if (status === 'deprecated') return '废弃'
+  return '资产'
+})
+
+const runtimeTagType = computed(() => {
+  const status = props.node.runtime_status || 'asset'
+  if (status === 'active') return 'success'
+  if (status === 'fallback') return 'warning'
+  if (status === 'deprecated') return 'error'
+  return 'default'
+})
+
+const isEvolutionTakeover = computed(() => (
+  props.node.owner === 'plugin:world_evolution_core' &&
+  (props.node.runtime_status || 'asset') === 'active'
+))
 
 const sourceLabel = computed(() => {
   const src = props.node.source
@@ -203,5 +236,13 @@ const sourceLabel = computed(() => {
   border-radius: 4px;
   font-weight: 600;
   letter-spacing: 0.5px;
+}
+.plugin-badge {
+  font-size: 10px;
+  background: rgba(20, 184, 166, 0.14);
+  color: #0f766e;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-weight: 600;
 }
 </style>

@@ -928,13 +928,16 @@ class AutoNovelGenerationWorkflow:
 - 推进主线情节，不要原地踏步
 - 结尾要有悬念或转折"""
 
+        prior_draft_section = ""
         if beat_mode and prior_in_chapter:
-            user_message += f"""
+            prior_draft_section = f"""
 
 【本章已生成正文（仅承接；禁止复述、改写或重复已交代的情节与对白；勿写章节标题）】
 {prior_in_chapter}
 """
+            user_message += prior_draft_section
 
+        beat_section = ""
         if beat_mode:
             bi = beat_index if beat_index is not None else 0
             tb = total_beats if total_beats is not None else 1
@@ -943,16 +946,35 @@ class AutoNovelGenerationWorkflow:
                 if prior_in_chapter
                 else "本段只写该节拍对应正文，与全章其它节拍情节连贯。"
             )
-            user_message += f"""
+            beat_section = f"""
 
 【节拍 {bi + 1}/{tb}】
 {(beat_prompt or '').strip()}
 
 {beat_tail}"""
+            user_message += beat_section
 
         user_message += "\n\n开始撰写："
 
-        return Prompt(system=system_message, user=user_message)
+        from infrastructure.ai.prompt_resolver import resolve_prompt
+
+        resolved = resolve_prompt(
+            "workflow-chapter-generation",
+            {
+                "planning_section": planning_section,
+                "voice_block": voice_block,
+                "context": context,
+                "fact_lock": fact_lock,
+                "length_rule": length_rule,
+                "beat_extra": beat_extra,
+                "outline": outline,
+                "prior_draft": prior_draft_section,
+                "beat_section": beat_section,
+            },
+            fallback_system=system_message,
+            fallback_user=user_message,
+        )
+        return resolved.to_prompt()
 
     async def _extract_chapter_state(self, content: str, chapter_number: int) -> ChapterState:
         """从生成的内容中提取章节状态

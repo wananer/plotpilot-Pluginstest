@@ -4,6 +4,8 @@ from __future__ import annotations
 import re
 from typing import Any, Optional
 
+from infrastructure.ai.prompt_resolver import resolve_prompt
+
 from .agent_assets import render_agent_selection
 from .context_capsules import enrich_blocks_with_capsules
 from .host_context import render_host_context_sections
@@ -418,13 +420,19 @@ def _looks_like_generic_context_word(value: str) -> bool:
 
 
 def _render_usage_protocol() -> str:
-    return (
+    fallback = (
         "以下内容是角色连续性参考，不是本章任务清单；不要逐条复述，也不要为使用这些信息强行安排情节。"
         "章节承接状态是硬约束：下一章开头必须承接上一章结尾；若跳时空，需要先交代过渡。"
         "硬边界用于避免逻辑越界；软倾向只影响选择风格；可变状态可在本章新证据刺激下自然更新。"
         "默认按用户目标控制篇幅，本轮压力测试以约2500字/章为目标；超过3000字应主动收束场景。"
         "避免复用高频模板句，如没有说话、没有回答、声音很轻、深吸一口气、沉默了几秒、像是等。"
     )
+    return resolve_prompt(
+        "plugin.world_evolution_core.context-usage-protocol",
+        {},
+        fallback_system="你是 Evolution 上下文压缩器。",
+        fallback_user=fallback,
+    ).user
 
 
 def _render_route_board(route_map: Optional[dict[str, Any]]) -> str:
