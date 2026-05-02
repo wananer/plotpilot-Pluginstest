@@ -6,6 +6,13 @@ from plugins.platform.job_registry import PluginJobRegistry
 from plugins.platform.plugin_storage import PluginStorage
 
 
+def _joined_context(context):
+    return "\n".join(
+        f"{block.get('title') or ''}\n{block.get('content') or ''}"
+        for block in context.get("context_blocks") or []
+    )
+
+
 @pytest.mark.asyncio
 async def test_after_commit_writes_facts_characters_and_context_block(tmp_path):
     storage = PluginStorage(root=tmp_path)
@@ -33,7 +40,7 @@ async def test_after_commit_writes_facts_characters_and_context_block(tmp_path):
 
     context = service.before_context_build({"novel_id": "novel-1", "chapter_number": 2})
     assert context["ok"] is True
-    content = context["context_blocks"][0]["content"]
+    content = _joined_context(context)
     assert "本章焦点角色" in content
     assert "林澈" in content
     assert "《林澈》" not in content
@@ -77,7 +84,7 @@ async def test_after_commit_writes_chapter_and_volume_summaries(tmp_path):
     assert volume_summaries[0]["chapter_end"] == 10
 
     context = service.before_context_build({"novel_id": "novel-summary", "chapter_number": 11})
-    content = context["context_blocks"][0]["content"]
+    content = _joined_context(context)
     assert "最近10章大总结" in content
     assert "上一章小总结" in content
     assert "上一章结尾状态" in content
@@ -405,7 +412,7 @@ async def test_structured_provider_persists_rich_character_profile(tmp_path):
     context = service.before_context_build(
         {"novel_id": "novel-rich", "chapter_number": 2, "payload": {"outline": "秋明月结束演出后去找红美玲。"}}
     )
-    content = context["context_blocks"][0]["content"]
+    content = _joined_context(context)
     assert "外貌/出场识别" in content
     assert "性格调色盘" in content
     assert "底色=叛逆" in content
@@ -614,7 +621,7 @@ async def test_rich_character_card_tracks_cognition_growth_and_limits(tmp_path):
             "payload": {"outline": "林澈继续调查黑塔密门。"},
         }
     )
-    content = context["context_blocks"][0]["content"]
+    content = _joined_context(context)
     assert "不是本章任务清单" in content
     assert "不要逐条复述" in content
     assert "硬边界（不可无过渡违反）" in content
@@ -808,7 +815,7 @@ async def test_before_story_planning_returns_worldline_and_foreshadow_context(tm
 
     assert result["ok"] is True
     block = result["context_blocks"][0]
-    assert block["title"] == "Evolution 故事前史与伏笔库"
+    assert block["title"] == "Evolution 规划锁与故事前史"
     assert "故事开始前的世界线" in block["content"]
     assert "可用于大纲与伏笔的种子" in block["content"]
     assert result["data"]["foreshadow_seeds"]

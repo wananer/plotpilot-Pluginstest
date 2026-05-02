@@ -1,22 +1,72 @@
 """PlotPilot-side workflow service for Evolution World Assistant."""
 from __future__ import annotations
 
+import concurrent.futures
+import copy
+import json
+import logging
 from datetime import datetime, timezone
 from time import perf_counter
 from hashlib import sha256
 from typing import Any, Optional, Union, Tuple
 
 from plugins.platform.job_registry import PluginJobRecord, PluginJobRegistry
+from plugins.platform.host_database import ReadOnlyHostDatabase, create_default_readonly_host_database
 from plugins.platform.plugin_storage import PluginStorage
 
+from .agent_assets import (
+    build_commit_event,
+    build_reflection_record,
+    build_selection_event,
+    consolidate_agent_memory,
+    evaluate_strategy_effectiveness,
+    extract_context_signals,
+    select_agent_assets,
+    solidify_capsules_from_review,
+)
+from .agent_knowledge import AgentKnowledgeBase
+from .agent_orchestrator import AgentOrchestrator, apply_gene_patches, decision_to_context_blocks
+from .agent_runtime import AgentRuntime, LLM_MODEL_PROTOCOLS, LLM_PROVIDER_MODES
+from .canonical_characters import (
+    calibrate_extracted_characters,
+    canonicalize_names_in_records,
+    load_canonical_characters,
+)
 from .continuity import build_chapter_summary, build_volume_summary
 from .context_capsules import build_injection_record
-from .context_patch import build_context_patch, render_patch_summary
+from .context_patch import build_context_patch, render_patch_summary, tier_summary
+from .diagnostics_service import DiagnosticsService
+from .host_context import HOST_CONTEXT_SOURCES, HostContextReader
+from .local_semantic_memory import LocalSemanticMemory
+from .planning_adapter import (
+    build_prehistory_worldline,
+    build_planning_alignment,
+    build_planning_lock,
+    build_runtime_style_adapter,
+    planning_payload_with_worldline_defaults,
+    render_planning_adapter_context,
+)
 from .preset_converter import convert_st_preset
 from .repositories import RECENT_CONTEXT_FACT_LIMIT, EvolutionWorldRepository
+from .review_rules import (
+    REPETITION_PHRASES,
+    character_is_mentioned,
+    normalize_evolution_issue_metadata,
+    replacement_guidance_for_phrase,
+    review_boundary_state,
+    review_character_card_against_content,
+    review_extraction_pollution,
+    review_host_context_against_content,
+    review_issue,
+    review_route_conflicts,
+    review_style_repetition,
+)
+from .story_graph import build_global_route_map, build_story_graph_chapter
 from .structured_extractor import StructuredExtractorProvider, extract_structured_chapter_facts
 
 PLUGIN_NAME = "world_evolution_core"
+CONTEXT_EXTERNAL_TIMEOUT_SECONDS = 2.5
+logger = logging.getLogger(__name__)
 
 
 class EvolutionWorldAssistantService:
@@ -26,11 +76,66 @@ class EvolutionWorldAssistantService:
         jobs: Optional[PluginJobRegistry] = None,
         repository: Optional[EvolutionWorldRepository] = None,
         extractor_provider: Optional[StructuredExtractorProvider] = None,
+        agent_llm_service: Optional[Any] = None,
+        llm_provider_factory: Optional[Any] = None,
+        host_database: Optional[ReadOnlyHostDatabase] = None,
+        semantic_memory: Optional[LocalSemanticMemory] = None,
     ) -> None:
         self.storage = storage or PluginStorage()
         self.jobs = jobs or PluginJobRegistry(self.storage)
         self.repository = repository or EvolutionWorldRepository(self.storage)
         self.extractor_provider = extractor_provider
+        self.agent_llm_service = agent_llm_service
+        self.llm_provider_factory = llm_provider_factory
+        self.host_database = host_database if host_database is not None else create_default_readonly_host_database()
+        self.semantic_memory = semantic_memory or LocalSemanticMemory(host_database=self.host_database)
+        self.host_context_reader = HostContextReader(self.host_database)
+        self.agent_knowledge = AgentKnowledgeBase(self.repository)
+        self.agent_runtime = AgentRuntime(
+            settings_getter=lambda: self.get_settings(safe=False),
+            agent_llm_service=agent_llm_service,
+            llm_provider_factory=llm_provider_factory,
+        )
+        self.agent_orchestrator = AgentOrchestrator(run_agent=self._run_agent_decision)
+        self.diagnostics_service = DiagnosticsService(
+            repository=self.repository,
+            route_map_provider=self.get_global_route_map,
+        )
+
+    def get_settings(self, *, safe: bool = True) -> dict[str, Any]:
+        settings = _normalize_settings(self.repository.get_settings())
+        return _redact_settings(settings) if safe else settings
+
+    def update_settings(self, payload: dict[str, Any]) -> dict[str, Any]:
+        existing = _normalize_settings(self.repository.get_settings())
+        settings = _normalize_settings(payload or {}, existing=existing)
+        self.repository.save_settings(settings)
+        return self.get_settings(safe=True)
+
+    async def fetch_api2_models(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Deprecated compatibility endpoint; API2 no longer performs Evolution work."""
+        return self.deprecated_api2_response()
+
+    def deprecated_api2_response(self) -> dict[str, Any]:
+        return {
+            "ok": False,
+            "deprecated": True,
+            "items": [],
+            "count": 0,
+            "source": "legacy_api2",
+            "protocol": None,
+            "error": "API2 is deprecated. Configure settings.agent_api for Evolution control cards and reflections.",
+            "replacement": "agent_api",
+        }
+
+    async def fetch_agent_models(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return await self.agent_runtime.fetch_models(payload or {})
+
+    async def test_api2_connection(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return self.deprecated_api2_response()
+
+    async def test_agent_connection(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return await self.agent_runtime.test_connection(payload or {})
 
     async def after_novel_created(self, payload: dict[str, Any]) -> dict[str, Any]:
         novel_id = str(payload.get("novel_id") or "").strip()
@@ -47,7 +152,7 @@ class EvolutionWorldAssistantService:
         target_chapters = _int_or_none(meta.get("target_chapters"))
         length_tier = str(meta.get("length_tier") or "").strip()
         existing = self.repository.get_prehistory_worldline(novel_id)
-        worldline = _build_prehistory_worldline(
+        worldline = build_prehistory_worldline(
             novel_id=novel_id,
             title=title,
             premise=premise,
@@ -59,6 +164,15 @@ class EvolutionWorldAssistantService:
             at=started_at,
         )
         self.repository.save_prehistory_worldline(novel_id, worldline)
+        self.agent_knowledge.index_document(
+            novel_id,
+            source_type="prehistory_worldline",
+            source_id="worldline",
+            title=title or "Evolution 故事前史",
+            text="\n".join(part for part in [title, premise, genre, world_preset, style_hint, json.dumps(worldline, ensure_ascii=False, default=str)] if part),
+            metadata={"indexed_from": "after_novel_created"},
+            source_refs=[{"source_type": "prehistory_worldline", "source_id": "worldline"}],
+        )
         self.repository.append_event(
             novel_id,
             {
@@ -103,25 +217,61 @@ class EvolutionWorldAssistantService:
             return {"ok": True, "skipped": True, "reason": "missing novel_id"}
 
         evidence = self.repository.build_story_planning_evidence(novel_id, purpose=purpose)
-        if not evidence:
-            return {"ok": True, "skipped": True, "reason": "no prehistory worldline yet"}
+        planning_payload = planning_payload_with_worldline_defaults(nested, (evidence or {}).get("worldline") or {})
+        planning_lock = build_planning_lock(planning_payload, purpose=purpose)
+        if not evidence and not planning_lock.get("has_lock"):
+            return {"ok": True, "skipped": True, "reason": "no prehistory worldline or premise lock yet"}
 
-        style_adapter = _build_runtime_style_adapter(evidence.get("worldline") or {}, nested)
-        evidence["style_adapter"] = style_adapter
+        style_adapter = build_runtime_style_adapter(evidence.get("worldline") or {}, nested) if evidence else {}
+        if evidence:
+            evidence["style_adapter"] = style_adapter
+        content = render_planning_adapter_context(planning_lock, evidence, style_adapter=style_adapter)
+        planning_decision = self.agent_orchestrator.decide_planning(
+            novel_id=novel_id,
+            purpose=purpose,
+            planning_payload=planning_payload,
+            fallback_content=content,
+            evidence_refs=[{"source_type": "prehistory_worldline", "source_id": "worldline"}] if evidence else [],
+        )
+        self._record_agent_decision(
+            novel_id,
+            phase="before_story_planning",
+            chapter_number=None,
+            decision=planning_decision,
+            input_summary={"purpose": purpose, "premise_received": bool(planning_payload.get("premise"))},
+        )
+        if (planning_decision.get("agent_result") or {}).get("ok"):
+            agent_lines = ["Evolution Agent 规划锁"]
+            if planning_decision.get("t0_constraints"):
+                agent_lines.append("【必须遵守】")
+                agent_lines.extend(f"- {item}" for item in planning_decision.get("t0_constraints") or [])
+            if planning_decision.get("t1_strategy"):
+                agent_lines.append("【建议参考】")
+                agent_lines.extend(f"- {item}" for item in planning_decision.get("t1_strategy") or [])
+            content = "\n".join(agent_lines)
+        planning_alignment = build_planning_alignment(planning_lock, evidence=evidence, rendered_chars=len(content))
+        self.repository.save_planning_alignment(novel_id, planning_alignment)
+        data = dict(evidence or {})
+        data["planning_lock"] = planning_lock
+        data["planning_alignment"] = planning_alignment
+        data["agent_decision"] = planning_decision
         return {
             "ok": True,
-            "data": evidence,
+            "data": data,
             "context_blocks": [
                 {
                     "plugin_name": PLUGIN_NAME,
-                    "title": "Evolution 故事前史与伏笔库",
-                    "content": _render_story_planning_evidence(evidence, style_adapter=style_adapter),
+                    "title": "Evolution 规划锁与故事前史",
+                    "content": content,
                     "priority": 72,
-                    "token_budget": 1600,
+                    "token_budget": 1200,
                     "metadata": {
                         "novel_id": novel_id,
                         "purpose": purpose,
-                        "schema_version": evidence.get("worldline", {}).get("schema_version"),
+                        "schema_version": (evidence.get("worldline") or {}).get("schema_version") if evidence else None,
+                        "premise_received": planning_alignment.get("premise_received"),
+                        "planning_lock_generated": planning_alignment.get("planning_lock_generated"),
+                        "bible_empty_fallback": planning_alignment.get("bible_empty_fallback"),
                     },
                 }
             ],
@@ -155,8 +305,48 @@ class EvolutionWorldAssistantService:
             provider=self.extractor_provider,
         )
         snapshot = extraction.snapshot
+        canonical_characters = load_canonical_characters(self.host_database, novel_id)
+        calibration = calibrate_extracted_characters(
+            content=content,
+            snapshot_characters=snapshot.characters,
+            character_updates=[item.to_dict() for item in extraction.character_updates],
+            canonical_characters=canonical_characters,
+        )
+        snapshot.characters = calibration.characters
+        character_updates = calibration.character_updates
+        if calibration.warnings:
+            extraction.warnings.extend(calibration.warnings)
+        invalid_character_candidates = [
+            str(name).strip()
+            for name in snapshot.characters
+            if str(name).strip() and not _valid_snapshot_character_name(str(name or ""))
+        ]
+        if invalid_character_candidates:
+            self.repository.record_invalid_character_candidates(
+                novel_id,
+                invalid_character_candidates,
+                chapter_number=chapter_number,
+            )
+        snapshot.characters = _filter_snapshot_characters(snapshot.characters)
+        snapshot.locations = _filter_snapshot_locations(snapshot.locations)
+        character_updates = [
+            item
+            for item in character_updates
+            if _valid_snapshot_character_name(str(item.get("name") or ""))
+        ]
+        review_routing = self._route_extraction_review_candidates(
+            novel_id=novel_id,
+            chapter_number=chapter_number,
+            content_hash=content_hash,
+            character_updates=character_updates,
+            world_events=[item.to_dict() for item in extraction.world_events],
+        )
+        character_updates = review_routing["approved_character_updates"]
         chapter_summary = build_chapter_summary(novel_id, chapter_number, content, _now())
         known_names = [card.get("name") for card in self.repository.list_character_index(novel_id).get("items", [])]
+        if canonical_characters:
+            canonical_names = {item.name for item in canonical_characters}
+            known_names = [name for name in known_names if name in canonical_names]
         for name in known_names:
             if name and name in content and name not in snapshot.characters:
                 snapshot.characters.append(name)
@@ -169,19 +359,131 @@ class EvolutionWorldAssistantService:
             recent_summaries = self.repository.list_chapter_summaries(novel_id, limit=10)
             volume_summary = build_volume_summary(novel_id, volume_index, recent_summaries, _now())
             self.repository.save_volume_summary(novel_id, volume_index, volume_summary)
+        card_snapshot = copy.deepcopy(snapshot)
+        pending_character_names = {
+            str(candidate.get("payload", {}).get("name") or "").strip()
+            for candidate in review_routing["pending_candidates"]
+            if candidate.get("candidate_type") == "character_update"
+        }
+        if pending_character_names:
+            card_snapshot.characters = [name for name in card_snapshot.characters if name not in pending_character_names]
         updated_cards = self.repository.upsert_character_cards(
             novel_id,
-            snapshot,
-            [item.to_dict() for item in extraction.character_updates],
+            card_snapshot,
+            character_updates,
         )
-        timeline_events = _build_timeline_events(snapshot, extraction.to_dict(), content_hash, _now())
+        extraction_payload = extraction.to_dict()
+        extraction_payload["snapshot"] = snapshot.to_dict()
+        extraction_payload["character_updates"] = character_updates
+        extraction_payload["review_candidates"] = review_routing["pending_candidates"]
+        extraction_payload["canonical_character_count"] = calibration.canonical_count
+        extraction_payload["ignored_character_candidates"] = calibration.ignored_candidates
+        if canonical_characters:
+            extraction_payload["world_events"] = canonicalize_names_in_records(
+                review_routing["approved_world_events"],
+                canonical_characters,
+            )
+        else:
+            extraction_payload["world_events"] = review_routing["approved_world_events"]
+        timeline_events = _build_timeline_events(snapshot, extraction_payload, content_hash, _now())
         self.repository.save_timeline_events(novel_id, timeline_events)
         self.repository.save_continuity_constraints(
             novel_id,
             _build_continuity_constraints(novel_id, updated_cards, snapshot.chapter_number, timeline_events),
         )
+        previous_graph_chapters = self.repository.list_story_graph_chapters(novel_id, before_chapter=chapter_number)
+        story_graph_chapter = build_story_graph_chapter(
+            novel_id=novel_id,
+            chapter_number=chapter_number,
+            snapshot=snapshot.to_dict(),
+            chapter_summary=chapter_summary,
+            timeline_events=timeline_events,
+            previous_chapters=previous_graph_chapters,
+            at=_now(),
+        )
+        self.repository.save_story_graph_chapter(novel_id, chapter_number, story_graph_chapter)
+        style_repetition_state = _build_style_repetition_state(
+            novel_id=novel_id,
+            chapter_number=chapter_number,
+            content=content,
+            recent_summaries=self.repository.list_chapter_summaries(novel_id, limit=3),
+            at=_now(),
+        )
+        if style_repetition_state.get("phrases"):
+            self.repository.save_style_repetition_state(novel_id, style_repetition_state)
+        native_after_commit = self._read_native_after_commit_context(
+            novel_id=novel_id,
+            chapter_number=chapter_number,
+            content=content,
+        )
+        knowledge_index = self.agent_knowledge.index_chapter(
+            novel_id,
+            chapter_number,
+            content,
+            metadata={"content_hash": content_hash, "indexed_from": "after_commit"},
+        )
+        try:
+            native_context_for_index = self.host_context_reader.read(
+                novel_id,
+                query=content[:1200],
+                before_chapter=chapter_number + 1,
+                limit=12,
+            )
+            native_index = self.agent_knowledge.index_host_context(novel_id, native_context_for_index)
+        except Exception as exc:
+            logger.warning("Evolution agent knowledge native indexing failed for %s ch%s: %s", novel_id, chapter_number, exc)
+            native_index = {"documents_indexed": 0, "chunks_indexed": 0, "error": str(exc)}
+        asset_index = self.agent_knowledge.index_agent_assets(
+            novel_id,
+            genes=self.repository.list_agent_genes(novel_id),
+            capsules=self.repository.list_agent_capsules(novel_id),
+            reflections=self.repository.list_agent_reflections(novel_id),
+            candidates=self.repository.list_agent_gene_candidates(novel_id),
+        )
+        observe_knowledge = self.agent_knowledge.search(
+            novel_id,
+            chapter_summary.get("short_summary") or content[:500],
+            before_chapter=chapter_number + 1,
+            limit=8,
+        )
+        observe_decision = self.agent_orchestrator.observe_after_commit(
+            novel_id=novel_id,
+            chapter_number=chapter_number,
+            chapter_summary=chapter_summary,
+            native_after_commit=native_after_commit,
+            knowledge=observe_knowledge,
+        )
+        self._record_agent_decision(
+            novel_id,
+            phase="after_commit",
+            chapter_number=chapter_number,
+            decision=observe_decision,
+            input_summary={
+                "knowledge_index": knowledge_index,
+                "native_index": native_index,
+                "asset_index": asset_index,
+                "content_hash": content_hash,
+            },
+        )
+        extraction_payload["native_after_commit"] = native_after_commit
+        extraction_payload["fallback_degraded"] = bool(native_after_commit.get("fallback_degraded"))
+        extraction_payload["agent_knowledge_index"] = {
+            "chapter": knowledge_index,
+            "native": native_index,
+            "assets": asset_index,
+        }
+        extraction_payload["agent_observation"] = observe_decision
         finished_at = _now()
         duration_ms = int((perf_counter() - start_time) * 1000)
+        agent_event = build_commit_event(
+            novel_id=novel_id,
+            chapter_number=chapter_number,
+            content_hash=content_hash,
+            snapshot=snapshot.to_dict(),
+            story_graph=story_graph_chapter,
+            at=finished_at,
+        )
+        self.repository.append_agent_event(novel_id, agent_event)
         self.repository.append_event(
             novel_id,
             {"type": "chapter_committed", "chapter_number": chapter_number, "content_hash": content_hash, "at": finished_at},
@@ -209,6 +511,12 @@ class EvolutionWorldAssistantService:
                     "replaced_existing_snapshot": bool(previous_snapshot),
                     "chapter_summary_saved": True,
                     "volume_summary_saved": bool(volume_summary),
+                    "story_graph_saved": True,
+                    "style_repetition_phrase_count": len(style_repetition_state.get("phrases") or []),
+                    "route_edge_count": len(story_graph_chapter.get("route_edges") or []),
+                    "route_conflict_count": len(story_graph_chapter.get("conflicts") or []),
+                    "native_after_commit": native_after_commit,
+                    "agent_event_id": agent_event.get("id"),
                 },
             },
         )
@@ -226,7 +534,9 @@ class EvolutionWorldAssistantService:
                 output_json={
                     "facts_path": f"facts/chapter_{chapter_number}.json",
                     "summary_path": f"summaries/chapters/chapter_{chapter_number}.json",
+                    "story_graph_path": f"story_graph/chapters/chapter_{chapter_number}.json",
                     "characters_updated": [card.get("character_id") for card in updated_cards],
+                    "native_after_commit": native_after_commit,
                 },
             )
         )
@@ -237,7 +547,9 @@ class EvolutionWorldAssistantService:
                 "chapter_summary": chapter_summary,
                 "volume_summary": volume_summary,
                 "characters_updated": updated_cards,
-                "extraction": extraction.to_dict(),
+                "extraction": extraction_payload,
+                "story_graph": story_graph_chapter,
+                "native_after_commit": native_after_commit,
             },
         }
 
@@ -249,9 +561,131 @@ class EvolutionWorldAssistantService:
 
         outline = str((payload.get("payload") or {}).get("outline") or payload.get("outline") or "")
         patch = self.build_context_patch(novel_id, chapter_number, outline=outline)
+        pending_review_count = len(self.repository.list_review_candidates(novel_id, status="pending", limit=0))
+        patch["blocks"], gate_pruned = _prune_t0_context_blocks([block for block in (patch.get("blocks") or []) if isinstance(block, dict)])
+        if gate_pruned:
+            patch.setdefault("skipped_blocks", []).extend(gate_pruned)
+        gate_decision = _decide_injection_gate(
+            patch.get("blocks") or [],
+            patch.get("skipped_blocks") or [],
+            pending_review_count=pending_review_count,
+        )
         summary = render_patch_summary(patch)
-        if not summary:
-            return {"ok": True, "skipped": True, "reason": "no evolution state yet"}
+        if not summary or not gate_decision["should_inject"]:
+            injection_record = build_injection_record(
+                novel_id=novel_id,
+                chapter_number=chapter_number,
+                blocks=[],
+                skipped_blocks=[
+                    *(patch.get("skipped_blocks") or []),
+                    {
+                        "id": "evolution_injection_gate",
+                        "kind": "injection_gate",
+                        "title": "Evolution 注入门控",
+                        "reason": gate_decision["skipped_reasons"][0] if gate_decision["skipped_reasons"] else "no_evolution_state",
+                    },
+                ],
+                at=_now(),
+            )
+            injection_record["gate_decision"] = gate_decision
+            self.repository.append_context_injection_record(novel_id, injection_record)
+            return {
+                "ok": True,
+                "skipped": True,
+                "reason": gate_decision["skipped_reasons"][0] if gate_decision["skipped_reasons"] else "no evolution state yet",
+                "context_injection_record": injection_record,
+            }
+
+        patch_blocks = [block for block in (patch.get("blocks") or []) if isinstance(block, dict)]
+        patch_tiers = tier_summary(patch_blocks)
+        metadata: dict[str, Any] = {
+            "novel_id": novel_id,
+            "chapter_number": chapter_number,
+            "patch_schema_version": patch.get("schema_version"),
+            "api2_control_card_enabled": False,
+            "agent_control_card_enabled": False,
+            "source_block_count": len(patch_blocks),
+            **patch_tiers,
+        }
+        context_blocks = _platform_context_blocks_from_patch(patch, metadata)
+        settings = self.get_settings(safe=False)
+        agent_settings = settings.get("agent_api") if isinstance(settings.get("agent_api"), dict) else {}
+        if agent_settings.get("enabled"):
+            knowledge = self.agent_knowledge.search(
+                novel_id=novel_id,
+                query=outline or summary[:800],
+                before_chapter=chapter_number,
+                limit=10,
+            )
+            context_decision = self.agent_orchestrator.decide_context(
+                novel_id=novel_id,
+                chapter_number=chapter_number,
+                outline=outline,
+                patch_summary=summary,
+                knowledge=knowledge,
+                tier_summary=patch_tiers,
+            )
+            self._record_agent_decision(
+                novel_id,
+                phase="before_context_build",
+                chapter_number=chapter_number,
+                decision=context_decision,
+                input_summary={
+                    "outline_chars": len(outline),
+                    "patch_chars": len(summary),
+                    "knowledge_item_count": knowledge.get("item_count"),
+                    "knowledge_source_types": knowledge.get("source_types") or [],
+                },
+            )
+            agent_blocks = decision_to_context_blocks(context_decision, metadata=metadata)
+            if agent_blocks:
+                content = "\n\n".join(str(block.get("content") or "") for block in agent_blocks)
+                card_metadata = dict(metadata)
+                card_metadata.update(
+                    {
+                        "agent_control_card_enabled": True,
+                        "agent_provider_mode": agent_settings.get("provider_mode"),
+                        "agent_raw_context_chars": len(summary),
+                        "agent_control_card_chars": len(content),
+                        "agent_compression_ratio": round(len(content) / max(len(summary), 1), 4),
+                        "agent_orchestrated": True,
+                        "agent_knowledge_item_count": knowledge.get("item_count"),
+                        "agent_knowledge_source_types": knowledge.get("source_types") or [],
+                    }
+                )
+                for block in agent_blocks:
+                    block_metadata = block.get("metadata") if isinstance(block.get("metadata"), dict) else {}
+                    block["metadata"] = {**block_metadata, **card_metadata, "tier": block.get("tier")}
+                context_blocks = agent_blocks
+                self.repository.append_context_control_card_record(
+                    novel_id,
+                    {
+                        "at": _now(),
+                        "chapter_number": chapter_number,
+                        "provider_mode": agent_settings.get("provider_mode"),
+                        "source": "agent_api" if (context_decision.get("agent_result") or {}).get("ok") else "agent_api_degraded",
+                        "raw_context_chars": len(summary),
+                        "control_card_chars": len(content),
+                        "compression_ratio": round(len(content) / max(len(summary), 1), 4),
+                        "model": str(agent_settings.get("model") or ""),
+                        "token_usage": (context_decision.get("agent_result") or {}).get("token_usage") or {},
+                        "knowledge_item_count": knowledge.get("item_count"),
+                    },
+                )
+            else:
+                for block in context_blocks:
+                    block_metadata = block.get("metadata") if isinstance(block.get("metadata"), dict) else {}
+                    block["metadata"] = {
+                        **block_metadata,
+                        "agent_control_card_enabled": True,
+                        "agent_error": context_decision.get("degraded_reason") or "agent_decision_empty",
+                    }
+                metadata.update(
+                    {
+                        "agent_control_card_enabled": True,
+                        "agent_error": context_decision.get("degraded_reason") or "agent_decision_empty",
+                    }
+                )
 
         injection_record = build_injection_record(
             novel_id=novel_id,
@@ -260,23 +694,281 @@ class EvolutionWorldAssistantService:
             skipped_blocks=patch.get("skipped_blocks") or [],
             at=_now(),
         )
+        injection_record["gate_decision"] = gate_decision
         self.repository.append_context_injection_record(novel_id, injection_record)
+        agent_selection = patch.get("agent_selection") if isinstance(patch.get("agent_selection"), dict) else {}
+        if agent_selection and (agent_selection.get("selected_gene_ids") or agent_selection.get("selected_capsule_ids")):
+            self.repository.append_agent_selection_record(novel_id, agent_selection)
+            self.repository.append_agent_event(novel_id, build_selection_event(agent_selection))
 
         return {
             "ok": True,
             "context_patch": patch,
             "context_injection_record": injection_record,
-            "context_blocks": [
-                {
-                    "plugin_name": PLUGIN_NAME,
-                    "title": "Evolution World State",
-                    "content": summary,
-                    "priority": 60,
-                    "token_budget": patch.get("estimated_token_budget") or 1200,
-                    "metadata": {"novel_id": novel_id, "chapter_number": chapter_number, "patch_schema_version": patch.get("schema_version")},
-                }
-            ],
+            "context_blocks": context_blocks,
         }
+
+    def list_review_candidates(self, novel_id: str, *, status: str | None = None, limit: int = 100) -> dict[str, Any]:
+        return {
+            "items": self.repository.list_review_candidates(novel_id, status=status, limit=limit),
+            "pending_count": len(self.repository.list_review_candidates(novel_id, status="pending", limit=0)),
+        }
+
+    def approve_review_candidate(self, novel_id: str, candidate_id: str) -> dict[str, Any]:
+        candidate = self.repository.get_review_candidate(novel_id, candidate_id)
+        if not candidate:
+            return {"ok": False, "error": "review candidate not found"}
+        if candidate.get("status") not in {"pending", "approved"}:
+            return {"ok": False, "error": f"candidate is {candidate.get('status')}"}
+
+        payload = candidate.get("payload") if isinstance(candidate.get("payload"), dict) else {}
+        candidate_type = str(candidate.get("candidate_type") or "")
+        applied = False
+        if candidate_type == "character_update":
+            applied = bool(self._apply_reviewed_character_update(novel_id, payload, _int_or_none(candidate.get("chapter_number"))))
+        elif candidate_type == "world_event":
+            applied = bool(self._apply_reviewed_world_event(novel_id, payload, candidate))
+        elif candidate_type == "continuity_constraint":
+            applied = bool(self._apply_reviewed_continuity_constraint(novel_id, payload, candidate))
+        elif candidate_type == "agent_gene_candidate":
+            applied = bool(self._approve_agent_gene_candidate(novel_id, payload))
+        else:
+            applied = True
+
+        updated = {
+            **candidate,
+            "status": "applied" if applied else "approved",
+            "reviewed_at": _now(),
+        }
+        self.repository.upsert_review_candidate(novel_id, updated)
+        self.repository.append_event(
+            novel_id,
+            {"type": "review_candidate_approved", "candidate_id": candidate_id, "candidate_type": candidate_type, "applied": applied, "at": updated["reviewed_at"]},
+        )
+        return {"ok": True, "candidate": updated}
+
+    def reject_review_candidate(self, novel_id: str, candidate_id: str, *, note: str = "") -> dict[str, Any]:
+        candidate = self.repository.get_review_candidate(novel_id, candidate_id)
+        if not candidate:
+            return {"ok": False, "error": "review candidate not found"}
+        updated = {
+            **candidate,
+            "status": "rejected",
+            "review_note": note,
+            "reviewed_at": _now(),
+        }
+        self.repository.upsert_review_candidate(novel_id, updated)
+        self.repository.append_event(
+            novel_id,
+            {"type": "review_candidate_rejected", "candidate_id": candidate_id, "candidate_type": candidate.get("candidate_type"), "at": updated["reviewed_at"]},
+        )
+        return {"ok": True, "candidate": updated}
+
+    def _route_extraction_review_candidates(
+        self,
+        *,
+        novel_id: str,
+        chapter_number: int,
+        content_hash: str,
+        character_updates: list[dict[str, Any]],
+        world_events: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        approved_character_updates: list[dict[str, Any]] = []
+        approved_world_events: list[dict[str, Any]] = []
+        pending: list[dict[str, Any]] = []
+
+        for update in character_updates:
+            decision = _review_decision_for_candidate("character_update", update)
+            if decision["status"] == "pending":
+                candidate = self._upsert_pending_review_candidate(
+                    novel_id=novel_id,
+                    chapter_number=chapter_number,
+                    candidate_type="character_update",
+                    risk_level=decision["risk_level"],
+                    payload=update,
+                    evidence=[{"source_type": "chapter", "chapter_number": chapter_number, "content_hash": content_hash}],
+                    reason=decision["reason"],
+                )
+                pending.append(candidate)
+            else:
+                approved_character_updates.append(update)
+
+        for event in world_events:
+            decision = _review_decision_for_candidate("world_event", event)
+            if decision["status"] == "pending":
+                candidate = self._upsert_pending_review_candidate(
+                    novel_id=novel_id,
+                    chapter_number=chapter_number,
+                    candidate_type="world_event",
+                    risk_level=decision["risk_level"],
+                    payload=event,
+                    evidence=[{"source_type": "chapter", "chapter_number": chapter_number, "content_hash": content_hash}],
+                    reason=decision["reason"],
+                )
+                pending.append(candidate)
+            else:
+                approved_world_events.append(event)
+
+        return {
+            "approved_character_updates": approved_character_updates,
+            "approved_world_events": approved_world_events,
+            "pending_candidates": pending,
+        }
+
+    def _upsert_pending_review_candidate(
+        self,
+        *,
+        novel_id: str,
+        chapter_number: int | None,
+        candidate_type: str,
+        risk_level: str,
+        payload: dict[str, Any],
+        evidence: list[dict[str, Any]],
+        reason: str,
+    ) -> dict[str, Any]:
+        candidate_id = f"rev_{_hash_text(json.dumps([novel_id, chapter_number, candidate_type, payload], ensure_ascii=False, sort_keys=True))}"
+        existing = self.repository.get_review_candidate(novel_id, candidate_id)
+        if existing and existing.get("status") != "pending":
+            return existing
+        candidate = {
+            "id": candidate_id,
+            "novel_id": novel_id,
+            "chapter_number": chapter_number,
+            "candidate_type": candidate_type,
+            "risk_level": risk_level,
+            "status": "pending",
+            "payload": payload,
+            "evidence": evidence,
+            "reason": reason,
+            "created_at": (existing or {}).get("created_at") or _now(),
+            "reviewed_at": None,
+        }
+        return self.repository.upsert_review_candidate(novel_id, candidate)
+
+    def _apply_reviewed_character_update(self, novel_id: str, payload: dict[str, Any], chapter_number: int | None) -> dict[str, Any] | None:
+        name = str(payload.get("name") or "").strip()
+        if not name:
+            return None
+        current = self.repository.get_character_card(novel_id, name)
+        if not current:
+            current = {
+                "name": name,
+                "first_seen_chapter": chapter_number or 1,
+                "last_seen_chapter": chapter_number or 1,
+                "aliases": [],
+                "recent_events": [],
+                "status": "active",
+            }
+            self.repository.write_character_card(novel_id, current)
+        updated = self.repository.merge_character_updates(novel_id, [payload], chapter_number=chapter_number)
+        if updated:
+            return updated[0]
+        return self.repository.write_character_card(novel_id, {**current, **payload})
+
+    def _apply_reviewed_world_event(self, novel_id: str, payload: dict[str, Any], candidate: dict[str, Any]) -> bool:
+        chapter_number = _int_or_none(candidate.get("chapter_number")) or _int_or_none(payload.get("chapter_number"))
+        summary = str(payload.get("summary") or "").strip()
+        if not chapter_number or not summary:
+            return False
+        evidence = candidate.get("evidence") if isinstance(candidate.get("evidence"), list) else []
+        content_hash = next((str(item.get("content_hash") or "") for item in evidence if isinstance(item, dict) and item.get("content_hash")), "")
+        seed = f"{novel_id}:{chapter_number}:reviewed:{summary}:{content_hash}"
+        raw_characters = payload.get("characters") or payload.get("participants") or []
+        raw_locations = payload.get("locations") or ([payload.get("location")] if payload.get("location") else [])
+        participants = [str(item).strip() for item in raw_characters if str(item).strip()][:12]
+        locations = [str(item).strip() for item in raw_locations if str(item).strip()][:5]
+        event = {
+            "event_id": str(payload.get("event_id") or "evt_" + _hash_text(seed)[:16]),
+            "novel_id": novel_id,
+            "chapter_number": chapter_number,
+            "scene_order": _int_or_none(payload.get("scene_order")) or 999,
+            "event_type": str(payload.get("event_type") or "scene").strip() or "scene",
+            "summary": summary[:240],
+            "participants": participants,
+            "location": locations[0] if locations else "",
+            "locations": locations,
+            "effects": _event_effects_from_raw(payload),
+            "knowledge_delta": _knowledge_delta_from_raw(payload, participants),
+            "source": "review_approved",
+            "content_hash": content_hash,
+            "confidence": _candidate_confidence(payload),
+            "at": _now(),
+        }
+        self.repository.save_timeline_events(novel_id, [event])
+        return True
+
+    def _apply_reviewed_continuity_constraint(self, novel_id: str, payload: dict[str, Any], candidate: dict[str, Any]) -> bool:
+        chapter_number = _int_or_none(candidate.get("chapter_number")) or _int_or_none(payload.get("chapter_number"))
+        rule = str(payload.get("rule") or payload.get("summary") or "").strip()
+        if not chapter_number or not rule:
+            return False
+        subject = str(payload.get("subject") or payload.get("name") or "__world__").strip() or "__world__"
+        constraint_type = str(payload.get("type") or payload.get("constraint_type") or "reviewed_constraint").strip() or "reviewed_constraint"
+        seed = f"{novel_id}:{chapter_number}:{constraint_type}:{subject}:{rule}"
+        constraint = {
+            "constraint_id": str(payload.get("constraint_id") or "cc_" + _hash_text(seed)[:16]),
+            "novel_id": novel_id,
+            "chapter_number": chapter_number,
+            "type": constraint_type,
+            "subject": subject,
+            "rule": rule[:260],
+            "severity": str(payload.get("severity") or "warning"),
+            "evidence_events": [str(item) for item in (payload.get("evidence_events") or []) if str(item).strip()][:8],
+            "created_or_updated_chapter": chapter_number,
+            "source": "review_approved",
+        }
+        self.repository.save_continuity_constraints(novel_id, [constraint])
+        return True
+
+    def _approve_agent_gene_candidate(self, novel_id: str, payload: dict[str, Any]) -> bool:
+        gene_id = str(payload.get("gene_id") or payload.get("id") or "").strip()
+        if not gene_id:
+            return False
+        genes = self.repository.list_agent_genes(novel_id)
+        next_gene = {**payload, "id": gene_id, "status": "active", "updated_at": _now()}
+        by_id = {str(gene.get("id") or ""): gene for gene in genes if gene.get("id")}
+        by_id[gene_id] = next_gene
+        self.repository.save_agent_genes(novel_id, list(by_id.values()))
+        return True
+
+    def _run_agent_decision(self, phase: str, prompt_text: str, payload: dict[str, Any]) -> dict[str, Any]:
+        return self.agent_runtime.run_decision(phase, prompt_text, payload)
+
+    def _record_agent_decision(
+        self,
+        novel_id: str,
+        *,
+        phase: str,
+        chapter_number: Optional[int],
+        decision: dict[str, Any],
+        input_summary: Optional[dict[str, Any]] = None,
+    ) -> None:
+        agent_result = decision.get("agent_result") if isinstance(decision.get("agent_result"), dict) else {}
+        record = {
+            "type": "AgentDecisionRecord",
+            "schema_version": 1,
+            "novel_id": novel_id,
+            "chapter_number": chapter_number,
+            "hook_name": phase,
+            "phase": phase,
+            "intent": decision.get("intent"),
+            "input_summary": input_summary or {},
+            "output": {
+                "t0_constraints": list(decision.get("t0_constraints") or [])[:8],
+                "t1_strategy": list(decision.get("t1_strategy") or [])[:8],
+                "issue_count": len(decision.get("issues") or []),
+                "gene_patch_count": len(decision.get("gene_patches") or []),
+                "degraded_reason": decision.get("degraded_reason") or "",
+            },
+            "actions": list(decision.get("actions") or [])[:12],
+            "evidence_refs": list(decision.get("evidence_refs") or [])[:12],
+            "token_usage": agent_result.get("token_usage") or {},
+            "model": agent_result.get("model") or "",
+            "status": "succeeded" if agent_result.get("ok") else "degraded",
+            "error": agent_result.get("error") or decision.get("degraded_reason") or "",
+            "at": _now(),
+        }
+        self.repository.append_agent_decision_record(novel_id, record)
 
     def before_chapter_review(self, payload: dict[str, Any]) -> dict[str, Any]:
         novel_id = str(payload.get("novel_id") or "").strip()
@@ -296,16 +988,23 @@ class EvolutionWorldAssistantService:
                 "evidence": evidence.get("events", []),
                 "constraints": evidence.get("constraints", []),
                 "characters": evidence.get("characters", []),
+                "route_conflicts": evidence.get("route_conflicts", []),
             },
         }
 
     async def manual_rebuild(self, payload: dict[str, Any]) -> dict[str, Any]:
         novel_id = str(payload.get("novel_id") or "").strip()
         chapters = payload.get("chapters") or []
+        dry_run = bool(payload.get("dry_run"))
         if not novel_id:
             return {"ok": False, "error": "missing novel_id"}
+        affected_scopes = _manual_rebuild_affected_scopes(bool(isinstance(chapters, list) and chapters))
+        if dry_run:
+            return {"ok": True, "dry_run": True, "data": {"novel_id": novel_id, "affected_scopes": affected_scopes}}
         if not isinstance(chapters, list) or not chapters:
             cards = self.repository.rebuild_character_cards_from_facts(novel_id)
+            palette_updates = self._apply_canonical_character_profiles(novel_id)
+            knowledge = self.rebuild_agent_knowledge(novel_id, record_decision=False)
             self.repository.append_workflow_run(
                 novel_id,
                 {
@@ -315,11 +1014,21 @@ class EvolutionWorldAssistantService:
                     "status": "succeeded",
                     "started_at": _now(),
                     "finished_at": _now(),
-                    "input": {"mode": "existing_facts"},
-                    "output": {"characters_rebuilt": len(cards)},
+                    "input": {"mode": "existing_facts", "affected_scopes": affected_scopes},
+                    "output": {"characters_rebuilt": len(cards), "canonical_palette_updates": len(palette_updates), "agent_knowledge": knowledge.get("data", {})},
                 },
             )
-            return {"ok": True, "data": {"novel_id": novel_id, "mode": "existing_facts", "characters_rebuilt": len(cards)}}
+            return {
+                "ok": True,
+                "data": {
+                    "novel_id": novel_id,
+                    "mode": "existing_facts",
+                    "characters_rebuilt": len(cards),
+                    "canonical_palette_updates": len(palette_updates),
+                    "agent_knowledge": knowledge.get("data", {}),
+                    "affected_scopes": affected_scopes,
+                },
+            }
 
         rebuilt = []
         for chapter in chapters:
@@ -336,22 +1045,47 @@ class EvolutionWorldAssistantService:
             if result.get("ok") and not result.get("skipped"):
                 rebuilt.append(result["data"]["facts"]["chapter_number"])
         cards = self.repository.rebuild_character_cards_from_facts(novel_id)
-        return {"ok": True, "data": {"novel_id": novel_id, "rebuilt_chapters": rebuilt, "characters_rebuilt": len(cards)}}
+        palette_updates = self._apply_canonical_character_profiles(novel_id)
+        knowledge = self.rebuild_agent_knowledge(novel_id, record_decision=False)
+        return {
+            "ok": True,
+            "data": {
+                "novel_id": novel_id,
+                "rebuilt_chapters": rebuilt,
+                "characters_rebuilt": len(cards),
+                "canonical_palette_updates": len(palette_updates),
+                "agent_knowledge": knowledge.get("data", {}),
+                "affected_scopes": affected_scopes,
+            },
+        }
 
     async def rollback(self, payload: dict[str, Any]) -> dict[str, Any]:
         novel_id = str(payload.get("novel_id") or "").strip()
         chapter_number = _int_or_none(payload.get("chapter_number"))
+        dry_run = bool(payload.get("dry_run"))
         if not novel_id or not chapter_number:
             return {"ok": False, "error": "missing novel_id/chapter_number"}
+        affected_scopes = _rollback_affected_scopes(chapter_number)
+        if dry_run:
+            return {"ok": True, "dry_run": True, "data": {"novel_id": novel_id, "chapter_number": chapter_number, "affected_scopes": affected_scopes}}
 
         removed = self.repository.delete_fact_snapshot(novel_id, chapter_number)
         self.repository.delete_chapter_summary(novel_id, chapter_number)
+        self.repository.delete_story_graph_chapter(novel_id, chapter_number)
+        timeline_removed = self.repository.delete_timeline_events_for_chapter(novel_id, chapter_number)
+        constraints_removed = self.repository.delete_continuity_constraints_for_chapter(novel_id, chapter_number)
         cards = self.repository.rebuild_character_cards_from_facts(novel_id)
+        palette_updates = self._apply_canonical_character_profiles(novel_id)
+        knowledge = self.rebuild_agent_knowledge(novel_id, record_decision=False)
         event = {
             "type": "chapter_rollback",
             "chapter_number": chapter_number,
             "removed_snapshot": removed,
+            "timeline_events_removed": timeline_removed,
+            "continuity_constraints_removed": constraints_removed,
             "characters_rebuilt": len(cards),
+            "canonical_palette_updates": len(palette_updates),
+            "agent_knowledge": knowledge.get("data", {}),
             "at": _now(),
         }
         self.repository.append_event(novel_id, event)
@@ -365,11 +1099,11 @@ class EvolutionWorldAssistantService:
                 "status": "succeeded",
                 "started_at": event["at"],
                 "finished_at": _now(),
-                "input": {"chapter_number": chapter_number},
-                "output": {"removed_snapshot": removed, "characters_rebuilt": len(cards)},
+                "input": {"chapter_number": chapter_number, "affected_scopes": affected_scopes},
+                "output": {"removed_snapshot": removed, "timeline_events_removed": timeline_removed, "continuity_constraints_removed": constraints_removed, "characters_rebuilt": len(cards), "agent_knowledge": knowledge.get("data", {})},
             },
         )
-        return {"ok": True, "data": {"novel_id": novel_id, "chapter_number": chapter_number, "removed_snapshot": removed, "characters_rebuilt": len(cards)}}
+        return {"ok": True, "data": {"novel_id": novel_id, "chapter_number": chapter_number, "removed_snapshot": removed, "timeline_events_removed": timeline_removed, "continuity_constraints_removed": constraints_removed, "characters_rebuilt": len(cards), "agent_knowledge": knowledge.get("data", {}), "affected_scopes": affected_scopes}}
 
     def import_st_preset(self, novel_id: str, preset: dict[str, Any]) -> dict[str, Any]:
         converted = convert_st_preset(preset)
@@ -404,8 +1138,110 @@ class EvolutionWorldAssistantService:
     def list_continuity_constraints(self, novel_id: str, limit: int = 80) -> dict[str, Any]:
         return {"items": self.repository.list_continuity_constraints(novel_id, limit=limit)}
 
+    def get_global_route_map(self, novel_id: str) -> dict[str, Any]:
+        return build_global_route_map(novel_id, self.repository.list_story_graph_chapters(novel_id))
+
+    def list_story_graph_chapters(self, novel_id: str, limit: int = 50) -> dict[str, Any]:
+        return {"items": self.repository.list_story_graph_chapters(novel_id, limit=limit)}
+
+    def list_route_conflicts(self, novel_id: str, limit: int = 80) -> dict[str, Any]:
+        return {"items": self.repository.list_route_conflicts(novel_id, limit=limit)}
+
     def list_review_records(self, novel_id: str, limit: int = 30) -> dict[str, Any]:
         return {"items": self.repository.list_review_records(novel_id, limit=limit)}
+
+    def get_agent_status(self, novel_id: str) -> dict[str, Any]:
+        return self.repository.get_agent_status(novel_id)
+
+    def get_diagnostics(self, novel_id: str) -> dict[str, Any]:
+        return self.diagnostics_service.get_diagnostics(novel_id)
+
+    def rebuild_agent_knowledge(self, novel_id: str, *, record_decision: bool = True) -> dict[str, Any]:
+        if not novel_id:
+            return {"ok": False, "error": "missing novel_id"}
+        cleared = self.repository.clear_agent_knowledge(novel_id)
+        documents = 0
+        chunks = 0
+        host_chapter_index = self.agent_knowledge.index_host_chapters(novel_id, self.host_database)
+        documents += int(host_chapter_index.get("documents_indexed") or 0)
+        chunks += int(host_chapter_index.get("chunks_indexed") or 0)
+        for summary in self.repository.list_chapter_summaries(novel_id, limit=0):
+            chapter_number = _int_or_none(summary.get("chapter_number"))
+            text = json.dumps(summary, ensure_ascii=False, default=str)
+            result = self.agent_knowledge.index_document(
+                novel_id,
+                source_type="chapter_summary",
+                source_id=f"chapter_summary_{chapter_number or _hash_text(text)[:8]}",
+                title=f"第{chapter_number or '?'}章摘要",
+                text=text,
+                chapter_number=chapter_number,
+                metadata={"indexed_from": "knowledge_rebuild"},
+                source_refs=[{"source_type": "chapter_summary", "chapter_number": chapter_number}],
+            )
+            documents += int(result.get("document_indexed") or 0)
+            chunks += int(result.get("chunk_count") or 0)
+        for fact in self.repository.list_fact_snapshots(novel_id):
+            chapter_number = _int_or_none(fact.get("chapter_number"))
+            text = json.dumps(fact, ensure_ascii=False, default=str)
+            result = self.agent_knowledge.index_document(
+                novel_id,
+                source_type="evolution_fact_snapshot",
+                source_id=f"fact_{chapter_number or _hash_text(text)[:8]}",
+                title=f"第{chapter_number or '?'}章 Evolution 事实快照",
+                text=text,
+                chapter_number=chapter_number,
+                metadata={"indexed_from": "knowledge_rebuild"},
+                source_refs=[{"source_type": "evolution_fact_snapshot", "chapter_number": chapter_number}],
+            )
+            documents += int(result.get("document_indexed") or 0)
+            chunks += int(result.get("chunk_count") or 0)
+        try:
+            host_context = self.host_context_reader.read(novel_id, query="", before_chapter=None, limit=20)
+            native_index = self.agent_knowledge.index_host_context(novel_id, host_context)
+            documents += int(native_index.get("documents_indexed") or 0)
+            chunks += int(native_index.get("chunks_indexed") or 0)
+        except Exception as exc:
+            native_index = {"documents_indexed": 0, "chunks_indexed": 0, "error": str(exc)}
+        asset_index = self.agent_knowledge.index_agent_assets(
+            novel_id,
+            genes=self.repository.list_agent_genes(novel_id),
+            capsules=self.repository.list_agent_capsules(novel_id),
+            reflections=self.repository.list_agent_reflections(novel_id),
+            candidates=self.repository.list_agent_gene_candidates(novel_id),
+        )
+        documents += int(asset_index.get("documents_indexed") or 0)
+        chunks += int(asset_index.get("chunks_indexed") or 0)
+        coverage = self.agent_knowledge.coverage(novel_id)
+        if record_decision:
+            self.repository.append_agent_decision_record(
+                novel_id,
+                {
+                    "type": "AgentDecisionRecord",
+                    "schema_version": 1,
+                    "novel_id": novel_id,
+                    "phase": "knowledge_rebuild",
+                    "hook_name": "agent_knowledge_rebuild",
+                    "intent": "rebuild_knowledge",
+                    "input_summary": {},
+                    "output": {"documents_indexed": documents, "chunks_indexed": chunks, "coverage": coverage},
+                    "actions": [{"type": "knowledge_rebuild"}],
+                    "evidence_refs": [],
+                    "status": "succeeded",
+                    "at": _now(),
+                },
+            )
+        return {
+            "ok": True,
+            "data": {
+                "documents_indexed": documents,
+                "chunks_indexed": chunks,
+                "cleared": cleared,
+                "host_chapters": host_chapter_index,
+                "native_index": native_index,
+                "asset_index": asset_index,
+                "coverage": coverage,
+            },
+        }
 
     def list_snapshots(self, novel_id: str) -> dict[str, Any]:
         return {"items": self.repository.list_fact_snapshots(novel_id)}
@@ -421,6 +1257,16 @@ class EvolutionWorldAssistantService:
         if not card:
             return {"items": []}
         return {"character": card, "items": card.get("recent_events", [])}
+
+    def _apply_canonical_character_profiles(self, novel_id: str, chapter_number: Optional[int] = None) -> list[dict[str, Any]]:
+        canonical_characters = load_canonical_characters(self.host_database, novel_id)
+        if not canonical_characters:
+            return []
+        return self.repository.merge_character_updates(
+            novel_id,
+            [character.to_update() for character in canonical_characters],
+            chapter_number=chapter_number,
+        )
 
     def review_chapter(self, payload: dict[str, Any]) -> dict[str, Any]:
         novel_id = str(payload.get("novel_id") or "").strip()
@@ -439,11 +1285,11 @@ class EvolutionWorldAssistantService:
         issues: list[dict[str, Any]] = []
         suggestions: list[str] = []
 
-        mentioned_cards = [card for card in cards if _character_is_mentioned(card, content)]
+        mentioned_cards = [card for card in cards if character_is_mentioned(card, content)]
         for card in mentioned_cards:
             issues.extend(
                 _attach_issue_evidence(
-                    _review_character_card_against_content(card, content, chapter_number),
+                    review_character_card_against_content(card, content, chapter_number),
                     evidence,
                     subject=str(card.get("name") or ""),
                 )
@@ -456,7 +1302,7 @@ class EvolutionWorldAssistantService:
             issues.extend(
                 _attach_issue_evidence(
                     [
-                        _review_issue(
+                        review_issue(
                             "evolution_plot_continuity",
                             "suggestion",
                             f"本章提到近期角色 {', '.join(offstage_mentions[:4])}，但未找到对应人物卡或别名匹配。",
@@ -469,8 +1315,73 @@ class EvolutionWorldAssistantService:
                 )
             )
 
+        route_issues = review_route_conflicts(evidence.get("route_conflicts") or [], chapter_number)
+        if route_issues:
+            issues.extend(_attach_issue_evidence(route_issues, evidence, subject=""))
+        all_cards = (
+            self.repository.list_all_character_cards(novel_id).get("items", [])
+            if hasattr(self.repository, "list_all_character_cards")
+            else self.repository.list_character_cards(novel_id).get("items", [])
+        )
+        pollution_issues = review_extraction_pollution(
+            all_cards,
+            facts,
+            chapter_number,
+        )
+        if pollution_issues:
+            issues.extend(pollution_issues)
+        boundary_issues = review_boundary_state(
+            self.repository.list_chapter_summaries(novel_id, before_chapter=chapter_number, limit=1),
+            content,
+            chapter_number,
+        )
+        if boundary_issues:
+            issues.extend(boundary_issues)
+        repetition_issues = review_style_repetition(content, chapter_number)
+        if repetition_issues:
+            issues.extend(repetition_issues)
+        host_context = self.host_context_reader.read(
+            novel_id,
+            query=content[:1200],
+            before_chapter=chapter_number,
+            limit=6,
+        )
+        self.repository.save_host_context_summary(novel_id, self.host_context_reader.summary(host_context))
+        host_issues = review_host_context_against_content(host_context, content, chapter_number)
+        if host_issues:
+            issues.extend(host_issues)
+
         if issues:
             suggestions.append("Evolution 建议优先补足角色得知信息、能力越界或误信被修正的过渡，而不是直接删除剧情推进。")
+        issues = [normalize_evolution_issue_metadata(item) for item in issues if isinstance(item, dict)]
+        knowledge = self.agent_knowledge.search(
+            novel_id,
+            content[:1000],
+            before_chapter=chapter_number,
+            limit=10,
+        )
+        review_decision = self.agent_orchestrator.decide_review(
+            novel_id=novel_id,
+            chapter_number=chapter_number,
+            deterministic_issues=issues,
+            evidence=evidence,
+            knowledge=knowledge,
+        )
+        self._record_agent_decision(
+            novel_id,
+            phase="review_chapter",
+            chapter_number=chapter_number,
+            decision=review_decision,
+            input_summary={"deterministic_issue_count": len(issues), "knowledge_item_count": knowledge.get("item_count")},
+        )
+        agent_issues = [
+            normalize_evolution_issue_metadata({**item, "source": "agent_orchestrator"})
+            for item in (review_decision.get("issues") or [])
+            if isinstance(item, dict)
+        ]
+        if agent_issues:
+            issues.extend(agent_issues)
+            suggestions.append("Evolution Agent 已基于全文知识库补充审查问题。")
 
         return {
             "ok": True,
@@ -480,6 +1391,10 @@ class EvolutionWorldAssistantService:
                 "reviewed_characters": [card.get("name") for card in mentioned_cards],
                 "evidence": evidence.get("events", []),
                 "constraints": evidence.get("constraints", []),
+                "route_conflicts": evidence.get("route_conflicts", []),
+                "host_context": self.host_context_reader.summary(host_context),
+                "agent_decision": review_decision,
+                "agent_knowledge": {"item_count": knowledge.get("item_count"), "source_types": knowledge.get("source_types") or []},
             },
         }
 
@@ -490,17 +1405,206 @@ class EvolutionWorldAssistantService:
         if not novel_id or not chapter_number:
             return {"ok": True, "skipped": True, "reason": "missing novel_id/chapter_number"}
         issues = review_result.get("issues") or []
+        issue_items = [normalize_evolution_issue_metadata(item) for item in issues if isinstance(item, dict)] if isinstance(issues, list) else []
+        solidified, agent_events = solidify_capsules_from_review(
+            novel_id=novel_id,
+            chapter_number=chapter_number,
+            issues=issue_items,
+            existing_capsules=self.repository.list_agent_capsules(novel_id),
+            at=_now(),
+        )
+        for capsule in solidified:
+            self.repository.append_agent_capsule(novel_id, capsule)
+        for event in agent_events:
+            self.repository.append_agent_event(novel_id, event)
+        selection = _matching_agent_selection(
+            self.repository.list_agent_selection_records(novel_id, limit=30),
+            chapter_number,
+        )
+        evaluated_genes, evaluated_capsules, evaluation_event = evaluate_strategy_effectiveness(
+            novel_id=novel_id,
+            chapter_number=chapter_number,
+            issues=issue_items,
+            selection=selection,
+            genes=self.repository.list_agent_genes(novel_id),
+            capsules=self.repository.list_agent_capsules(novel_id),
+            at=_now(),
+        )
+        if evaluation_event:
+            self.repository.save_agent_genes(novel_id, evaluated_genes)
+            for capsule in evaluated_capsules:
+                if str(capsule.get("id") or "") in set(selection.get("selected_capsule_ids") or []):
+                    self.repository.append_agent_capsule(novel_id, capsule)
+            self.repository.append_agent_event(novel_id, evaluation_event)
+        agent_api_record = None
+        reflection_record = None
+        agent_api_settings = self.get_settings(safe=False).get("agent_api")
+        if solidified and isinstance(agent_api_settings, dict) and agent_api_settings.get("enabled"):
+            agent_api_record = self.agent_runtime.build_reflection(
+                novel_id=novel_id,
+                chapter_number=chapter_number,
+                capsules=solidified,
+                issues=issue_items,
+                settings=agent_api_settings,
+            )
+            reflection_record = agent_api_record.get("reflection") if isinstance(agent_api_record, dict) else None
+            self.repository.append_agent_event(novel_id, _agent_reflection_event(novel_id, chapter_number, agent_api_record, agent_api_settings))
+        elif solidified:
+            reflection_record = build_reflection_record(
+                novel_id=novel_id,
+                chapter_number=chapter_number,
+                capsules=solidified,
+                issues=issue_items,
+                source="deterministic_fallback",
+                ok=True,
+                at=_now(),
+            )
+        if reflection_record:
+            self.repository.append_agent_reflection(novel_id, reflection_record)
+            self.repository.append_agent_event(
+                novel_id,
+                {
+                    "type": "EvolutionEvent",
+                    "schema_version": 1,
+                    "id": f"evt_reflection_saved_{_hash_text(novel_id + str(chapter_number) + str(reflection_record.get('id') or ''))}",
+                    "intent": "reflect",
+                    "hook_name": "after_chapter_review",
+                    "novel_id": novel_id,
+                    "chapter_number": chapter_number,
+                    "signals": ["review_reflection", "agent_memory"],
+                    "genes_used": [],
+                    "capsule_id": None,
+                    "outcome": {"status": "success", "reflection_id": reflection_record.get("id")},
+                    "meta": {"at": _now(), "source": reflection_record.get("source")},
+                },
+            )
+        reflection_query = "\n".join(str(item.get("description") or item.get("issue_type") or "") for item in issue_items[:8])
+        reflection_knowledge = self.agent_knowledge.search(
+            novel_id,
+            reflection_query or f"第{chapter_number}章审查反思",
+            before_chapter=chapter_number + 1,
+            limit=10,
+        )
+        orchestration_decision = self.agent_orchestrator.decide_reflection(
+            novel_id=novel_id,
+            chapter_number=chapter_number,
+            issues=issue_items,
+            capsules=solidified,
+            active_genes=self.repository.list_agent_genes(novel_id),
+            knowledge=reflection_knowledge,
+        )
+        self._record_agent_decision(
+            novel_id,
+            phase="after_chapter_review",
+            chapter_number=chapter_number,
+            decision=orchestration_decision,
+            input_summary={
+                "issue_count": len(issue_items),
+                "capsule_count": len(solidified),
+                "knowledge_item_count": reflection_knowledge.get("item_count"),
+            },
+        )
+        gene_versions: list[dict[str, Any]] = []
+        if orchestration_decision.get("gene_patches"):
+            updated_genes, gene_versions = apply_gene_patches(
+                novel_id=novel_id,
+                chapter_number=chapter_number,
+                genes=self.repository.list_agent_genes(novel_id),
+                patches=orchestration_decision.get("gene_patches") or [],
+                at=_now(),
+            )
+            if gene_versions:
+                self.repository.save_agent_genes(novel_id, updated_genes)
+                for version in gene_versions:
+                    self.repository.append_gene_version(novel_id, version)
+                    self.repository.append_agent_event(
+                        novel_id,
+                        {
+                            "type": "EvolutionEvent",
+                            "schema_version": 1,
+                            "id": f"evt_gene_version_{_hash_text(novel_id + str(chapter_number) + str(version.get('gene_id')) + str(version.get('version')))}",
+                            "intent": "evolve_gene",
+                            "hook_name": "after_chapter_review",
+                            "novel_id": novel_id,
+                            "chapter_number": chapter_number,
+                            "signals": ["agent_auto_evolution", "gene_patch"],
+                            "genes_used": [version.get("gene_id")],
+                            "capsule_id": None,
+                            "outcome": {"status": "success", "gene_id": version.get("gene_id"), "version": version.get("version")},
+                            "meta": {"at": _now(), "mode": "immediate"},
+                        },
+                    )
+                self.agent_knowledge.index_agent_assets(
+                    novel_id,
+                    genes=updated_genes,
+                    capsules=self.repository.list_agent_capsules(novel_id),
+                    reflections=self.repository.list_agent_reflections(novel_id),
+                    candidates=self.repository.list_agent_gene_candidates(novel_id),
+                )
+        candidate_records, memory_index, candidate_events = consolidate_agent_memory(
+            novel_id=novel_id,
+            chapter_number=chapter_number,
+            genes=self.repository.list_agent_genes(novel_id),
+            capsules=self.repository.list_agent_capsules(novel_id),
+            reflections=self.repository.list_agent_reflections(novel_id),
+            existing_candidates=self.repository.list_agent_gene_candidates(novel_id),
+            at=_now(),
+        )
+        for candidate in candidate_records:
+            self.repository.append_agent_gene_candidate(novel_id, candidate)
+            self._upsert_pending_review_candidate(
+                novel_id=novel_id,
+                chapter_number=chapter_number,
+                candidate_type="agent_gene_candidate",
+                risk_level="medium",
+                payload=candidate,
+                evidence=[{"source_type": "after_chapter_review", "chapter_number": chapter_number}],
+                reason="agent_gene_candidate_pending_review",
+            )
+        for event in candidate_events:
+            self.repository.append_agent_event(novel_id, event)
+        self.repository.save_agent_memory_index(novel_id, memory_index)
+        self.agent_knowledge.index_agent_assets(
+            novel_id,
+            genes=self.repository.list_agent_genes(novel_id),
+            capsules=self.repository.list_agent_capsules(novel_id),
+            reflections=self.repository.list_agent_reflections(novel_id),
+            candidates=self.repository.list_agent_gene_candidates(novel_id),
+        )
         self.repository.append_review_record(
             novel_id,
             {
                 "chapter_number": chapter_number,
-                "issue_count": len(issues) if isinstance(issues, list) else 0,
+                "issue_count": len(issue_items),
+                "issues": issue_items[:12],
+                "issue_types": [str(item.get("issue_type") or "") for item in issue_items[:12]],
                 "overall_score": review_result.get("overall_score"),
                 "source": str(payload.get("source") or "chapter_review_service"),
+                "solidified_capsules": [capsule.get("id") for capsule in solidified],
+                "selection_id": selection.get("id") if selection else None,
+                "strategy_evaluation": evaluation_event.get("outcome") if evaluation_event else None,
+                "agent_api_reflection": agent_api_record,
+                "agent_orchestration": orchestration_decision,
+                "gene_versions": [version.get("gene_id") for version in gene_versions],
+                "reflection_id": reflection_record.get("id") if reflection_record else None,
+                "gene_candidates": [candidate.get("id") for candidate in candidate_records],
                 "at": _now(),
             },
         )
-        return {"ok": True, "data": {"recorded": True, "chapter_number": chapter_number}}
+        return {
+            "ok": True,
+            "data": {
+                "recorded": True,
+                "chapter_number": chapter_number,
+                "solidified_capsules": solidified,
+                "agent_api_reflection": agent_api_record,
+                "agent_orchestration": orchestration_decision,
+                "gene_versions": gene_versions,
+                "reflection": reflection_record,
+                "gene_candidates": candidate_records,
+                "memory_index": memory_index,
+            },
+        }
 
     def build_context_patch(self, novel_id: str, chapter_number: Optional[int], *, outline: str = "") -> dict[str, Any]:
         facts = self.repository.list_fact_snapshots(
@@ -512,6 +1616,28 @@ class EvolutionWorldAssistantService:
         chapter_summaries = self.repository.list_chapter_summaries(novel_id, before_chapter=chapter_number, limit=10)
         volume_summaries = self.repository.list_volume_summaries(novel_id, before_chapter=chapter_number, limit=3)
         previous_injections = self.repository.list_context_injection_records(novel_id, limit=20)
+        route_map = self.get_global_route_map(novel_id)
+        host_context = self._read_host_context_safe(novel_id, chapter_number, outline=outline)
+        semantic_memory = self._read_semantic_memory_safe(novel_id, chapter_number, outline=outline)
+        self._save_context_dependency_summaries(novel_id, host_context, semantic_memory)
+        review_records = self.repository.list_review_records(novel_id, limit=10)
+        style_repetition_state = self.repository.get_style_repetition_state(novel_id)
+        agent_selection = select_agent_assets(
+            novel_id=novel_id,
+            chapter_number=chapter_number,
+            signals=extract_context_signals(
+                outline=outline,
+                chapter_summaries=chapter_summaries,
+                route_map=route_map,
+                semantic_memory=semantic_memory,
+                review_records=review_records,
+                host_context=host_context,
+            ),
+            genes=self.repository.list_agent_genes(novel_id),
+            capsules=self.repository.list_agent_capsules(novel_id),
+            outline=outline,
+            at=_now(),
+        )
         return build_context_patch(
             novel_id,
             chapter_number,
@@ -521,366 +1647,274 @@ class EvolutionWorldAssistantService:
             chapter_summaries=chapter_summaries,
             volume_summaries=volume_summaries,
             previous_injections=previous_injections,
+            route_map=route_map,
+            semantic_memory=semantic_memory,
+            host_context=host_context,
+            agent_selection=agent_selection,
+            style_repetition_state=style_repetition_state,
         )
+
+    def _read_host_context_safe(self, novel_id: str, chapter_number: Optional[int], *, outline: str) -> dict[str, Any]:
+        def read() -> dict[str, Any]:
+            return self.host_context_reader.read(
+                novel_id,
+                query=outline,
+                before_chapter=chapter_number,
+                limit=6,
+            )
+
+        result = _call_with_timeout(read, timeout_seconds=CONTEXT_EXTERNAL_TIMEOUT_SECONDS)
+        if result.get("ok") and isinstance(result.get("value"), dict):
+            return result["value"]
+        reason = "host_context_timeout" if result.get("timeout") else "host_context_failed"
+        if result.get("error"):
+            logger.warning("Evolution host context degraded for %s: %s", novel_id, result["error"])
+        return _empty_host_context(novel_id, before_chapter=chapter_number, reason=reason)
+
+    def _read_semantic_memory_safe(self, novel_id: str, chapter_number: Optional[int], *, outline: str) -> dict[str, Any]:
+        def search() -> dict[str, Any]:
+            return self.semantic_memory.search(
+                novel_id,
+                outline,
+                before_chapter=chapter_number,
+                limit=8,
+            )
+
+        result = _call_with_timeout(search, timeout_seconds=CONTEXT_EXTERNAL_TIMEOUT_SECONDS)
+        if result.get("ok") and isinstance(result.get("value"), dict):
+            return result["value"]
+        reason = "semantic_recall_timeout" if result.get("timeout") else "semantic_recall_failed"
+        if result.get("error"):
+            logger.warning("Evolution semantic recall degraded for %s: %s", novel_id, result["error"])
+        return {
+            "items": [],
+            "source": reason,
+            "vector_enabled": False,
+            "collection_status": {"enabled": False, "degraded_reason": reason},
+        }
+
+    def _save_context_dependency_summaries(
+        self,
+        novel_id: str,
+        host_context: dict[str, Any],
+        semantic_memory: dict[str, Any],
+    ) -> None:
+        try:
+            self.repository.save_host_context_summary(novel_id, self.host_context_reader.summary(host_context))
+        except Exception as exc:
+            logger.warning("Evolution host context summary write failed for %s: %s", novel_id, exc)
+        try:
+            self.repository.save_semantic_recall_summary(
+                novel_id,
+                {
+                    "source": semantic_memory.get("source"),
+                    "vector_enabled": bool(semantic_memory.get("vector_enabled")),
+                    "item_count": len(semantic_memory.get("items") or []),
+                    "source_types": sorted({str(item.get("source_type") or "") for item in semantic_memory.get("items") or [] if isinstance(item, dict)}),
+                    "collection_status": semantic_memory.get("collection_status") or {},
+                },
+            )
+        except Exception as exc:
+            logger.warning("Evolution semantic recall summary write failed for %s: %s", novel_id, exc)
+
+    def _read_native_after_commit_context(self, *, novel_id: str, chapter_number: int, content: str) -> dict[str, Any]:
+        try:
+            host_context = self.host_context_reader.read(
+                novel_id,
+                query=content[:1200],
+                before_chapter=chapter_number + 1,
+                limit=6,
+            )
+            summary = self.host_context_reader.summary(host_context)
+            self.repository.save_host_context_summary(novel_id, summary)
+        except Exception as exc:
+            logger.warning("Evolution native after-commit context read failed for %s ch%s: %s", novel_id, chapter_number, exc)
+            summary = _empty_host_context(novel_id, before_chapter=chapter_number + 1, reason="native_after_commit_failed")
+        counts = summary.get("counts") if isinstance(summary.get("counts"), dict) else {}
+        native_counts = {
+            key: int(counts.get(key) or 0)
+            for key in ("story_knowledge", "triples", "foreshadow", "storyline", "timeline", "dialogue", "memory_engine")
+        }
+        has_native_sync = any(native_counts.values())
+        return {
+            "source": "plotpilot_native_after_commit",
+            "chapter_number": chapter_number,
+            "has_native_sync": has_native_sync,
+            "fallback_degraded": not has_native_sync,
+            "native_counts": native_counts,
+            "degraded_sources": list(summary.get("degraded_sources") or []),
+            "empty_sources": list(summary.get("empty_sources") or []),
+            "suggestion": "" if has_native_sync else "PlotPilot 原生章后同步尚未命中；本章 Evolution 抽取仅作为 degraded fallback，不覆盖宿主主库。",
+        }
 
     def build_context_summary(self, novel_id: str, chapter_number: Optional[int], *, outline: str = "") -> str:
         return render_patch_summary(self.build_context_patch(novel_id, chapter_number, outline=outline))
 
 
-def _build_prehistory_worldline(
+def _agent_reflection_event(novel_id: str, chapter_number: int, record: dict[str, Any] | None, settings: dict[str, Any]) -> dict[str, Any]:
+    record = record if isinstance(record, dict) else {}
+    at = str(record.get("at") or _now())
+    ok = bool(record.get("ok"))
+    return {
+        "type": "EvolutionEvent",
+        "schema_version": 1,
+        "id": f"evt_agent_api{'_failed' if not ok else ''}_{_hash_text(novel_id + str(chapter_number) + at)}",
+        "intent": "reflect",
+        "hook_name": "after_chapter_review",
+        "novel_id": novel_id,
+        "chapter_number": chapter_number,
+        "signals": ["agent_api", "review_reflection"],
+        "genes_used": [],
+        "capsule_id": None,
+        "outcome": (
+            {"status": "success", "capsule_count": len(record.get("capsule_ids") or [])}
+            if ok
+            else {"status": "failed", "error": str(record.get("error") or "")}
+        ),
+        "meta": {"at": at, "model": str(settings.get("model") or "")} if ok else {"at": at},
+    }
+
+
+def _matching_agent_selection(records: list[dict[str, Any]], chapter_number: int) -> dict[str, Any]:
+    for record in reversed(records or []):
+        if _int_or_none(record.get("chapter_number")) == chapter_number:
+            return record
+    return {}
+
+
+
+_NON_CHARACTER_ENTITY_NAMES = {
+    "金属牌",
+    "方向",
+    "查询记录",
+    "记录",
+    "编号",
+    "债务",
+    "契约",
+    "防火门",
+    "黑色书籍",
+    "书籍",
+    "访客卡",
+    "臂章",
+    "钥匙",
+    "黑匣子",
+    "水箱",
+    "水箱下方",
+    "章节标题",
+    "标题",
+    "线索",
+    "真相",
+    "秘密",
+    "记忆",
+    "沉默",
+}
+_NON_CHARACTER_ENTITY_TOKENS = (
+    "金属",
+    "查询",
+    "记录",
+    "方向",
+    "编号",
+    "钥匙",
+    "防火门",
+    "书籍",
+    "教程",
+    "章节",
+    "标题",
+    "线索",
+    "真相",
+    "秘密",
+    "记忆",
+    "警报",
+    "水箱",
+    "下方",
+)
+_NON_CHARACTER_ENTITY_SUFFIXES = ("之谜", "真相", "记录", "线索", "计划", "任务", "报告", "下方", "区域")
+_BAD_LOCATION_NAMES = {"专门", "道防火门", "个信息站", "老板专门", "但他咬牙站"}
+_BAD_LOCATION_PARTS = ("咬牙", "老板", "专门", "那道", "这道")
+
+
+def _filter_snapshot_characters(names: list[Any]) -> list[str]:
+    return _dedupe_runtime(str(name).strip() for name in names if _valid_snapshot_character_name(str(name or "")))
+
+
+def _filter_snapshot_locations(names: list[Any]) -> list[str]:
+    return _dedupe_runtime(str(name).strip() for name in names if _valid_snapshot_location_name(str(name or "")))
+
+
+def _valid_snapshot_character_name(name: str) -> bool:
+    value = str(name or "").strip()
+    if not value or value in _NON_CHARACTER_ENTITY_NAMES:
+        return False
+    if any(token in value for token in _NON_CHARACTER_ENTITY_TOKENS):
+        return False
+    if any(value.endswith(suffix) for suffix in _NON_CHARACTER_ENTITY_SUFFIXES):
+        return False
+    if value.startswith("第") and ("章" in value or "幕" in value):
+        return False
+    if 6 < len(value) and not any(token in value for token in ("·", "氏", "家", "队", "团")):
+        return False
+    return True
+
+
+def _valid_snapshot_location_name(name: str) -> bool:
+    value = str(name or "").strip()
+    if len(value) < 2 or value in _BAD_LOCATION_NAMES:
+        return False
+    if any(token in value for token in _BAD_LOCATION_PARTS):
+        return False
+    return True
+
+
+def _dedupe_runtime(items: Any) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for item in items:
+        value = str(item or "").strip()
+        if value and value not in seen:
+            seen.add(value)
+            result.append(value)
+    return result
+
+
+def _build_style_repetition_state(
     *,
     novel_id: str,
-    title: str,
-    premise: str,
-    genre: str,
-    world_preset: str,
-    style_hint: str,
-    target_chapters: Optional[int],
-    length_tier: str,
+    chapter_number: int,
+    content: str,
+    recent_summaries: list[dict[str, Any]],
     at: str,
 ) -> dict[str, Any]:
-    profile = _select_worldline_profile(genre, world_preset, premise, target_chapters, length_tier)
-    axes = _infer_story_axes(genre, world_preset, premise)
-    style_adapter = _build_style_adapter(
-        title=title,
-        premise=premise,
-        genre=genre,
-        world_preset=world_preset,
-        style_hint=style_hint,
-    )
-    forces = _build_world_forces(axes, profile)
-    eras = _build_prehistory_eras(profile, axes, forces, title)
-    seeds = _build_prehistory_foreshadow_seeds(profile, axes, forces)
+    text = "\n".join([*(str(item.get("short_summary") or "") for item in recent_summaries[-3:]), str(content or "")])
+    phrases = []
+    min_count = 2
+    for phrase in REPETITION_PHRASES:
+        count = text.count(phrase)
+        if count >= min_count:
+            phrases.append(
+                {
+                    "phrase": phrase,
+                    "count": count,
+                    "chapters": [chapter_number],
+                    "replacement_guidance": replacement_guidance_for_phrase(phrase),
+                    "source": "recent_repetition_scan",
+                    "strategy_tier": "intended_t1",
+                }
+            )
     return {
         "schema_version": 1,
         "novel_id": novel_id,
-        "title": title,
-        "source": "deterministic_prehistory_generator",
-        "created_at": at,
-        "input_digest": _hash_text("|".join([title, genre, world_preset, premise, str(target_chapters or ""), length_tier])),
-        "depth": {
-            "tier": profile["tier"],
-            "label": profile["label"],
-            "horizon_years": profile["horizon_years"],
-            "era_count": profile["era_count"],
-            "detail_level": profile["detail_level"],
-            "reason": profile["reason"],
-        },
-        "story_axes": axes,
-        "style_adapter": style_adapter,
-        "eras": eras,
-        "forces": forces,
-        "foreshadow_seeds": seeds,
-        "planning_guidance": _build_prehistory_guidance(profile, axes),
-    }
-
-
-def _select_worldline_profile(genre: str, world_preset: str, premise: str, target_chapters: Optional[int], length_tier: str) -> dict[str, Any]:
-    text = " ".join([genre, world_preset, premise, length_tier]).lower()
-    target = target_chapters or 100
-    epic_terms = ["玄幻", "修仙", "仙侠", "奇幻", "史诗", "神话", "王朝", "帝国", "科幻", "星际", "宇宙", "克苏鲁", "文明"]
-    complex_terms = ["悬疑", "推理", "权谋", "谍战", "战争", "末世", "赛博", "犯罪", "宫斗", "阴谋", "群像", "历史"]
-    intimate_terms = ["都市", "校园", "日常", "恋爱", "青春", "职场", "家庭", "轻喜", "现代"]
-    if length_tier == "epic" or target >= 500 or any(term in text for term in epic_terms):
-        return {"tier": "epic", "label": "宏大长线", "horizon_years": 3000 if target < 1000 else 10000, "era_count": 6 if target < 1000 else 7, "detail_level": "high", "reason": "题材或篇幅需要跨文明/跨时代因果，前史必须提供制度、灾难与禁忌的长线来源。"}
-    if target >= 200 or any(term in text for term in complex_terms):
-        return {"tier": "complex", "label": "复杂因果", "horizon_years": 180, "era_count": 5, "detail_level": "medium_high", "reason": "题材强调阴谋、制度或多方博弈，需要至少数代人的秘密、旧案和势力传承。"}
-    if any(term in text for term in intimate_terms):
-        return {"tier": "intimate", "label": "近现代关系线", "horizon_years": 12, "era_count": 3, "detail_level": "focused", "reason": "题材更重人物关系和当代生活，前史以近年创伤、家庭/学校/职场制度和关系源头为主。"}
-    return {"tier": "standard", "label": "标准长篇", "horizon_years": 60, "era_count": 4, "detail_level": "medium", "reason": "默认按中篇商业叙事处理，保留一代以上因果和开篇前夜的可用伏笔。"}
-
-
-def _infer_story_axes(genre: str, world_preset: str, premise: str) -> list[str]:
-    text = " ".join([genre, world_preset, premise])
-    candidates = [
-        ("权力秩序", ["权", "王", "贵族", "组织", "公司", "帝国", "宗门", "学校"]),
-        ("禁忌知识", ["禁", "秘", "真相", "档案", "旧案", "研究", "知识", "黑箱"]),
-        ("资源争夺", ["资源", "灵气", "矿", "能源", "钥匙", "遗产", "名额", "土地"]),
-        ("身份伪装", ["伪装", "身份", "替身", "大小姐", "卧底", "假", "面具"]),
-        ("情感依赖", ["依赖", "爱", "亲吻", "拥抱", "家人", "青梅", "搭档", "守护"]),
-        ("异常觉醒", ["觉醒", "异能", "异常", "系统", "天赋", "魔法", "污染", "变异"]),
-        ("灾难余波", ["灾", "战争", "崩溃", "末世", "瘟疫", "事故", "袭击", "毁灭"]),
-    ]
-    axes = [name for name, terms in candidates if any(term in text for term in terms)]
-    if not axes:
-        axes = ["权力秩序", "人物欲望", "隐藏真相"]
-    elif len(axes) == 1:
-        axes.append("人物欲望")
-    return axes[:4]
-
-
-def _build_world_forces(axes: list[str], profile: dict[str, Any]) -> list[dict[str, str]]:
-    forces = []
-    for index, axis in enumerate(axes, start=1):
-        forces.append({"force_id": f"force_{index}", "name": f"{axis}的既得利益者", "type": "institution" if axis in {"权力秩序", "身份伪装"} else "pressure", "desire": f"维持{axis}带来的优势，不允许开篇主线轻易揭开根因。", "weakness": f"{axis}的历史断层或见不得光的交换条件。", "planning_use": "可作为主线阻力、阶段反派或伏笔回收对象。"})
-    if profile["tier"] in {"epic", "complex"}:
-        forces.append({"force_id": "force_legacy", "name": "旧时代残留机制", "type": "legacy_system", "desire": "继续按旧规则筛选幸存者、继承人或真相持有者。", "weakness": "只要有人理解旧时代的代价，就能绕开表层秩序。", "planning_use": "用于解释远古遗迹、秘密机构、旧案卷宗和终局反转。"})
-    return forces
-
-
-def _build_prehistory_eras(profile: dict[str, Any], axes: list[str], forces: list[dict[str, str]], title: str) -> list[dict[str, Any]]:
-    names = ["根源期", "制度成形期", "第一次创伤期", "秩序粉饰期", "暗流积累期", "开篇前夜", "未公开余波期"]
-    horizon = int(profile["horizon_years"])
-    count = int(profile["era_count"])
-    span = max(horizon // count, 1)
-    eras = []
-    for index in range(count):
-        starts = horizon - span * index
-        ends = max(horizon - span * (index + 1), 0)
-        axis = axes[index % len(axes)]
-        force = forces[index % len(forces)]
-        name = names[index]
-        eras.append({"era_id": f"pre_{index + 1}", "name": name, "time_label": "开篇前1年-第1章前" if index == count - 1 else f"开篇前约{starts}-{ends}年", "summary": _era_summary(name, axis, force.get("name", ""), title), "causal_effect": f"把{axis}转化为开篇可见的压力，使主角面对的不是偶然麻烦，而是历史长期积累后的爆点。", "planning_hooks": [f"用一件看似日常的小物/制度痕迹暗示{_name_or_axis(name, axis)}。", f"让{force.get('name')}的行动暴露一条旧因果，但暂不解释全部真相。"]})
-    return eras
-
-
-def _era_summary(era_name: str, axis: str, force_name: str, title: str) -> str:
-    subject = title or "本故事"
-    if era_name == "根源期":
-        return f"{subject}的核心矛盾在{axis}上首次成形，{force_name}掌握了最初的解释权。"
-    if era_name == "制度成形期":
-        return f"围绕{axis}形成稳定制度，公开规则保护秩序，隐藏规则保护少数人的收益。"
-    if era_name == "第一次创伤期":
-        return f"{axis}引发无法公开的事故、背叛或牺牲，成为后续人物命运的隐性债务。"
-    if era_name == "秩序粉饰期":
-        return f"旧创伤被改写成合理历史，幸存者、受益者和失语者被安排到不同位置。"
-    if era_name == "暗流积累期":
-        return f"被压住的证据和欲望重新靠近开篇人物，冲突开始从背景走向台前。"
-    return f"开篇前夜，各方围绕{axis}完成最后一次布置，主角即将撞上这条历史暗线。"
-
-
-def _name_or_axis(name: str, axis: str) -> str:
-    return axis if name == "开篇前夜" else f"{name}的{axis}"
-
-
-def _build_prehistory_foreshadow_seeds(profile: dict[str, Any], axes: list[str], forces: list[dict[str, str]]) -> list[dict[str, Any]]:
-    seeds = []
-    for index, axis in enumerate(axes, start=1):
-        force = forces[(index - 1) % len(forces)]
-        seeds.append({"seed_id": f"seed_{index}", "axis": axis, "planting_form": f"开篇用一句异常称呼、一份残缺记录或一次不合常理的回避埋下{axis}。", "surface_meaning": "读者初看只会认为这是世界观质感或人物习惯。", "true_meaning": f"它指向{force.get('name')}在前史中留下的债务。", "recommended_payoff": "中后期当主角掌握证据或付出代价后再解释完整因果。"})
-    if profile["tier"] in {"epic", "complex"}:
-        seeds.append({"seed_id": "seed_epoch_lie", "axis": "历史谎言", "planting_form": "让官方年表、家族传说或宗门记录出现一个无法同时成立的日期。", "surface_meaning": "像是资料误差。", "true_meaning": "旧时代被人为截断，某个关键事件发生时间被整体改写。", "recommended_payoff": "用于卷末或部末反转，推动主线从个人冲突升级为世界结构冲突。"})
-    return seeds
-
-
-def _build_prehistory_guidance(profile: dict[str, Any], axes: list[str]) -> list[str]:
-    guidance = ["前史只提供因果压力，不替代正文选择；规划时应把它转化为角色目标、误判、代价和伏笔。", f"当前前史深度为{profile['label']}：大纲中至少选择一条前史因果进入第一卷，一条保留到中后期回收。", f"优先围绕{axes[0]}设计开篇钩子，让读者先看到结果，再逐步追溯原因。"]
-    guidance.append("长线题材需要把旧时代因果拆成多次揭示：误导线索、阶段真相、终局真相不可一次说完。" if profile["tier"] in {"epic", "complex"} else "近关系/现代题材不宜堆砌古老历史，重点让前史服务人物关系、家庭压力或制度惯性。")
-    return guidance
-
-
-def _build_style_adapter(
-    *,
-    title: str = "",
-    premise: str = "",
-    genre: str = "",
-    world_preset: str = "",
-    style_hint: str = "",
-) -> dict[str, Any]:
-    raw_text = "\n".join(part for part in [style_hint, genre, world_preset, premise, title] if part).strip()
-    tags = _detect_style_tags(raw_text)
-    primary = tags[0] if tags else "custom_or_unspecified"
-    strategy = _style_strategy(primary)
-    return {
-        "schema_version": 1,
-        "mode": "semantic_first_style_late_binding",
-        "requested_style": style_hint[:500],
-        "detected_style_tags": tags or ["custom_or_unspecified"],
-        "primary_style": primary,
-        "rendering_strategy": strategy,
-        "adaptation_contract": [
-            "Evolution 前史是语义蓝图，不是最终正文；规划和写作时必须按小说当前文风重新表达。",
-            "保留因果、秘密、代价、伏笔功能，允许彻底改写措辞、节奏、意象、叙述视角和信息密度。",
-            "若用户/Bible/章节样本文风与本适配器不一致，以最新显式文风为准。",
-            "不要把前史条目机械塞进正文；只能转化为符合文风的场景痕迹、人物选择、传闻、物件或沉默。",
-        ],
-        "style_axes": {
-            "diction": strategy["diction"],
-            "sentence_rhythm": strategy["sentence_rhythm"],
-            "imagery": strategy["imagery"],
-            "information_density": strategy["information_density"],
-            "revelation": strategy["revelation"],
-        },
-    }
-
-
-def _build_runtime_style_adapter(worldline: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
-    stored = worldline.get("style_adapter") if isinstance(worldline.get("style_adapter"), dict) else {}
-    style_hint = _extract_runtime_style_hint(payload)
-    if not style_hint:
-        return stored or _build_style_adapter()
-    runtime = _build_style_adapter(
-        title=str(worldline.get("title") or ""),
-        premise=str(payload.get("premise") or payload.get("novel_premise") or ""),
-        genre=str(payload.get("genre") or ""),
-        world_preset=str(payload.get("world_preset") or ""),
-        style_hint=style_hint,
-    )
-    runtime["base_detected_style_tags"] = stored.get("detected_style_tags") or []
-    runtime["style_source"] = "runtime_payload"
-    return runtime
-
-
-def _extract_runtime_style_hint(payload: dict[str, Any]) -> str:
-    candidates: list[str] = []
-    for key in ("style_hint", "style", "writing_style", "voice", "tone"):
-        value = str(payload.get(key) or "").strip()
-        if value:
-            candidates.append(value)
-    bible_context = payload.get("bible_context") if isinstance(payload.get("bible_context"), dict) else {}
-    if bible_context:
-        for key in ("style_hint", "style", "writing_style", "voice", "tone"):
-            value = str(bible_context.get(key) or "").strip()
-            if value:
-                candidates.append(value)
-        for note in bible_context.get("style_notes") or []:
-            if isinstance(note, dict):
-                content = str(note.get("content") or note.get("description") or "").strip()
-                category = str(note.get("category") or "").strip()
-                if content:
-                    candidates.append(f"{category}: {content}" if category else content)
-            else:
-                value = str(note or "").strip()
-                if value:
-                    candidates.append(value)
-    return "\n".join(candidates)[:1200]
-
-
-def _detect_style_tags(text: str) -> list[str]:
-    value = str(text or "").lower()
-    buckets = [
-        ("poetic_lyrical", ["诗", "抒情", "散文", "意象", "唯美", "朦胧", "浪漫", " lyrical", "poetic"]),
-        ("plain_realist", ["白描", "现实", "纪实", "克制", "冷静", "平实", "生活流", "realist", "minimal"]),
-        ("fast_web_serial", ["爽文", "热血", "节奏快", "强情绪", "打脸", "升级", "网文", "serial"]),
-        ("comedic_light", ["轻松", "吐槽", "搞笑", "喜剧", "沙雕", "幽默", "日常向", "comedy"]),
-        ("classical_archaic", ["古风", "文言", "典雅", "志怪", "章回", "古典", "classical"]),
-        ("hardboiled_noir", ["冷硬", "黑色", "硬汉", "犯罪", "侦探", "noir", "hardboiled"]),
-        ("cosmic_ominous", ["克苏鲁", "诡异", "恐怖", "压抑", "阴郁", "不可名状", "ominous", "horror"]),
-        ("technical_sf", ["硬科幻", "技术", "赛博", "算法", "工程", "实验", "cyber", "sci-fi", "science fiction"]),
-        ("fairytale_fable", ["童话", "寓言", "儿童", "温柔", "治愈", "fairytale", "fable"]),
-        ("epic_chronicle", ["史诗", "编年", "群像", "战争史", "王朝", "文明史", "chronicle", "epic"]),
-    ]
-    tags = [name for name, terms in buckets if any(term in value for term in terms)]
-    return tags[:4]
-
-
-def _style_strategy(primary: str) -> dict[str, str]:
-    strategies = {
-        "poetic_lyrical": {"diction": "用意象、感官和隐喻承载信息，少用制度说明词。", "sentence_rhythm": "句式可长短错落，保留回声和余韵。", "imagery": "把前史转成物候、颜色、声音、旧物和身体感受。", "information_density": "低到中；一次只透露一层情绪化线索。", "revelation": "先给象征，再给事实，真相像潮水一样回返。"},
-        "plain_realist": {"diction": "用日常、具体、克制的词，避免宏大抽象名词压过人物生活。", "sentence_rhythm": "中短句为主，因果藏在行动和细节里。", "imagery": "使用账单、校规、工位、病历、街道等可触摸物。", "information_density": "中；每个线索服务一个现实压力。", "revelation": "通过人物碰壁、旁人回避、制度流程逐步显影。"},
-        "fast_web_serial": {"diction": "用目标、阻力、赌注、反转来表达前史，保持可读性和推进感。", "sentence_rhythm": "短句和强转折更优先。", "imagery": "线索要能迅速变成冲突、奖励、惩罚或升级资源。", "information_density": "中到高；每幕至少让一条前史因果推动爽点或危机。", "revelation": "误导-爆点-更大黑幕，分层抬高期待。"},
-        "comedic_light": {"diction": "用轻巧、反差和吐槽式误会承载严肃因果。", "sentence_rhythm": "短促灵活，允许包袱后突然落入真相。", "imagery": "把秘密藏在尴尬物件、错位对话和日常事故里。", "information_density": "低到中；不要让设定解释压垮喜剧节奏。", "revelation": "先当笑点，再在关键处证明笑点是伏笔。"},
-        "classical_archaic": {"diction": "用典雅、含蓄、礼法/名分/旧闻承载因果。", "sentence_rhythm": "整饬、留白，少用现代术语。", "imagery": "碑、谱牒、旧诏、祠堂、风物和传闻适合承载前史。", "information_density": "中；重传承和名分变迁。", "revelation": "由传闻、旧物、礼制破绽层层反证。"},
-        "hardboiled_noir": {"diction": "冷、硬、短，重事实、伤痕、交易和背叛。", "sentence_rhythm": "短句优先，少解释，多压迫。", "imagery": "雨夜、档案袋、烟味、账本、监控盲区等具体痕迹。", "information_density": "中高；每条线索都带风险。", "revelation": "让真相像旧伤一样被迫撕开。"},
-        "cosmic_ominous": {"diction": "避免直接解释不可名状之物，用异常、缺页、重复梦境和认知污染呈现。", "sentence_rhythm": "逐步失稳，允许不完全解释。", "imagery": "星象、潮声、畸形仪式、腐蚀文字、无法对齐的时间。", "information_density": "低到中；保留未知感。", "revelation": "每次解释只揭开更深的不安。"},
-        "technical_sf": {"diction": "用系统、协议、实验、数据缺口和工程限制表达因果。", "sentence_rhythm": "清晰准确，避免玄学化。", "imagery": "日志、接口、传感器异常、材料疲劳、算法偏差。", "information_density": "中高；前史要能支持机制推演。", "revelation": "先暴露观测异常，再追溯设计缺陷或历史篡改。"},
-        "fairytale_fable": {"diction": "用简单、温柔、象征性的词承载深层因果。", "sentence_rhythm": "明亮、重复、有寓言感。", "imagery": "钥匙、门、森林、灯、名字、约定。", "information_density": "低；一个象征对应一个秘密。", "revelation": "让真相像寓言教训一样自然浮现。"},
-        "epic_chronicle": {"diction": "用编年、誓约、迁徙、王朝和代际代价表达前史。", "sentence_rhythm": "稳重，有历史纵深。", "imagery": "年表、城邦、血脉、盟约、战场遗址。", "information_density": "高；允许多势力、多时代并置。", "revelation": "从个人命运回望文明级因果。"},
-    }
-    return strategies.get(primary, {"diction": "跟随用户最新文风提示；无法归类时只保留语义功能，不规定措辞。", "sentence_rhythm": "匹配样本文本的句长、停顿和叙述视角。", "imagery": "沿用小说自身反复出现的物象，不引入违和符号。", "information_density": "弹性；按目标文风决定铺陈或留白。", "revelation": "按目标文风选择直给、留白、象征、反转或对话侧写。"})
-
-
-def _render_story_planning_evidence(evidence: dict[str, Any], *, style_adapter: Optional[dict[str, Any]] = None) -> str:
-    worldline = evidence.get("worldline") or {}
-    depth = worldline.get("depth") or {}
-    style_adapter = style_adapter or worldline.get("style_adapter") or {}
-    lines = [f"前史深度：{depth.get('label', '未定')}；跨度：约{depth.get('horizon_years', 0)}年；原因：{depth.get('reason', '')}"]
-    if style_adapter:
-        axes = style_adapter.get("style_axes") or {}
-        lines.append("【文风适配协议】")
-        lines.append(f"- 当前文风标签：{'、'.join(_as_strings(style_adapter.get('detected_style_tags'))) or '自定义/未指定'}；前史条目只作为语义蓝图，不能原样写进正文。")
-        if style_adapter.get("requested_style"):
-            lines.append(f"- 用户/Bible文风提示：{str(style_adapter.get('requested_style'))[:240]}")
-        for item in style_adapter.get("adaptation_contract") or []:
-            lines.append(f"- {item}")
-        if axes:
-            lines.append("- 转译方式：" f"措辞={axes.get('diction', '')}；" f"节奏={axes.get('sentence_rhythm', '')}；" f"意象={axes.get('imagery', '')}；" f"揭示={axes.get('revelation', '')}")
-    if evidence.get("eras"):
-        lines.append("【故事开始前的世界线】")
-        for era in evidence["eras"]:
-            lines.append(f"- {era.get('time_label')}｜{era.get('name')}：{era.get('summary')} 因果作用：{era.get('causal_effect')}")
-    if evidence.get("forces"):
-        lines.append("【势力/制度因果】")
-        for force in evidence["forces"]:
-            lines.append(f"- {force.get('name')}：欲望={force.get('desire')}；弱点={force.get('weakness')}")
-    if evidence.get("foreshadow_seeds"):
-        lines.append("【可用于大纲与伏笔的种子】")
-        for seed in evidence["foreshadow_seeds"]:
-            lines.append(f"- {seed.get('axis')}：{seed.get('planting_form')} 真相={seed.get('true_meaning')}")
-    if evidence.get("planning_guidance"):
-        lines.append("【使用约束】")
-        lines.extend(f"- {item}" for item in evidence["planning_guidance"])
-    return "\n".join(line for line in lines if str(line).strip())
-
-
-def _character_is_mentioned(card: dict[str, Any], content: str) -> bool:
-    names = [card.get("name"), *(card.get("aliases") or [])]
-    return any(str(name or "").strip() and str(name).strip() in content for name in names)
-
-
-def _review_character_card_against_content(card: dict[str, Any], content: str, chapter_number: int) -> list[dict[str, Any]]:
-    name = str(card.get("name") or "角色").strip()
-    issues: list[dict[str, Any]] = []
-    cognitive = card.get("cognitive_state") if isinstance(card.get("cognitive_state"), dict) else {}
-    for unknown in _as_strings(cognitive.get("unknowns")):
-        if _looks_resolved_without_transition(content, unknown):
-            issues.append(
-                _review_issue(
-                    "evolution_character_cognition",
-                    "warning",
-                    f"{name} 在人物卡中仍标记为未知：{unknown}，但本章像是直接知道/利用了该信息。",
-                    chapter_number,
-                    "补充他如何得知、推断或误判这条信息；如果只是猜测，请在文本中保留不确定性。",
-                )
-            )
-    for misbelief in _as_strings(cognitive.get("misbeliefs")):
-        if _mentions_key_terms(content, misbelief) and not _has_transition_marker(content):
-            issues.append(
-                _review_issue(
-                    "evolution_character_belief",
-                    "suggestion",
-                    f"{name} 仍有未修正误信：{misbelief}，本章相关表述需要交代误信是否被打破。",
-                    chapter_number,
-                    "写出证据、挫败或他人的告知，让认知变化成为剧情事件，而不是静默切换。",
-                )
-            )
-    for limit in _as_strings(card.get("capability_limits")):
-        if _mentions_key_terms(content, limit) and _has_mastery_marker(content) and not _has_transition_marker(content):
-            issues.append(
-                _review_issue(
-                    "evolution_character_capability",
-                    "warning",
-                    f"{name} 的能力边界是：{limit}，但本章呈现为直接突破或熟练解决。",
-                    chapter_number,
-                    "增加试错、代价、外部帮助或失败风险；避免把能力边界写成突然全知全能。",
-                )
-            )
-    if _has_all_knowing_marker(content) and (_as_strings(cognitive.get("unknowns")) or _as_strings(card.get("capability_limits"))):
-        issues.append(
-            _review_issue(
-                "evolution_character_logic",
-                "suggestion",
-                f"{name} 本章语气接近全知判断，但人物卡仍存在未知或能力边界。",
-                chapter_number,
-                "将确定判断改为观察、推断、误判或带代价的验证，让角色认知随证据成长。",
-            )
-        )
-    return issues
-
-
-def _review_issue(issue_type: str, severity: str, description: str, chapter_number: int, suggestion: str) -> dict[str, Any]:
-    return {
-        "issue_type": issue_type,
-        "severity": severity,
-        "description": description,
-        "location": f"Chapter {chapter_number}",
-        "suggestion": suggestion,
+        "chapter_number": chapter_number,
+        "window": "recent_3_chapters_plus_current",
+        "phrases": sorted(phrases, key=lambda item: (-int(item.get("count") or 0), str(item.get("phrase") or "")))[:10],
+        "at": at,
     }
 
 
 def _build_timeline_events(snapshot, extraction: dict[str, Any], content_hash: str, at: str) -> list[dict[str, Any]]:
-    raw_events = extraction.get("world_events") or []
-    if not raw_events:
+    raw_events = extraction.get("world_events") if "world_events" in extraction else []
+    if raw_events is None:
+        raw_events = []
+    if "world_events" not in extraction and not raw_events:
         raw_events = [{"summary": item, "characters": snapshot.characters, "locations": snapshot.locations[:5]} for item in snapshot.world_events]
     events: list[dict[str, Any]] = []
     for index, raw in enumerate(raw_events, start=1):
@@ -956,7 +1990,7 @@ def _build_continuity_constraints(novel_id: str, cards: list[dict[str, Any]], ch
 
 
 def _constraint(novel_id: str, chapter_number: int, constraint_type: str, subject: str, rule: str, evidence_ids: list[str]) -> dict[str, Any]:
-    seed = f"{novel_id}:{constraint_type}:{subject}:{rule}"
+    seed = f"{novel_id}:{chapter_number}:{constraint_type}:{subject}:{rule}"
     return {
         "constraint_id": "cc_" + _hash_text(seed)[:16],
         "novel_id": novel_id,
@@ -1051,84 +2085,422 @@ def _as_strings(items: Any) -> list[str]:
     return [str(item or "").strip() for item in (items or []) if str(item or "").strip()]
 
 
-def _mentions_key_terms(content: str, phrase: str) -> bool:
-    terms = [term for term in _split_terms(phrase) if len(term) >= 2]
-    terms.extend(_semantic_terms(phrase))
-    terms = list(dict.fromkeys(terms))
-    if not terms:
-        return phrase in content
-    if any(len(term) >= 4 and term in content for term in terms):
-        return True
-    matches = sum(1 for term in terms if term in content)
-    return matches >= min(2, len(terms))
+def _default_settings() -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "api2_control_card": {
+            "enabled": False,
+            "provider_mode": "same_as_main",
+            "model": "",
+            "temperature": 0.2,
+            "max_tokens": 1400,
+            "custom_profile": {
+                "id": "evolution-api2-custom",
+                "name": "Evolution Legacy API2",
+                "preset_key": "custom-openai-compatible",
+                "protocol": "openai",
+                "base_url": "",
+                "api_key": "",
+                "model": "",
+                "temperature": 0.2,
+                "max_tokens": 1400,
+                "timeout_seconds": 180,
+                "extra_headers": {},
+                "extra_query": {},
+                "extra_body": {},
+                "notes": "Deprecated legacy API2 settings; Evolution now uses agent_api.",
+                "use_legacy_chat_completions": False,
+            },
+        },
+        "agent_api": {
+            "enabled": False,
+            "provider_mode": "same_as_main",
+            "model": "",
+            "temperature": 0.1,
+            "max_tokens": 800,
+            "custom_profile": {
+                "id": "evolution-agent-custom",
+                "name": "Evolution Agent API",
+                "preset_key": "custom-openai-compatible",
+                "protocol": "openai",
+                "base_url": "",
+                "api_key": "",
+                "model": "",
+                "temperature": 0.1,
+                "max_tokens": 800,
+                "timeout_seconds": 180,
+                "extra_headers": {},
+                "extra_query": {},
+                "extra_body": {},
+                "notes": "Evolution 智能体反思与策略固化专用 API",
+                "use_legacy_chat_completions": False,
+            },
+        },
+    }
 
 
-def _semantic_terms(phrase: str) -> list[str]:
-    cleaned = phrase
-    for marker in ("不能", "无法", "不会", "不知", "不知道", "凭空", "直接", "轻易", "所有"):
-        cleaned = cleaned.replace(marker, "")
-    return [cleaned[index : index + 4] for index in range(0, max(len(cleaned) - 3, 0)) if cleaned[index : index + 4].strip()]
+def _normalize_settings(raw: dict[str, Any], *, existing: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+    base = _default_settings()
+    if existing:
+        base = _deep_merge(base, existing)
+    if isinstance(raw, dict):
+        base = _deep_merge(base, raw)
+    api2 = base["api2_control_card"]
+    api2["enabled"] = bool(api2.get("enabled"))
+    provider_mode = str(api2.get("provider_mode") or "same_as_main")
+    api2["provider_mode"] = provider_mode if provider_mode in LLM_PROVIDER_MODES else "same_as_main"
+    api2["temperature"] = _clamp_float(api2.get("temperature"), 0.0, 2.0, 0.2)
+    api2["max_tokens"] = _clamp_int(api2.get("max_tokens"), 256, 4096, 1400)
+    custom = _custom_profile_for_storage(api2.get("custom_profile") if isinstance(api2.get("custom_profile"), dict) else {})
+    if existing:
+        prior = ((existing.get("api2_control_card") or {}).get("custom_profile") or {}) if isinstance(existing, dict) else {}
+        submitted_key = str(custom.get("api_key") or "")
+        if submitted_key in {"", "********", "••••••••"}:
+            custom["api_key"] = str(prior.get("api_key") or "")
+    api2["custom_profile"] = custom
+    if api2["provider_mode"] == "custom":
+        api2["model"] = custom.get("model") or ""
+        api2["temperature"] = custom.get("temperature", api2["temperature"])
+        api2["max_tokens"] = custom.get("max_tokens", api2["max_tokens"])
+    agent = base["agent_api"]
+    agent["enabled"] = bool(agent.get("enabled"))
+    agent_mode = str(agent.get("provider_mode") or "same_as_main")
+    agent["provider_mode"] = agent_mode if agent_mode in LLM_PROVIDER_MODES else "same_as_main"
+    agent["temperature"] = _clamp_float(agent.get("temperature"), 0.0, 2.0, 0.1)
+    agent["max_tokens"] = _clamp_int(agent.get("max_tokens"), 128, 2048, 800)
+    agent_custom = _custom_profile_for_storage(
+        agent.get("custom_profile") if isinstance(agent.get("custom_profile"), dict) else {},
+        profile_id="evolution-agent-custom",
+        profile_name="Evolution Agent API",
+        notes="Evolution 智能体反思与策略固化专用 API",
+        default_temperature=0.1,
+        default_max_tokens=800,
+    )
+    if existing:
+        prior = ((existing.get("agent_api") or {}).get("custom_profile") or {}) if isinstance(existing, dict) else {}
+        submitted_key = str(agent_custom.get("api_key") or "")
+        if submitted_key in {"", "********", "••••••••"}:
+            agent_custom["api_key"] = str(prior.get("api_key") or "")
+    agent["custom_profile"] = agent_custom
+    if agent["provider_mode"] == "custom":
+        agent["model"] = agent_custom.get("model") or ""
+        agent["temperature"] = agent_custom.get("temperature", agent["temperature"])
+        agent["max_tokens"] = agent_custom.get("max_tokens", agent["max_tokens"])
+    return base
 
 
-def _looks_resolved_without_transition(content: str, unknown: str) -> bool:
-    return _mentions_key_terms(content, unknown) and _has_knowledge_marker(content) and not _has_transition_marker(content)
+def _redact_settings(settings: dict[str, Any]) -> dict[str, Any]:
+    safe = copy.deepcopy(settings)
+    for key in ("api2_control_card", "agent_api"):
+        custom = ((safe.get(key) or {}).get("custom_profile") or {})
+        api_key = str(custom.get("api_key") or "")
+        custom["api_key"] = ""
+        custom["api_key_configured"] = bool(api_key)
+    return safe
 
 
-def _split_terms(text: str) -> list[str]:
-    separators = "，。；、：:（）()【】[]《》 \n\t"
-    current = text
-    for sep in separators:
-        current = current.replace(sep, "|")
-    terms = []
-    for part in current.split("|"):
-        part = part.strip()
-        if not part:
-            continue
-        if len(part) > 8:
-            terms.extend(part[index : index + 4] for index in range(0, len(part), 4))
+def _call_with_timeout(fn: Any, *, timeout_seconds: float) -> dict[str, Any]:
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="evolution-context")
+    future = executor.submit(fn)
+    try:
+        return {"ok": True, "value": future.result(timeout=timeout_seconds)}
+    except concurrent.futures.TimeoutError:
+        future.cancel()
+        executor.shutdown(wait=False, cancel_futures=True)
+        return {"ok": False, "timeout": True}
+    except Exception as exc:
+        executor.shutdown(wait=False, cancel_futures=True)
+        return {"ok": False, "error": str(exc)[:240]}
+    finally:
+        if future.done():
+            executor.shutdown(wait=False, cancel_futures=True)
+
+
+def _empty_host_context(novel_id: str, *, before_chapter: Optional[int], reason: str) -> dict[str, Any]:
+    counts = {key: 0 for key in HOST_CONTEXT_SOURCES}
+    return {
+        "schema_version": 1,
+        "novel_id": novel_id,
+        "source": "plotpilot_host_readonly",
+        "before_chapter": before_chapter,
+        "active_sources": [],
+        "degraded_sources": [reason],
+        "empty_sources": [],
+        "field_missing_sources": [],
+        "source_status": {},
+        "counts": counts,
+        "plotpilot_context_usage": {
+            "source": "plotpilot_native_context_adapter",
+            "mode": "strategy_only",
+            "hit_counts_by_tier": {},
+            "degraded_sources": [reason],
+            "empty_sources": [],
+            "field_missing_sources": [],
+            "long_context_duplicated": False,
+        },
+        **{key: [] for key in HOST_CONTEXT_SOURCES},
+    }
+
+
+def _deep_merge(base: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
+    result = copy.deepcopy(base)
+    for key, value in (incoming or {}).items():
+        if isinstance(value, dict) and isinstance(result.get(key), dict):
+            result[key] = _deep_merge(result[key], value)
         else:
-            terms.append(part)
-    return terms
+            result[key] = value
+    return result
 
 
-def _has_knowledge_marker(content: str) -> bool:
-    markers = ["知道", "明白", "清楚", "意识到", "看穿", "断定", "确定", "早就", "原来"]
-    return any(marker in content for marker in markers)
+def _custom_profile_for_storage(
+    raw: dict[str, Any],
+    *,
+    profile_id: str = "evolution-api2-custom",
+    profile_name: str = "Evolution Legacy API2",
+    notes: str = "Deprecated legacy API2 settings; Evolution now uses agent_api.",
+    default_temperature: float = 0.2,
+    default_max_tokens: int = 1400,
+) -> dict[str, Any]:
+    protocol = str(raw.get("protocol") or "openai").strip()
+    if protocol not in LLM_MODEL_PROTOCOLS:
+        protocol = "openai"
+    return {
+        "id": str(raw.get("id") or profile_id).strip() or profile_id,
+        "name": str(raw.get("name") or profile_name).strip() or profile_name,
+        "preset_key": str(raw.get("preset_key") or "custom-openai-compatible").strip() or "custom-openai-compatible",
+        "protocol": protocol,
+        "base_url": str(raw.get("base_url") or "").strip(),
+        "api_key": str(raw.get("api_key") or "").strip(),
+        "model": str(raw.get("model") or "").strip(),
+        "temperature": _clamp_float(raw.get("temperature"), 0.0, 2.0, default_temperature),
+        "max_tokens": _clamp_int(raw.get("max_tokens"), 128, 4096, default_max_tokens),
+        "timeout_seconds": _clamp_int(raw.get("timeout_seconds"), 10, 900, 180),
+        "extra_headers": raw.get("extra_headers") if isinstance(raw.get("extra_headers"), dict) else {},
+        "extra_query": raw.get("extra_query") if isinstance(raw.get("extra_query"), dict) else {},
+        "extra_body": raw.get("extra_body") if isinstance(raw.get("extra_body"), dict) else {},
+        "notes": str(raw.get("notes") or notes),
+        "use_legacy_chat_completions": bool(raw.get("use_legacy_chat_completions")),
+    }
 
 
-def _has_mastery_marker(content: str) -> bool:
-    markers = ["轻易", "立刻", "毫不费力", "随手", "直接", "精准", "完全", "熟练", "一眼", "看穿"]
-    return any(marker in content for marker in markers)
+def _platform_context_blocks_from_patch(patch: dict[str, Any], shared_metadata: dict[str, Any]) -> list[dict[str, Any]]:
+    blocks: list[dict[str, Any]] = []
+    base_metadata = {key: value for key, value in shared_metadata.items() if key != "block_tiers"}
+    for block in patch.get("blocks") or []:
+        if not isinstance(block, dict):
+            continue
+        content = str(block.get("content") or "").strip()
+        if not content:
+            continue
+        block_metadata = block.get("metadata") if isinstance(block.get("metadata"), dict) else {}
+        tier = str(block.get("tier") or block_metadata.get("tier") or "").strip()
+        metadata = {
+            **base_metadata,
+            **block_metadata,
+            "source_block_id": block.get("id"),
+            "source_block_kind": block.get("kind"),
+        }
+        if tier:
+            metadata["tier"] = tier
+        blocks.append(
+            {
+                "plugin_name": PLUGIN_NAME,
+                "id": block.get("id"),
+                "kind": block.get("kind"),
+                "tier": tier or None,
+                "title": block.get("title") or block.get("id") or "Evolution 写作约束",
+                "content": content,
+                "priority": int(block.get("priority") or 0),
+                "token_budget": int(block.get("token_budget") or 0),
+                "metadata": metadata,
+            }
+        )
+    return blocks
 
 
-def _has_all_knowing_marker(content: str) -> bool:
-    markers = ["一切都在", "早已算到", "全都知道", "早就知道", "毫无疑问", "不用验证"]
-    return any(marker in content for marker in markers)
+def _prune_t0_context_blocks(blocks: list[dict[str, Any]], *, max_t0_chars: int = 2800) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    kept: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    used = 0
+    for block in blocks:
+        if _block_tier_for_gate(block) != "intended_t0":
+            kept.append(block)
+            continue
+        content = str(block.get("content") or "")
+        if used >= max_t0_chars:
+            skipped.append(_gate_skip_record(block, "t0_budget_pruned"))
+            continue
+        remaining = max_t0_chars - used
+        next_block = dict(block)
+        if len(content) > remaining:
+            next_block["content"] = content[:remaining].rstrip() + "..."
+            skipped.append(_gate_skip_record(block, "t0_content_truncated"))
+        used += len(str(next_block.get("content") or ""))
+        kept.append(next_block)
+    return kept, skipped
 
 
-def _has_transition_marker(content: str) -> bool:
-    markers = [
-        "发现",
-        "意识到",
-        "终于明白",
-        "从",
-        "得知",
-        "听见",
-        "看见",
-        "试探",
-        "验证",
-        "推断",
-        "猜测",
-        "误以为",
-        "代价",
-        "失败",
-        "受伤",
-        "请教",
-        "提醒",
-        "线索",
-        "证据",
+def _decide_injection_gate(
+    blocks: list[dict[str, Any]],
+    skipped_blocks: list[dict[str, Any]],
+    *,
+    pending_review_count: int,
+) -> dict[str, Any]:
+    active_blocks = [block for block in blocks if str(block.get("content") or "").strip()]
+    t0_blocks = [
+        block for block in active_blocks
+        if _block_tier_for_gate(block) == "intended_t0"
+        or str(block.get("kind") or "") in {"chapter_state_bridge", "story_graph_route_constraints", "continuity_risk", "hard_constraint"}
     ]
-    return any(marker in content for marker in markers)
+    t1_blocks = [block for block in active_blocks if block not in t0_blocks]
+    reasons: list[str] = []
+    skipped_reasons: list[str] = []
+    if t0_blocks:
+        reasons.append("t0_constraints_available")
+    if any(str(block.get("kind") or "") == "story_graph_route_constraints" for block in t0_blocks):
+        reasons.append("route_constraints_available")
+    if any(str(block.get("kind") or "") == "continuity_risk" for block in t0_blocks):
+        reasons.append("continuity_risk_available")
+    if any(str(block.get("kind") or "") == "chapter_state_bridge" for block in t0_blocks):
+        reasons.append("chapter_state_bridge_available")
+    if not reasons and t1_blocks:
+        reasons.append("t1_support_available")
+    if not active_blocks:
+        skipped_reasons.append("no_active_context_blocks")
+    if not reasons and skipped_blocks:
+        skipped_reasons.append("only_duplicate_or_pruned_blocks")
+    should_inject = bool(reasons) and bool(active_blocks)
+    return {
+        "should_inject": should_inject,
+        "reasons": reasons,
+        "skipped_reasons": skipped_reasons,
+        "state_item_count": len(active_blocks),
+        "pending_review_count": pending_review_count,
+        "t0_chars": sum(len(str(block.get("content") or "")) for block in t0_blocks),
+        "t1_chars": sum(len(str(block.get("content") or "")) for block in t1_blocks),
+        "skipped_block_count": len(skipped_blocks),
+        "source": "evolution_gate",
+    }
+
+
+def _block_tier_for_gate(block: dict[str, Any]) -> str:
+    tier = str(block.get("tier") or "").strip()
+    if tier:
+        return tier
+    metadata = block.get("metadata") if isinstance(block.get("metadata"), dict) else {}
+    return str(metadata.get("tier") or metadata.get("intended_tier") or "").strip()
+
+
+def _gate_skip_record(block: dict[str, Any], reason: str) -> dict[str, Any]:
+    return {
+        "id": block.get("id"),
+        "kind": block.get("kind"),
+        "tier": _block_tier_for_gate(block),
+        "title": block.get("title"),
+        "priority": block.get("priority"),
+        "token_budget": block.get("token_budget"),
+        "content_chars": len(str(block.get("content") or "")),
+        "reason": reason,
+    }
+
+
+def _review_decision_for_candidate(candidate_type: str, payload: dict[str, Any]) -> dict[str, str]:
+    confidence = _candidate_confidence(payload)
+    high_risk_reasons = _candidate_high_risk_reasons(candidate_type, payload)
+    explicit_confidence = bool(payload.get("confidence_explicit"))
+    explicit_review = bool(payload.get("review_required") or payload.get("risk_level"))
+    if explicit_confidence and confidence < 0.78:
+        return {
+            "status": "pending",
+            "risk_level": "medium" if not high_risk_reasons else "high",
+            "reason": f"explicit_confidence_below_threshold:{confidence:.2f}",
+        }
+    if (explicit_confidence or explicit_review) and high_risk_reasons:
+        return {
+            "status": "pending",
+            "risk_level": "high",
+            "reason": "high_risk_fields:" + ",".join(high_risk_reasons[:4]),
+        }
+    return {"status": "approved", "risk_level": "low", "reason": "auto_apply"}
+
+
+def _candidate_confidence(payload: dict[str, Any]) -> float:
+    try:
+        return float(payload.get("confidence", 0.8))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _candidate_high_risk_reasons(candidate_type: str, payload: dict[str, Any]) -> list[str]:
+    reasons: list[str] = []
+    for key in ("unknowns", "misbeliefs", "capability_limits"):
+        if payload.get(key):
+            reasons.append(key)
+    if candidate_type == "character_update":
+        if payload.get("aliases"):
+            reasons.append("identity_alias")
+        status = str(payload.get("status") or "active")
+        if status and status != "active":
+            reasons.append("status_change")
+        palette = payload.get("personality_palette") if isinstance(payload.get("personality_palette"), dict) else {}
+        if palette.get("relationship_tones"):
+            reasons.append("relationship_state")
+    if candidate_type == "world_event":
+        event_type = str(payload.get("event_type") or "")
+        if event_type in {"world_rule", "system_rule", "relationship", "route_conflict"}:
+            reasons.append(event_type)
+    return reasons
+
+
+def _manual_rebuild_affected_scopes(has_chapter_payloads: bool) -> dict[str, list[str]]:
+    body = [
+        "facts",
+        "chapter_summaries",
+        "volume_summaries",
+        "character_cards",
+        "timeline_events",
+        "continuity_constraints",
+        "story_graph",
+    ]
+    if not has_chapter_payloads:
+        body = ["character_cards"]
+    return {
+        "body_state": body,
+        "index_state": ["agent_knowledge_documents", "agent_knowledge_chunks"],
+        "audit_state_preserved": ["workflow_runs", "events", "review_candidates", "diagnostics_snapshots", "context_injection_records"],
+    }
+
+
+def _rollback_affected_scopes(chapter_number: int) -> dict[str, list[str]]:
+    return {
+        "body_state": [
+            f"facts/chapter_{chapter_number}",
+            f"chapter_summaries/chapter_{chapter_number}",
+            f"story_graph/chapter_{chapter_number}",
+            f"timeline_events/chapter_{chapter_number}",
+            f"continuity_constraints/chapter_{chapter_number}",
+            "character_cards_rebuild",
+        ],
+        "index_state": ["agent_knowledge_documents", "agent_knowledge_chunks"],
+        "audit_state_preserved": ["workflow_runs", "events", "review_candidates", "diagnostics_snapshots", "context_injection_records"],
+    }
+
+
+def _clamp_int(value: Any, low: int, high: int, default: int) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(low, min(high, number))
+
+
+def _clamp_float(value: Any, low: float, high: float, default: float) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    return max(low, min(high, number))
+
 
 def _extract_content(payload: dict[str, Any]) -> str:
     nested = payload.get("payload") if isinstance(payload.get("payload"), dict) else {}

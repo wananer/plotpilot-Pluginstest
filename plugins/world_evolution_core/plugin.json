@@ -1,7 +1,7 @@
 {
   "name": "world_evolution_core",
   "display_name": "Evolution World Assistant",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "enabled": true,
   "runtime": {
     "type": "plotpilot_plugin",
@@ -17,6 +17,15 @@
     "chapter_postprocess": true,
     "novel_prehistory": true,
     "story_planning_context": true,
+    "story_graph": true,
+    "global_route_map": true,
+    "route_conflict_detection": true,
+    "compact_vector_capsules": true,
+    "agentic_evolution": true,
+    "gep_assets": true,
+    "agent_capsules": true,
+    "agent_api": true,
+    "agent_api_custom_provider": true,
     "manual_rebuild": true,
     "rollback": true,
     "chapter_review": true
@@ -25,12 +34,22 @@
     "after_novel_created",
     "before_story_planning",
     "before_context_build",
-    "before_chapter_review",
-    "after_chapter_review",
     "after_commit",
     "manual_rebuild",
     "rollback",
+    "before_chapter_review",
+    "after_chapter_review",
     "review_chapter"
+  ],
+  "route_aliases": [
+    "evolution-world"
+  ],
+  "prompts": [
+    "plugin.world_evolution_core.agent-decision",
+    "plugin.world_evolution_core.agent-reflection",
+    "plugin.world_evolution_core.structured-extraction",
+    "plugin.world_evolution_core.connection-test",
+    "plugin.world_evolution_core.context-usage-protocol"
   ],
   "permissions": [
     "read_novel",

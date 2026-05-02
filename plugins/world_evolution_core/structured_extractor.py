@@ -1,8 +1,28 @@
 """Structured extraction contract and fallback pipeline for Evolution World."""
 from __future__ import annotations
 
+import json
+import re
 from dataclasses import asdict, dataclass, field
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
+
+if TYPE_CHECKING:
+    from domain.ai.services.llm_service import LLMService
+else:
+    LLMService = Any
+
+try:
+    from infrastructure.ai.prompt_resolver import resolve_prompt
+except Exception:
+    def resolve_prompt(_node_key: str, _variables: dict[str, Any], *, fallback_system: str = "", fallback_user: str = "") -> Any:
+        class PromptResolutionFallback:
+            system = fallback_system
+            user = fallback_user
+
+            def to_prompt(self) -> Any:
+                return self
+
+        return PromptResolutionFallback()
 
 from .extractor import extract_chapter_facts
 from .models import ChapterFactSnapshot
@@ -29,6 +49,7 @@ class StructuredCharacterUpdate:
     capability_limits: list[str] = field(default_factory=list)
     decision_biases: list[str] = field(default_factory=list)
     confidence: float = 0.7
+    confidence_explicit: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -50,6 +71,7 @@ class StructuredWorldEvent:
     capability_limits: list[str] = field(default_factory=list)
     decision_biases: list[str] = field(default_factory=list)
     confidence: float = 0.7
+    confidence_explicit: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -76,6 +98,32 @@ class StructuredExtractionResult:
 class StructuredExtractorProvider(Protocol):
     async def extract(self, request: dict[str, Any]) -> dict[str, Any]:
         """Return a JSON-like response matching ``STRUCTURED_EXTRACTION_SCHEMA``."""
+
+
+class LLMStructuredExtractorProvider:
+    """LLM-backed provider for rich Evolution character/world extraction."""
+
+    def __init__(self, llm_service: LLMService | None = None, *, max_tokens: int = 2200) -> None:
+        self.llm_service = llm_service
+        self.max_tokens = max_tokens
+
+    async def extract(self, request: dict[str, Any]) -> dict[str, Any]:
+        from domain.ai.services.llm_service import GenerationConfig
+
+        llm = self.llm_service or _create_active_llm_service()
+        prompt = _build_structured_extraction_prompt(request)
+        result = await llm.generate(
+            prompt,
+            GenerationConfig(
+                max_tokens=self.max_tokens,
+                temperature=0.1,
+                response_format={"type": "json_object"},
+            ),
+        )
+        data, errors = _parse_llm_json(result.content)
+        if data is None:
+            raise ValueError("structured extraction JSON parse failed: " + "; ".join(errors[:4]))
+        return data
 
 
 STRUCTURED_EXTRACTION_SCHEMA: dict[str, Any] = {
@@ -143,6 +191,25 @@ STRUCTURED_EXTRACTION_SCHEMA: dict[str, Any] = {
                             "base": {"type": "string"},
                             "main_tones": {"type": "array", "items": {"type": "string"}},
                             "accents": {"type": "array", "items": {"type": "string"}},
+                            "pressure_triggers": {"type": "array", "items": {"type": "string"}},
+                            "relationship_tones": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "target": {"type": "string"},
+                                        "tone": {"type": "string"},
+                                        "behavior": {"type": "string"},
+                                    },
+                                },
+                            },
+                            "voice_signature": {"type": "array", "items": {"type": "string"}},
+                            "gesture_signature": {"type": "array", "items": {"type": "string"}},
+                            "negative_costs": {"type": "array", "items": {"type": "string"}},
+                            "presence_mode": {
+                                "type": "string",
+                                "enum": ["active_scene", "remote", "memory_trace", "record_only", "system_entity"],
+                            },
                             "derivatives": {
                                 "type": "array",
                                 "items": {
@@ -201,6 +268,82 @@ STRUCTURED_EXTRACTION_SCHEMA: dict[str, Any] = {
 }
 
 
+def _create_active_llm_service() -> LLMService:
+    from infrastructure.ai.provider_factory import LLMProviderFactory
+
+    return LLMProviderFactory().create_active_provider()
+
+
+def _build_structured_extraction_prompt(request: dict[str, Any]) -> Any:
+    schema = request.get("schema") or STRUCTURED_EXTRACTION_SCHEMA
+    chapter_number = request.get("chapter_number")
+    content = str(request.get("content") or "")
+    system = (
+        "你是 PlotPilot Evolution 的结构化事实抽取器。"
+        "你只输出 JSON 对象，不写解释、不写 Markdown。"
+        "必须从正文中抽取明确事实，禁止把书名、地点、物件、形容词短语、章节名误当人物。"
+    )
+    user = f"""请阅读第 {chapter_number} 章正文，输出符合 schema 的 JSON。
+
+硬规则：
+1. characters 只包含正文中明确出场或被明确提及的人物。
+2. 每个人物必须尽量补全 appearance、attributes、world_profile、personality_palette。
+3. 性格调色盘不是标签列表，而是行为模型：
+   - base 是底色，表示深层驱动力。
+   - main_tones 是主色调，表示高频可见行为倾向。
+   - accents 是点缀，表示在特定关系/压力下显露的次级特质。
+   - derivatives 写具体衍生行为：触发条件、可见表现、限制、反面代价。
+4. 如果正文证据不足，可以给出“暂未定型/待观察”的保守调色盘，但不能留空。
+5. known_facts/unknowns/misbeliefs 必须符合角色视角，不允许让角色知道未在场信息。
+6. world_events 只记录本章发生的事实，不要总结未来。
+
+JSON schema:
+{json.dumps(schema, ensure_ascii=False)}
+
+正文：
+{content[:12000]}
+"""
+    return resolve_prompt(
+        "plugin.world_evolution_core.structured-extraction",
+        {
+            "chapter_number": chapter_number,
+            "schema": json.dumps(schema, ensure_ascii=False),
+            "content": content[:12000],
+        },
+        fallback_system=system,
+        fallback_user=user,
+    ).to_prompt()
+
+
+def _parse_llm_json(raw: str) -> tuple[dict[str, Any] | None, list[str]]:
+    cleaned = _sanitize_llm_json(raw)
+    try:
+        data = json.loads(cleaned)
+        if isinstance(data, dict):
+            return data, []
+        return None, [f"root is {type(data).__name__}, expected object"]
+    except json.JSONDecodeError as exc:
+        errors = [str(exc)]
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start != -1 and end > start:
+        try:
+            data = json.loads(cleaned[start : end + 1])
+            if isinstance(data, dict):
+                return data, []
+        except json.JSONDecodeError as exc:
+            errors.append(str(exc))
+    return None, errors
+
+
+def _sanitize_llm_json(raw: str) -> str:
+    text = str(raw or "").strip().lstrip("\ufeff")
+    fence = re.search(r"```(?:json)?\s*\n?(.*?)\n?\s*```", text, re.DOTALL)
+    if fence:
+        text = fence.group(1)
+    return re.sub(r"[\u200b\u200c\u200d\ufeff]", "", text).strip()
+
+
 async def extract_structured_chapter_facts(
     novel_id: str,
     chapter_number: int,
@@ -223,6 +366,8 @@ async def extract_structured_chapter_facts(
             "world-specific profile fields, cognition, emotion, growth, capability limits, and personality palette. "
             "For personality_palette, model people as colors: base is the underlying color, main_tones are dominant colors, "
             "accents are smaller visible traits, and derivatives explain concrete behavior patterns caused by each color. "
+            "Also extract generic writing-useful fields when explicit evidence exists: pressure_triggers, relationship_tones, "
+            "voice_signature, gesture_signature, negative_costs, and presence_mode. "
             "Do not infer hidden motives, omniscient knowledge, or future events unless the text explicitly frames a future tendency."
         ),
     }
@@ -331,6 +476,7 @@ def _parse_character(value: Any) -> StructuredCharacterUpdate | None:
         capability_limits=_strings(value.get("capability_limits"))[:10],
         decision_biases=_strings(value.get("decision_biases"))[:8],
         confidence=_confidence(value.get("confidence")),
+        confidence_explicit="confidence" in value,
     )
 
 
@@ -358,6 +504,7 @@ def _parse_event(value: Any) -> StructuredWorldEvent | None:
         capability_limits=_strings(value.get("capability_limits"))[:10],
         decision_biases=_strings(value.get("decision_biases"))[:8],
         confidence=_confidence(value.get("confidence")),
+        confidence_explicit="confidence" in value,
     )
 
 
@@ -419,13 +566,60 @@ def _parse_world_profile(value: Any) -> dict[str, Any]:
 def _parse_personality_palette(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         return {}
-    return {
+    palette = {
         "metaphor": str(value.get("metaphor") or "").strip()[:240],
         "base": str(value.get("base") or "").strip()[:40],
         "main_tones": _strings(value.get("main_tones"))[:6],
         "accents": _strings(value.get("accents"))[:8],
         "derivatives": _parse_palette_derivatives(value.get("derivatives"))[:24],
+        "pressure_triggers": _strings(value.get("pressure_triggers"))[:8],
+        "relationship_tones": _parse_relationship_tones(value.get("relationship_tones"))[:12],
+        "voice_signature": _strings(value.get("voice_signature"))[:6],
+        "gesture_signature": _strings(value.get("gesture_signature"))[:6],
+        "negative_costs": _strings(value.get("negative_costs"))[:8],
     }
+    presence_mode = str(value.get("presence_mode") or "").strip()
+    if presence_mode in {"active_scene", "remote", "memory_trace", "record_only", "system_entity"}:
+        palette["presence_mode"] = presence_mode
+    if (
+        palette["base"]
+        or palette["main_tones"]
+        or palette["accents"]
+        or palette["derivatives"]
+        or palette["pressure_triggers"]
+        or palette["relationship_tones"]
+        or palette["voice_signature"]
+        or palette["gesture_signature"]
+        or palette["negative_costs"]
+    ):
+        palette["source"] = "structured_extraction"
+    return palette
+
+
+def _parse_relationship_tones(value: Any) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        return []
+    result: list[dict[str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for item in value:
+        if isinstance(item, str):
+            record = {"target": "相关对象", "tone": item.strip()[:80], "behavior": ""}
+        elif isinstance(item, dict):
+            record = {
+                "target": str(item.get("target") or item.get("object") or "相关对象").strip()[:80],
+                "tone": str(item.get("tone") or "").strip()[:80],
+                "behavior": str(item.get("behavior") or item.get("description") or "").strip()[:160],
+            }
+        else:
+            continue
+        if not record["tone"] and not record["behavior"]:
+            continue
+        key = (record["target"], record["tone"], record["behavior"])
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(record)
+    return result
 
 
 def _parse_palette_derivatives(value: Any) -> list[dict[str, Any]]:
@@ -476,6 +670,12 @@ def _default_personality_palette() -> dict[str, Any]:
         "main_tones": [],
         "accents": [],
         "derivatives": [],
+        "pressure_triggers": [],
+        "relationship_tones": [],
+        "voice_signature": [],
+        "gesture_signature": [],
+        "negative_costs": [],
+        "presence_mode": "active_scene",
     }
 
 
