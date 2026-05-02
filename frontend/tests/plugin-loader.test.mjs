@@ -9,7 +9,7 @@ const platformLoaderPath = path.resolve(process.cwd(), '../platform/frontend/pub
 const publicSource = fs.readFileSync(publicLoaderPath, 'utf8')
 const platformSource = fs.readFileSync(platformLoaderPath, 'utf8')
 
-function assertWorldEvolutionBridge(source) {
+function assertPluginHostBridge(source) {
   assert.match(source, /version:\s*'0\.5\.0'/)
   assert.match(source, /window\.PlotPilotPlugins\s*=\s*runtime/)
   assert.match(source, /refreshManifest\s*:\s*async\s*\(\)\s*=>/)
@@ -36,8 +36,8 @@ function assertWorldEvolutionBridge(source) {
   assert.match(source, /runtime\.plugins\.dispose\(item\.name\)/)
 }
 
-test('public plugin loader exposes the world_evolution_core host bridge', () => {
-  assertWorldEvolutionBridge(publicSource)
+test('public plugin loader exposes the generic plugin host bridge', () => {
+  assertPluginHostBridge(publicSource)
 })
 
 test('platform installer copy keeps the same plugin loader runtime', () => {
