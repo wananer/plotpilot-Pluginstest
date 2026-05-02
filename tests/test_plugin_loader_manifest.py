@@ -335,32 +335,3 @@ def test_example_plugin_manifest_and_runtime_script_exist():
     assert "runtime.events.on('chapter:loaded'" in inject_source
     assert "runtime.events.on('chapter:saved'" in inject_source
     assert "runtime.events.on('route:changed'" in inject_source
-
-
-def test_world_evolution_core_bundle_is_manifest_loadable():
-    plugin_dir = Path(__file__).resolve().parents[1] / "plugins" / "world_evolution_core"
-    manifest_path = plugin_dir / "plugin.json"
-    init_path = plugin_dir / "__init__.py"
-    inject_path = plugin_dir / "static" / "inject.js"
-    style_path = plugin_dir / "static" / "style.css"
-
-    assert plugin_dir.exists()
-    assert manifest_path.exists()
-    assert init_path.exists()
-    assert inject_path.exists()
-    assert style_path.exists()
-
-    manifest = manifest_path.read_text(encoding="utf-8")
-    init_source = init_path.read_text(encoding="utf-8")
-    inject_source = inject_path.read_text(encoding="utf-8")
-
-    assert '"name": "world_evolution_core"' in manifest
-    assert '"context_injection": true' in manifest
-    assert '"chapter_postprocess": true' in manifest
-    assert '"review_chapter"' in manifest
-    assert 'register_hook("world_evolution_core", "before_context_build"' in init_source
-    assert 'register_hook("world_evolution_core", "after_commit"' in init_source
-    assert "window.PlotPilotPlugins" in inject_source
-    assert "const pluginName = 'world_evolution_core'" in inject_source
-    assert "/api/v1/plugins/evolution-world/novels/" in inject_source
-    assert "data-rebuild-derived" in inject_source

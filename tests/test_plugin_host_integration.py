@@ -8,7 +8,7 @@ def test_generation_context_patch_skips_disabled_hooks(monkeypatch):
     def handler(payload):
         raise AssertionError("disabled plugin hooks should not run")
 
-    register_hook("world_evolution_core", "before_context_build", handler)
+    register_hook("sample_state_plugin", "before_context_build", handler)
     monkeypatch.setattr(
         "plugins.platform.hook_dispatcher._plugin_is_enabled",
         lambda plugin_name: False,
