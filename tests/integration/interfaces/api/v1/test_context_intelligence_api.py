@@ -94,9 +94,9 @@ def test_scene_director_analyze_service_error_returns_generic_message():
         assert r.status_code == 500
         data = r.json()
         # Verify generic message is returned, not the internal error
-        assert data["detail"] == "Failed to analyze scene"
-        assert "database" not in data["detail"].lower()
-        assert "connection" not in data["detail"].lower()
+        assert data["message"] == "Failed to analyze scene"
+        assert "database" not in str(data).lower()
+        assert "connection" not in str(data).lower()
 
 
 def test_context_retrieve_returns_layers():

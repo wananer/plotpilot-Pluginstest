@@ -1,4 +1,4 @@
-"""E2E test fixtures: full app stack with in-memory DB."""
+"""E2E test fixtures."""
 
 from pathlib import Path
 
@@ -11,12 +11,9 @@ SCHEMA_PATH = Path(__file__).resolve().parents[2] / "infrastructure" / "persiste
 
 
 @pytest.fixture
-def db():
-    """In-memory database for e2e tests."""
-    db = DatabaseConnection(":memory:")
-    schema_sql = SCHEMA_PATH.read_text(encoding="utf-8")
-    db.get_connection().executescript(schema_sql)
-    db.get_connection().commit()
+def db(isolated_data_dir):
+    """File-backed database for e2e tests."""
+    db = DatabaseConnection(str(isolated_data_dir / "aitext.db"))
     yield db
     db.close()
 
@@ -39,4 +36,5 @@ def client(db, monkeypatch):
 
     from interfaces.main import app
 
-    return TestClient(app)
+    with TestClient(app) as test_client:
+        yield test_client

@@ -85,7 +85,7 @@ class TestForeshadowLedgerAPI:
         )
 
         assert response.status_code == 400
-        assert "already exists" in response.json()["detail"]
+        assert "already exists" in response.json()["message"]
 
     def test_list_subtext_entries(self, client, novel_id, setup_registry):
         client.post(

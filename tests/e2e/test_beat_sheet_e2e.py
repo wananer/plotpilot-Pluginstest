@@ -2,8 +2,8 @@
 端到端测试：从章节大纲到节拍表生成的完整链路
 使用 Playwright 测试前端和后端的集成
 
-注意：此测试需要本地运行前端 (localhost:5173) 和后端 (localhost:8000) 服务。
-在 CI 环境中自动跳过。
+注意：此测试需要本地运行前端 (localhost:5173)。
+后端由 backend_base_url fixture 自动启动；在 CI 环境中没有前端时自动跳过。
 """
 
 import asyncio
@@ -31,7 +31,7 @@ async def _check_server_available(host: str, port: int, timeout: float = 2.0) ->
 
 
 @pytest.mark.asyncio
-async def test_beat_sheet_generation_e2e():
+async def test_beat_sheet_generation_e2e(backend_base_url):
     """测试节拍表生成的完整流程（需要本地前后端服务）"""
 
     if not await _check_server_available("localhost", 5173):
@@ -88,8 +88,8 @@ async def test_beat_sheet_generation_e2e():
             print("\n[步骤 6] 生成节拍表...")
             response = await page.evaluate(
                 """
-                async () => {
-                    const response = await fetch('http://localhost:8000/api/v1/beat-sheets/generate', {
+                async (backendBaseUrl) => {
+                    const response = await fetch(`${backendBaseUrl}/api/v1/beat-sheets/generate`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({
@@ -99,7 +99,8 @@ async def test_beat_sheet_generation_e2e():
                     });
                     return await response.json();
                 }
-            """
+            """,
+                backend_base_url,
             )
 
             print(f"API 响应: {response}")
@@ -129,8 +130,8 @@ async def test_beat_sheet_generation_e2e():
             if "scenes" in response and len(response["scenes"]) > 0:
                 scene_response = await page.evaluate(
                     """
-                    async (sceneData) => {
-                        const response = await fetch('http://localhost:8000/api/v1/scenes/generate', {
+                    async ({ sceneData, backendBaseUrl }) => {
+                        const response = await fetch(`${backendBaseUrl}/api/v1/scenes/generate`, {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
                             body: JSON.stringify({
@@ -147,7 +148,7 @@ async def test_beat_sheet_generation_e2e():
                         return await response.json();
                     }
                 """,
-                    response["scenes"][0],
+                    {"sceneData": response["scenes"][0], "backendBaseUrl": backend_base_url},
                 )
 
                 if "content" in scene_response:
@@ -165,4 +166,4 @@ async def test_beat_sheet_generation_e2e():
 
 
 if __name__ == "__main__":
-    asyncio.run(test_beat_sheet_generation_e2e())
+    asyncio.run(test_beat_sheet_generation_e2e(os.environ.get("BACKEND_BASE_URL", "http://localhost:8000")))

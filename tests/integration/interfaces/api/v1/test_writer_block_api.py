@@ -168,7 +168,7 @@ class TestWriterBlockAPI:
 
         # 应该返回 400 错误
         assert response.status_code == 400
-        assert "does not match" in response.json()["detail"]
+        assert "does not match" in response.json()["message"]
 
     def test_tension_slingshot_validation_missing_fields(self, client):
         """测试：验证缺少必需字段时返回错误"""

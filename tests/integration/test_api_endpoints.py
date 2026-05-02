@@ -30,7 +30,8 @@ def test_root_endpoint():
     """测试根路径"""
     response = client.get("/")
     assert response.status_code == 200
-    assert response.json()["message"] == "aitext API v2.0"
+    assert "text/html" in response.headers["content-type"]
+    assert "PlotPilot" in response.text
 
 
 def test_health_check():

@@ -3,18 +3,16 @@ import requests
 import json
 import uuid
 
-BASE_URL = "http://localhost:8000/api/v1"
-
-
-def test_voice_api():
+def test_voice_api(backend_base_url):
     """手动测试 Voice API"""
+    base_url = f"{backend_base_url}/api/v1"
 
     # 1. 创建测试小说
     novel_id = f"test-voice-{uuid.uuid4().hex[:8]}"
     print(f"\n1. 创建测试小说: {novel_id}")
 
     novel_response = requests.post(
-        f"{BASE_URL}/novels",
+        f"{base_url}/novels",
         json={
             "novel_id": novel_id,
             "title": "文风测试小说",
@@ -41,7 +39,7 @@ def test_voice_api():
     }
 
     sample_response = requests.post(
-        f"{BASE_URL}/novels/{novel_id}/voice/samples",
+        f"{base_url}/novels/{novel_id}/voice/samples",
         json=sample_data
     )
     print(f"   状态码: {sample_response.status_code}")
@@ -65,7 +63,7 @@ def test_voice_api():
     }
 
     sample_response_2 = requests.post(
-        f"{BASE_URL}/novels/{novel_id}/voice/samples",
+        f"{base_url}/novels/{novel_id}/voice/samples",
         json=sample_data_2
     )
     print(f"   状态码: {sample_response_2.status_code}")
@@ -86,7 +84,7 @@ def test_voice_api():
     }
 
     invalid_response = requests.post(
-        f"{BASE_URL}/novels/{novel_id}/voice/samples",
+        f"{base_url}/novels/{novel_id}/voice/samples",
         json=invalid_data
     )
     print(f"   状态码: {invalid_response.status_code}")

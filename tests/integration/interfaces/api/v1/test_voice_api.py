@@ -219,13 +219,15 @@ class TestVoiceAPI:
         assert data["sentence_count"] > 0
 
     def test_get_fingerprint_not_found(self, client, test_novel_id):
-        """测试无样本时获取指纹返回 404"""
+        """测试无样本时获取空指纹"""
         # Act - Try to get fingerprint without any samples
         response = client.get(f"/api/v1/novels/{test_novel_id}/voice/fingerprint")
 
         # Assert
-        assert response.status_code == 404
-        assert "not found" in response.json()["detail"].lower()
+        assert response.status_code == 200
+        data = response.json()
+        assert data["sample_count"] == 0
+        assert data["adjective_density"] == 0.0
 
     def test_get_fingerprint_with_pov_character(self, client, test_novel_id):
         """测试使用 POV 角色 ID 获取指纹"""
@@ -249,5 +251,6 @@ class TestVoiceAPI:
             params={"pov_character_id": "char-123"}
         )
 
-        # Assert - Should return 404 since we didn't create samples with POV
-        assert response.status_code == 404
+        # Assert - POV-specific fingerprint is independent and falls back to an empty profile.
+        assert response.status_code == 200
+        assert response.json()["sample_count"] == 0

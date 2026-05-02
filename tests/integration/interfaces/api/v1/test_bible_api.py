@@ -102,7 +102,7 @@ class TestGetBible:
         """测试获取不存在的 Bible"""
         response = client.get("/api/v1/bible/novels/test-novel-bible/bible")
         assert response.status_code == 404
-        assert "not found" in response.json()["detail"].lower()
+        assert "not found" in response.json()["message"].lower()
 
     def test_get_bible_wrong_novel(self):
         """测试从不存在的小说获取 Bible"""

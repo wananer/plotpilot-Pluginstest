@@ -3,6 +3,7 @@ import json
 import sys
 import zipfile
 from pathlib import Path
+from typing import Dict, Optional, Tuple
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -14,7 +15,7 @@ if str(PROJECT_ROOT) not in sys.path:
 import plugins.loader as plugin_loader
 
 
-def _make_zip_bytes(files: dict[str, str]) -> bytes:
+def _make_zip_bytes(files: Dict[str, str]) -> bytes:
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w") as zf:
         for relative_path, content in files.items():
@@ -22,7 +23,7 @@ def _make_zip_bytes(files: dict[str, str]) -> bytes:
     return buffer.getvalue()
 
 
-def _make_client(*, client: tuple[str, int] | None = None) -> TestClient:
+def _make_client(*, client: Optional[Tuple[str, int]] = None) -> TestClient:
     app = FastAPI()
     app.include_router(plugin_loader.create_plugin_manifest_router(), prefix="/api/v1")
     if client is not None:

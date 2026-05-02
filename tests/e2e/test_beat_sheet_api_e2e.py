@@ -13,16 +13,16 @@ import httpx
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
 
-async def test_beat_sheet_generation_api():
+async def test_beat_sheet_generation_api(backend_base_url):
     """测试节拍表生成的完整 API 流程"""
 
-    base_url = "http://localhost:8000"
+    base_url = backend_base_url
 
     print("=" * 80)
     print("端到端测试：节拍表生成完整链路（API 测试）")
     print("=" * 80)
 
-    async with httpx.AsyncClient(timeout=60.0) as client:
+    async with httpx.AsyncClient(timeout=60.0, trust_env=False) as client:
         try:
             # 步骤 1：检查后端健康状态
             print("\n[步骤 1] 检查后端服务...")
@@ -31,8 +31,7 @@ async def test_beat_sheet_generation_api():
                 print("✓ 后端服务正常运行")
             except Exception as e:
                 print(f"✗ 后端服务未启动: {e}")
-                print("请先启动后端服务: cd interfaces && python -m uvicorn main:app --reload")
-                return
+                raise AssertionError(f"后端服务未启动: {e}") from e
 
             # 步骤 2：准备测试数据
             print("\n[步骤 2] 准备测试数据...")
@@ -132,7 +131,7 @@ async def test_beat_sheet_generation_api():
             else:
                 print(f"✗ 节拍表生成失败: {response.status_code}")
                 print(f"  错误信息: {response.text}")
-                return
+                raise AssertionError(f"节拍表生成失败: {response.status_code}")
 
             print("\n" + "=" * 80)
             print("✓ 端到端测试完成！所有步骤通过")

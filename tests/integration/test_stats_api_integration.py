@@ -59,7 +59,8 @@ class TestStatsAPIIntegration:
 
         assert response.status_code == 404
         data = response.json()
-        assert "detail" in data
+        assert data["success"] is False
+        assert data["code"] == "NOT_FOUND"
 
     def test_get_chapter_stats_not_found(self, client):
         """Test getting stats for non-existent chapter"""

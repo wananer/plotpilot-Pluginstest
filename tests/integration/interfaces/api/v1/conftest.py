@@ -22,12 +22,13 @@ SCHEMA_PATH = (
 
 
 @pytest.fixture
-def db():
-    """In-memory database fixture."""
-    db = DatabaseConnection(":memory:")
-    schema_sql = SCHEMA_PATH.read_text(encoding="utf-8")
-    db.get_connection().executescript(schema_sql)
-    db.get_connection().commit()
+def db(isolated_data_dir, monkeypatch):
+    """File-backed SQLite fixture aligned with path-based repositories."""
+    db = DatabaseConnection(str(isolated_data_dir / "aitext.db"))
+
+    from infrastructure.persistence.database import connection
+
+    connection._db_instance = db
     yield db
     db.close()
 
@@ -48,10 +49,15 @@ def client(db, monkeypatch):
         "interfaces.api.dependencies.get_database",
         mock_get_database,
     )
+    monkeypatch.setattr(
+        "infrastructure.persistence.database.connection._db_instance",
+        db,
+    )
 
     # Import app after monkeypatching
     from interfaces.main import app
-    return TestClient(app)
+    with TestClient(app) as test_client:
+        yield test_client
 
 
 @pytest.fixture

@@ -18,7 +18,14 @@ def mock_dependencies():
     # Mock ContextBuilder
     context_builder = Mock(spec=ContextBuilder)
     context_builder.build_context.return_value = "Full context with 35K tokens"
-    context_builder.estimate_tokens.return_value = 8750
+    context_builder.build_structured_context.return_value = {
+        "layer1_text": "Layer 1 context",
+        "layer2_text": "Layer 2 context",
+        "layer3_text": "Layer 3 context",
+        "token_usage": {"total": 8750},
+    }
+    context_builder.build_voice_anchor_system_section.return_value = ""
+    context_builder.magnify_outline_to_beats.return_value = []
 
     # Mock ConsistencyChecker
     consistency_checker = Mock(spec=ConsistencyChecker)
@@ -90,8 +97,8 @@ class TestCompleteGenerationFlow:
         assert isinstance(result.consistency_report, ConsistencyReport)
 
         # 验证调用链
-        mock_dependencies['context_builder'].build_context.assert_called_once()
-        mock_dependencies['llm_service'].generate.assert_called_once()
+        mock_dependencies['context_builder'].build_structured_context.assert_called_once()
+        assert mock_dependencies['llm_service'].generate.call_count >= 1
         mock_dependencies['consistency_checker'].check_all.assert_called_once()
 
     @pytest.mark.asyncio
@@ -212,11 +219,12 @@ class TestIntegrationWithComponents:
         )
 
         # 验证 ContextBuilder 被正确调用
-        mock_dependencies['context_builder'].build_context.assert_called_once_with(
+        mock_dependencies['context_builder'].build_structured_context.assert_called_once_with(
             novel_id="test-novel",
             chapter_number=5,
             outline="Chapter 5 outline",
-            max_tokens=35000
+            max_tokens=35000,
+            scene_director=None,
         )
 
     @pytest.mark.asyncio
