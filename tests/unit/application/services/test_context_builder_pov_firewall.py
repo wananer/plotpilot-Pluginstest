@@ -3,9 +3,26 @@
 验证 ContextBuilder 根据 POV 和章节号过滤角色的 hidden_profile。
 """
 import pytest
+from types import SimpleNamespace
 from unittest.mock import Mock, MagicMock
 from application.services.context_builder import ContextBuilder
 from application.dtos.bible_dto import BibleDTO, CharacterDTO
+from domain.bible.entities.character import Character
+from domain.bible.value_objects.character_id import CharacterId
+
+
+def _to_domain_character(dto: CharacterDTO) -> Character:
+    return Character(
+        CharacterId(dto.id),
+        dto.name,
+        dto.description,
+        public_profile=dto.public_profile,
+        hidden_profile=dto.hidden_profile,
+        reveal_chapter=dto.reveal_chapter,
+        mental_state=dto.mental_state,
+        verbal_tic=dto.verbal_tic,
+        idle_behavior=dto.idle_behavior,
+    )
 
 
 @pytest.fixture
@@ -17,8 +34,26 @@ def mock_dependencies():
     chapter_repository = Mock()
     chapter_repository.list_by_novel.return_value = []
 
+    bible_service = Mock()
+    bible_service.get_bible_by_novel.return_value = BibleDTO(
+        id="empty",
+        novel_id="novel_001",
+        characters=[],
+        world_settings=[],
+        locations=[],
+        timeline_notes=[],
+        style_notes=[],
+    )
+    bible_repository = Mock()
+    bible_repository.get_by_novel_id.side_effect = lambda _novel_id: SimpleNamespace(
+        characters=[
+            _to_domain_character(char)
+            for char in bible_service.get_bible_by_novel.return_value.characters
+        ]
+    )
+
     return {
-        "bible_service": Mock(),
+        "bible_service": bible_service,
         "storyline_manager": storyline_manager,
         "relationship_engine": Mock(),
         "vector_store": None,
@@ -26,6 +61,7 @@ def mock_dependencies():
         "chapter_repository": chapter_repository,
         "plot_arc_repository": None,
         "embedding_service": None,
+        "bible_repository": bible_repository,
     }
 
 
@@ -70,7 +106,7 @@ def test_layer2_excludes_hidden_before_reveal(context_builder, mock_dependencies
     )
 
     # Assert
-    layer2_text = result["layer2_text"]
+    layer2_text = result["layer1_text"]
     assert "林雪" in layer2_text, "角色名应该出现"
     assert "警察，外表冷静" in layer2_text, "public_profile 应该出现"
     assert "卧底" not in layer2_text, "hidden_profile 不应出现（章节 10 < reveal_chapter 100）"
@@ -112,7 +148,7 @@ def test_layer2_includes_hidden_after_reveal(context_builder, mock_dependencies)
     )
 
     # Assert
-    layer2_text = result["layer2_text"]
+    layer2_text = result["layer1_text"]
     assert "林雪" in layer2_text, "角色名应该出现"
     assert "警察，外表冷静" in layer2_text, "public_profile 应该出现"
     assert "卧底" in layer2_text, "hidden_profile 应该出现（章节 100 >= reveal_chapter 100）"
@@ -154,7 +190,7 @@ def test_layer2_includes_hidden_when_no_reveal_chapter(context_builder, mock_dep
     )
 
     # Assert
-    layer2_text = result["layer2_text"]
+    layer2_text = result["layer1_text"]
     assert "张伟" in layer2_text, "角色名应该出现"
     assert "商人" in layer2_text, "public_profile 应该出现"
     assert "犯罪前科" in layer2_text, "hidden_profile 应该出现（reveal_chapter=None）"
@@ -196,7 +232,7 @@ def test_layer2_uses_public_profile_always(context_builder, mock_dependencies):
         )
 
         # Assert
-        layer2_text = result["layer2_text"]
+        layer2_text = result["layer1_text"]
         assert "李明" in layer2_text, f"角色名应该在章节 {chapter_num} 出现"
         assert "大学教授，温文尔雅" in layer2_text, f"public_profile 应该在章节 {chapter_num} 出现"
 
@@ -233,7 +269,7 @@ def test_layer2_backward_compatible_with_old_data(context_builder, mock_dependen
     )
 
     # Assert
-    layer2_text = result["layer2_text"]
+    layer2_text = result["layer1_text"]
     assert "王芳" in layer2_text, "角色名应该出现"
     assert "资深记者，善于调查" in layer2_text, "description 应该作为后备出现"
 
@@ -293,7 +329,7 @@ def test_layer2_multiple_characters_with_different_reveal_chapters(context_build
     )
 
     # Assert
-    layer2_text = result["layer2_text"]
+    layer2_text = result["layer1_text"]
 
     # char1: 应该显示 hidden（75 >= 50）
     assert "角色A" in layer2_text

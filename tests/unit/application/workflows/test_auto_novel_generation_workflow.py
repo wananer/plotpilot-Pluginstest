@@ -34,6 +34,8 @@ def mock_context_builder():
             "total": 9250
         }
     }
+    builder.magnify_outline_to_beats.return_value = []
+    builder.build_voice_anchor_system_section.return_value = ""
     # 不再需要 estimate_tokens 方法
     return builder
 
@@ -572,8 +574,8 @@ class TestStyleIntegration:
         assert mock_llm_service.generate.called
 
         # 获取传递给 LLM 的 prompt
-        call_args = mock_llm_service.generate.call_args
-        prompt = call_args[0][0]
+        call_args = mock_llm_service.generate.call_args_list[0]
+        prompt = call_args.args[0]
 
         # 验证 prompt 包含风格指纹摘要
         assert "形容词密度" in prompt.system or "平均句长" in prompt.system

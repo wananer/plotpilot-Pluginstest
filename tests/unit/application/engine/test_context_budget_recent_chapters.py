@@ -20,9 +20,9 @@ def test_excerpt_short_full_in_tail_block():
 
 def test_excerpt_long_head_and_tail():
     alloc = ContextBudgetAllocator()
-    text = "A" * 250 + "M" * 500 + "Z" * 1200
+    text = "A" * 350 + "M" * 500 + "Z" * 2200
     out = alloc._excerpt_immediate_previous_chapter(text)
     assert "章首略览" in out
     assert "章末节选，供本章开头承接" in out
-    assert out.endswith("Z" * 1200)
-    assert "A" * 250 in out
+    assert out.endswith("Z" * 2000)
+    assert "A" * 300 in out

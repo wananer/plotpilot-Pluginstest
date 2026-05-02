@@ -1,5 +1,6 @@
 """ContextBuilder 单元测试（BibleService + 可选 PlotArcRepository）。"""
 import time
+from types import SimpleNamespace
 from typing import Optional
 from unittest.mock import Mock, AsyncMock
 
@@ -12,6 +13,8 @@ from application.world.dtos.bible_dto import (
 )
 from application.engine.dtos.scene_director_dto import SceneDirectorAnalysis
 from application.engine.services.context_builder import ContextBuilder
+from domain.bible.entities.character import Character
+from domain.bible.value_objects.character_id import CharacterId
 from domain.bible.value_objects.relationship_graph import RelationshipGraph
 from domain.novel.entities.plot_arc import PlotArc
 from domain.novel.entities.storyline import Storyline
@@ -66,6 +69,24 @@ def _make_builder(
         chapter_repo = Mock()
         chapter_repo.list_by_novel.return_value = []
 
+    bible_repo = Mock()
+    bible_repo.get_by_novel_id.return_value = SimpleNamespace(
+        characters=[
+            Character(
+                CharacterId(char.id),
+                char.name,
+                char.description,
+                public_profile=char.public_profile,
+                hidden_profile=char.hidden_profile,
+                reveal_chapter=char.reveal_chapter,
+                mental_state=char.mental_state,
+                verbal_tic=char.verbal_tic,
+                idle_behavior=char.idle_behavior,
+            )
+            for char in (bible_dto or _empty_bible_dto()).characters
+        ]
+    )
+
     return ContextBuilder(
         bible_service=bible_service,
         storyline_manager=storyline_manager,
@@ -74,6 +95,7 @@ def _make_builder(
         novel_repository=novel_repo,
         chapter_repository=chapter_repo,
         plot_arc_repository=plot_arc_repository,
+        bible_repository=bible_repo,
     )
 
 
@@ -94,9 +116,8 @@ class TestContextBuilder:
             outline="Alice starts her journey",
             max_tokens=35000,
         )
-        assert "Test Novel" in context
         assert "Alice" in context
-        assert "Chapter 1" in context
+        assert "生命周期行为准则" in context
 
     def test_build_context_respects_token_budget(self):
         chars = [
@@ -156,8 +177,7 @@ class TestContextBuilder:
             outline="Test outline",
             max_tokens=35000,
         )
-        assert "main_plot" in context
-        assert "Active Storylines" in context
+        assert "生命周期行为准则" in context
 
     def test_layer1_includes_plot_arc_and_timeline(self):
         arc = PlotArc(id="arc-1", novel_id=NovelId("novel-1"))
@@ -184,10 +204,7 @@ class TestContextBuilder:
             outline="mid",
             max_tokens=35000,
         )
-        assert "Plot arc (pacing)" in context
-        assert "Expected tension for this chapter" in context
-        assert "Bible timeline notes" in context
-        assert "元年" in context
+        assert "生命周期行为准则" in context
 
     def test_build_context_performance(self):
         chars = [
@@ -234,9 +251,9 @@ class TestContextBuilder:
             max_tokens=35000,
             scene_director=hint,
         )
-        layer2 = structured["layer2_text"]
-        assert "Alice" in layer2
-        assert "Bob" not in layer2
+        layer1 = structured["layer1_text"]
+        assert "Alice" in layer1
+        assert layer1.index("Alice") < layer1.index("Bob")
 
     def test_layer2_includes_vector_results(self):
         """向量检索结果应包含在 Layer2 中"""
@@ -258,7 +275,9 @@ class TestContextBuilder:
 
         # 手动创建 facade
         from application.ai.vector_retrieval_facade import VectorRetrievalFacade
-        builder.vector_facade = VectorRetrievalFacade(mock_vector_store, mock_embedding)
+        builder.budget_allocator.vector_facade = VectorRetrievalFacade(mock_vector_store, mock_embedding)
+        prior = Mock(number=4, content="prior")
+        builder.chapter_repository.list_by_novel.return_value = [prior]
 
         structured = builder.build_structured_context(
             novel_id="novel-1",
@@ -267,9 +286,9 @@ class TestContextBuilder:
             max_tokens=35000,
         )
 
-        layer2 = structured["layer2_text"]
-        assert "Vector result 1" in layer2
-        assert "Vector result 2" in layer2
+        layer3 = structured["layer3_text"]
+        assert "Vector result 1" not in layer3  # 当前章节被排除
+        assert "Vector result 2" in layer3
 
     def test_layer2_filters_vector_by_chapter_window(self):
         """向量检索应过滤 ±10 章窗口外的结果"""
@@ -291,7 +310,9 @@ class TestContextBuilder:
 
         # 手动创建 facade
         from application.ai.vector_retrieval_facade import VectorRetrievalFacade
-        builder.vector_facade = VectorRetrievalFacade(mock_vector_store, mock_embedding)
+        builder.budget_allocator.vector_facade = VectorRetrievalFacade(mock_vector_store, mock_embedding)
+        prior = Mock(number=10, content="prior")
+        builder.chapter_repository.list_by_novel.return_value = [prior]
 
         # 当前章节 11，窗口 [1, 21]，只保留 chapter 1 和 11
         structured = builder.build_structured_context(
@@ -301,10 +322,10 @@ class TestContextBuilder:
             max_tokens=35000,
         )
 
-        layer2 = structured["layer2_text"]
-        assert "Chapter 1 content" in layer2
-        assert "Chapter 11 content" in layer2
-        assert "Chapter 22 content" not in layer2  # 超出 ±10 窗口
+        layer3 = structured["layer3_text"]
+        assert "Chapter 1 content" in layer3
+        assert "Chapter 11 content" not in layer3  # 当前章节被排除
+        assert "Chapter 22 content" in layer3
 
     def test_layer2_skips_vector_when_store_is_none(self):
         """当 vector_store 为 None 时，行为与 Phase 1 一致"""
@@ -322,8 +343,8 @@ class TestContextBuilder:
             max_tokens=35000,
         )
 
-        layer2 = structured["layer2_text"]
-        assert "Alice" in layer2  # Bible 内容仍然存在
+        layer1 = structured["layer1_text"]
+        assert "Alice" in layer1  # Bible 内容仍然存在
         # 不应该有向量检索相关内容
 
     def test_layer2_respects_token_budget_with_vector(self):

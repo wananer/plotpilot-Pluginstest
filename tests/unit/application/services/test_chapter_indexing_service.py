@@ -1,4 +1,6 @@
 """ChapterIndexingService 单元测试"""
+import uuid
+
 import pytest
 from unittest.mock import Mock, AsyncMock
 from application.services.chapter_indexing_service import ChapterIndexingService
@@ -70,7 +72,9 @@ class TestChapterIndexingService:
         # 验证参数
         call_args = mock_vector_store.insert.call_args
         assert call_args.kwargs["collection"] == "novel_novel-123_chunks"
-        assert call_args.kwargs["id"] == "novel-123_ch1_summary"
+        assert call_args.kwargs["id"] == str(
+            uuid.uuid5(uuid.NAMESPACE_DNS, "novel-123_ch1_summary")
+        )
         assert call_args.kwargs["vector"] == expected_vector
 
         # 验证 payload 结构
@@ -100,7 +104,7 @@ class TestChapterIndexingService:
     async def test_ensure_collection_skips_if_exists(
         self, service, mock_vector_store
     ):
-        """测试 ensure_collection 在 collection 已存在时跳过创建"""
+        """测试 ensure_collection 始终委托 vector store 处理幂等与维度匹配"""
         novel_id = "novel-123"
         mock_vector_store.list_collections.return_value = [
             "novel_novel-123_chunks"
@@ -108,8 +112,10 @@ class TestChapterIndexingService:
 
         await service.ensure_collection(novel_id)
 
-        # 验证没有调用 create_collection
-        mock_vector_store.create_collection.assert_not_called()
+        mock_vector_store.create_collection.assert_called_once_with(
+            collection="novel_novel-123_chunks",
+            dimension=1536
+        )
 
     @pytest.mark.asyncio
     async def test_index_chapter_summary_validates_novel_id(self, service):
@@ -169,7 +175,9 @@ class TestChapterIndexingService:
         # 验证参数
         call_args = mock_vector_store.insert.call_args
         assert call_args.kwargs["collection"] == "novel_novel-123_chunks"
-        assert call_args.kwargs["id"] == "novel-123_ch5_bible"
+        assert call_args.kwargs["id"] == str(
+            uuid.uuid5(uuid.NAMESPACE_DNS, "novel-123_ch5_bible")
+        )
 
         # 验证 payload 结构
         payload = call_args.kwargs["payload"]
@@ -195,9 +203,11 @@ class TestChapterIndexingService:
             snippet_id=snippet_id
         )
 
-        # 验证 ID 包含 snippet_id
+        # 验证 ID 由包含 snippet_id 的稳定 raw id 派生
         call_args = mock_vector_store.insert.call_args
-        assert call_args.kwargs["id"] == "novel-123_ch5_bible_location_001"
+        assert call_args.kwargs["id"] == str(
+            uuid.uuid5(uuid.NAMESPACE_DNS, "novel-123_ch5_bible_location_001")
+        )
 
     @pytest.mark.asyncio
     async def test_index_bible_snippet_validates_parameters(self, service):

@@ -83,8 +83,8 @@ class ChromaDBVectorStore(VectorStore):
                 "请选择以下任一方式解决：\n"
                 "  方式 A — 安装扩展依赖（~2GB）：\n"
                 "    pip install -r requirements-local.txt\n\n"
-                "  方式 B — 切换到 Qdrant 远程模式（推荐）：\n"
-                "    设置环境变量 VECTOR_STORE_TYPE=qdrant\n\n"
+                "  方式 B — 禁用向量存储降级运行：\n"
+                "    设置环境变量 VECTOR_STORE_ENABLED=false\n\n"
                 f"原始错误: {e}"
             ) from e
 

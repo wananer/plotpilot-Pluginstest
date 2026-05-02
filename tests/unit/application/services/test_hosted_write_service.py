@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, Mock
 from application.services.hosted_write_service import HostedWriteService
 from application.workflows.auto_novel_generation_workflow import AutoNovelGenerationWorkflow
 from application.services.chapter_service import ChapterService
+from application.services.novel_service import NovelService
 
 
 @pytest.fixture
@@ -32,9 +33,16 @@ def mock_chapter_service():
     return svc
 
 
+@pytest.fixture
+def mock_novel_service():
+    svc = Mock(spec=NovelService)
+    svc.add_chapter = Mock()
+    return svc
+
+
 @pytest.mark.asyncio
-async def test_hosted_streams_events_and_saves(mock_workflow, mock_chapter_service):
-    svc = HostedWriteService(mock_workflow, mock_chapter_service)
+async def test_hosted_streams_events_and_saves(mock_workflow, mock_chapter_service, mock_novel_service):
+    svc = HostedWriteService(mock_workflow, mock_chapter_service, mock_novel_service)
     events = []
     async for e in svc.stream_hosted_write(
         "novel-1", 1, 1, auto_save=True, auto_outline=True
@@ -48,9 +56,9 @@ async def test_hosted_streams_events_and_saves(mock_workflow, mock_chapter_servi
 
 
 @pytest.mark.asyncio
-async def test_suggest_outline_uses_llm(mock_workflow, mock_chapter_service):
+async def test_suggest_outline_uses_llm(mock_workflow, mock_chapter_service, mock_novel_service):
     mock_workflow.suggest_outline = AsyncMock(return_value="auto")
-    svc = HostedWriteService(mock_workflow, mock_chapter_service)
+    svc = HostedWriteService(mock_workflow, mock_chapter_service, mock_novel_service)
     events = []
     async for e in svc.stream_hosted_write(
         "novel-1", 2, 2, auto_save=False, auto_outline=True

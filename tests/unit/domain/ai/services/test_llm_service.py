@@ -21,7 +21,7 @@ class TestGenerationConfig:
     def test_generation_config_default_values(self):
         """测试默认值"""
         config = GenerationConfig()
-        assert config.model == "claude-3-5-sonnet-20241022"
+        assert config.model == ""
         assert config.max_tokens == 4096
         assert config.temperature == 1.0
 
@@ -88,4 +88,3 @@ class TestGenerationResult:
         with pytest.raises(ValueError, match="Token counts cannot be negative"):
             token_usage = TokenUsage(input_tokens=100, output_tokens=-1)
             GenerationResult(content="内容", token_usage=token_usage)
-

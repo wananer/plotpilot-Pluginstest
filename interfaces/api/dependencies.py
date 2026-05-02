@@ -563,8 +563,7 @@ def get_vector_store() -> Optional[VectorStore]:
         _vector_store_init_failed = True
         logger.warning(
             "向量存储初始化失败，已降级禁用。"
-            "如需使用向量功能，请安装依赖: pip install -r requirements-local.txt"
-            " 或设置 VECTOR_STORE_TYPE=qdrant。错误: %s",
+            "如需使用向量功能，请安装依赖: pip install -r requirements-local.txt。错误: %s",
             e,
         )
         return None
@@ -974,4 +973,3 @@ def get_foreshadow_ledger_service():
     """
     from application.analyst.services.foreshadow_ledger_service import ForeshadowLedgerService
     return ForeshadowLedgerService(get_foreshadowing_repository())
-
