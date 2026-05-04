@@ -556,6 +556,11 @@ function deskSnapFromAutopilot(status: Record<string, unknown> | null | undefine
     s.current_chapter_number ?? '',
     s.current_beat_index ?? 0,
     s.needs_review === true ? '1' : '0',
+    s.boundary_gate_status ?? '',
+    s.revision_attempts ?? 0,
+    s.chapter_draft_status ?? '',
+    s.route_gate_status ?? '',
+    s.constraint_gate_status ?? '',
   ].join('|')
 }
 

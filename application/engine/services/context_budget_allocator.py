@@ -338,6 +338,17 @@ class ContextBudgetAllocator:
             priority=130,
         )
 
+        # T0-ψ: 章节边界承接。上一章章末状态不能只作为近期正文参考，否则模型容易跳场。
+        chapter_boundary_bridge = self._get_chapter_boundary_bridge(novel_id, chapter_number)
+        slots["chapter_boundary_bridge"] = ContextSlot(
+            name="章节边界承接硬约束",
+            tier=PriorityTier.T0_CRITICAL,
+            content=chapter_boundary_bridge,
+            tokens=self.estimate_tokens(chapter_boundary_bridge),
+            max_tokens=1800,
+            priority=125,
+        )
+
         # ★ V6 T0-α: FACT_LOCK（不可篡改事实块）—— priority=120
         fact_lock_content = ""
         if self.memory_engine:
@@ -1377,6 +1388,33 @@ class ContextBudgetAllocator:
         except Exception as e:
             logger.warning(f"获取近期幕摘要失败: {e}")
         
+        return ""
+
+    def _get_chapter_boundary_bridge(self, novel_id: str, chapter_number: int) -> str:
+        """Build a T0 directive that forces the next chapter opening to bridge from the prior ending."""
+        if chapter_number <= 1 or not self.chapter_repo:
+            return ""
+
+        try:
+            nid = NovelId(novel_id)
+            all_chapters = self.chapter_repo.list_by_novel(nid)
+            previous = next((c for c in all_chapters if c.number == chapter_number - 1), None)
+            if not previous or not (previous.content or "").strip():
+                return ""
+
+            excerpt = self._excerpt_immediate_previous_chapter(previous.content or "")
+            if not excerpt:
+                return ""
+            return (
+                "下一章开头必须先兑现上一章章末的时间、地点、在场角色、危险状态与关键物件；"
+                "如果本章需要跳时空或换场，第一段必须补出逃脱、移动、撤离、昏迷醒来、被带走或再次抵达的因果桥，"
+                "禁止直接重置场景。\n"
+                f"上一章：第 {previous.number} 章《{getattr(previous, 'title', '') or '未命名'}》\n"
+                f"{excerpt}"
+            )
+        except Exception as e:
+            logger.warning("获取章节边界承接失败: %s", e)
+
         return ""
 
     def _excerpt_immediate_previous_chapter(self, content: str) -> str:

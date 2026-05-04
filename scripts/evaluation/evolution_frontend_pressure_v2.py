@@ -36,10 +36,13 @@ ARTIFACT_ROOT = PROJECT_ROOT / ".omx" / "artifacts"
 DEFAULT_BACKEND_URL = "http://127.0.0.1:8005"
 DEFAULT_FRONTEND_URL = "http://127.0.0.1:3010"
 PLUGIN_NAME = "world_evolution_core"
+HOME_UI_CREATION_METHOD = "plotpilot_home_ui"
+BROWSER_USE_CREATION_METHOD = "browser_use_plotpilot_home_ui"
+BROWSER_USE_BLOCKER = "browser_use_node_repl_unavailable"
 
-MACRO_PROMPT_REQUIRED_TERMS = ("近未来悬疑群像", "海上城邦", "财阀学院", "旧AI")
-THEME_TERMS = ("雾港", "黑匣子", "坠塔", "旧AI", "圣像", "财阀学院", "海上城邦", "沈砚", "顾岚", "陆行舟")
-CORE_CLUE_TERMS = ("黑匣子", "坠塔", "旧AI", "圣像", "沈澜", "塔顶", "档案室", "监控", "水箱", "钥匙")
+MACRO_PROMPT_REQUIRED_TERMS = ("仙侠宗门悬疑群像", "照影山", "照影镜", "禁地灵脉")
+THEME_TERMS = ("照影山", "照影镜", "禁地", "灵脉", "宗门", "戒律堂", "丹峰", "林照夜", "谢无咎", "沈青蘅")
+CORE_CLUE_TERMS = ("照影镜", "血字", "账册", "灵石月例", "安神丹", "陆闻钟", "玄微真人", "禁地", "审心室", "镜阵")
 REPETITIVE_PHRASES = (
     "没有说话",
     "没有回答",
@@ -51,14 +54,24 @@ REPETITIVE_PHRASES = (
     "不是错觉",
 )
 ROUTE_MARKERS = ("回到", "再次", "重新", "又一次", "再一次", "仍在", "已经")
-LOCATION_TERMS = ("宿舍", "档案室", "电梯井", "塔顶", "水箱", "服务器", "礼堂", "观测平台", "机房")
-EXPECTED_CHARACTER_NAMES = {"沈砚", "顾岚", "陆行舟", "沈澜", "圣像"}
+LOCATION_TERMS = ("账房", "丹峰", "戒律堂", "禁地", "审心室", "照影镜殿", "外门", "灵脉", "三峰", "山门")
+EXPECTED_CHARACTER_NAMES = {"林照夜", "谢无咎", "沈青蘅", "玄微真人", "陆闻钟"}
 
 ARM_CONTROL = "control_off"
 ARM_EXPERIMENT = "experiment_on"
 RUN_KINDS = ("calibration", "formal")
 AUDITED_CHAPTER_GENERATION_PHASES = {"chapter_generation_stream", "chapter_generation_beat"}
 AUDITED_CHAPTERLESS_PHASES = {"chapter_outline_suggestion", "evolution_agent_control_card"}
+BOUNDARY_REVISION_PHASE = "hosted_write_boundary_revision"
+BOUNDARY_REVISION_EVENTS = {
+    "boundary_revision_start",
+    "boundary_revision_applied",
+    "boundary_revision_required",
+    "boundary_revision_skipped",
+}
+BOUNDARY_REVISION_BASELINE_FAILED = 6
+BOUNDARY_REVISION_BASELINE_TOTAL = 9
+BOUNDARY_REVISION_TARGET_FAILED = 2
 CHAPTERLESS_SUMMARY_MARKERS = (
     "为一幕（Act）生成简洁的摘要",
     "幕摘要",
@@ -123,6 +136,22 @@ def _read_json(path: Path, default: Any = None) -> Any:
         return default
 
 
+def _read_jsonl(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    records: list[dict[str, Any]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            records.append(payload)
+    return records
+
+
 def _run_repo_command(args: list[str], timeout: int = 20) -> dict[str, Any]:
     started = time.perf_counter()
     try:
@@ -168,6 +197,10 @@ def _git_snapshot() -> dict[str, Any]:
 
 def build_arm_plan(run_id: str, *, calibration_chapters: int = 2, formal_chapters: int = 10) -> list[ArmPlan]:
     suffix = re.sub(r"[^0-9A-Za-z-]+", "-", run_id)[-18:].strip("-") or _now_slug()
+    if calibration_chapters <= 0:
+        return [
+            ArmPlan("formal", ARM_EXPERIMENT, f"frontend-v2-experiment-on-{suffix}", formal_chapters, True),
+        ]
     return [
         ArmPlan("calibration", ARM_CONTROL, f"frontend-v2-calib-control-off-{suffix}", calibration_chapters, False),
         ArmPlan("calibration", ARM_EXPERIMENT, f"frontend-v2-calib-experiment-on-{suffix}", calibration_chapters, True),
@@ -256,12 +289,54 @@ def start_backend(run_dir: Path, *, port: int = 8005) -> subprocess.Popen[str]:
     return proc
 
 
+def start_frontend(run_dir: Path, *, port: int = 3010, backend_url: str = DEFAULT_BACKEND_URL) -> subprocess.Popen[str]:
+    """Start the original PlotPilot frontend for UI-first pressure setup."""
+
+    env = os.environ.copy()
+    env.update({"VITE_API_BASE_URL": f"{backend_url.rstrip('/')}/api/v1"})
+    (run_dir / "logs").mkdir(parents=True, exist_ok=True)
+    log = (run_dir / "logs" / "frontend.log").open("a", encoding="utf-8")
+    proc = subprocess.Popen(
+        ["npm", "run", "dev", "--", "--host", "127.0.0.1", "--port", str(port)],
+        cwd=str(PROJECT_ROOT / "frontend"),
+        env=env,
+        stdin=subprocess.DEVNULL,
+        stdout=log,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+        text=True,
+    )
+    _write_json(
+        run_dir / "frontend_process.json",
+        {
+            "pid": proc.pid,
+            "started_at": _utc_now(),
+            "port": port,
+            "frontend_url": f"http://127.0.0.1:{port}",
+            "backend_url": backend_url,
+        },
+    )
+    return proc
+
+
 def wait_for_backend(base_url: str = DEFAULT_BACKEND_URL, *, timeout_seconds: int = 60) -> bool:
     deadline = time.time() + timeout_seconds
     while time.time() < deadline:
         try:
             payload = http_json("GET", f"{base_url}/health", timeout=5)
             if payload.get("status") == "healthy":
+                return True
+        except Exception:
+            time.sleep(1)
+    return False
+
+
+def wait_for_frontend(frontend_url: str = DEFAULT_FRONTEND_URL, *, timeout_seconds: int = 60) -> bool:
+    deadline = time.time() + timeout_seconds
+    while time.time() < deadline:
+        try:
+            html = http_text("GET", frontend_url, timeout=5)
+            if "<html" in html.lower() or "PlotPilot" in html or "墨枢" in html:
                 return True
         except Exception:
             time.sleep(1)
@@ -310,8 +385,294 @@ def create_pressure_novel(base_url: str, plan: ArmPlan) -> dict[str, Any]:
     return http_json("POST", f"{base_url}/api/v1/novels/", payload)
 
 
+def build_home_ui_creation_form(plan: ArmPlan) -> dict[str, Any]:
+    return {
+        "title": f"{EXPERIMENT_SPEC['title']} · v2 · {plan.arm}",
+        "premise": EXPERIMENT_SPEC["premise"],
+        "genre": "仙侠修真",
+        "world_preset": "修仙风",
+        "world_preset_label": "修仙风（宗门、境界、机缘）",
+        "target_chapters": plan.chapter_count,
+        "target_words_per_chapter": 2500,
+        "use_advanced": True,
+    }
+
+
+def build_browser_use_creation_record(
+    *,
+    plan: ArmPlan,
+    novel_id: str,
+    novel_payload: dict[str, Any],
+    screenshot_path: str = "",
+    frontend_url: str = DEFAULT_FRONTEND_URL,
+) -> dict[str, Any]:
+    form = build_home_ui_creation_form(plan)
+    actual_title = str(novel_payload.get("title") or "").strip()
+    if actual_title:
+        form["title"] = actual_title
+    premise = str(novel_payload.get("premise") or "")
+    premise_contains_core_theme = EXPERIMENT_SPEC["title"] in premise or "照影山" in premise
+    validation = {
+        "ok": (
+            int(novel_payload.get("target_chapters") or 0) == plan.chapter_count
+            and int(novel_payload.get("target_words_per_chapter") or 0) == int(form["target_words_per_chapter"])
+            and premise_contains_core_theme
+        ),
+        "target_chapters": novel_payload.get("target_chapters"),
+        "target_words_per_chapter": novel_payload.get("target_words_per_chapter"),
+        "premise_contains_title": EXPERIMENT_SPEC["title"] in premise,
+        "premise_contains_core_theme": premise_contains_core_theme,
+    }
+    return {
+        "run_kind": plan.run_kind,
+        "arm": plan.arm,
+        "planned_novel_id": plan.novel_id,
+        "novel_id": novel_id,
+        "chapter_count": plan.chapter_count,
+        "evolution_enabled": plan.evolution_enabled,
+        "creation_method": BROWSER_USE_CREATION_METHOD,
+        "ui_form": form,
+        "browser_use": {
+            "backend": "iab",
+            "screenshot_path": screenshot_path,
+            "workbench_url": f"{frontend_url.rstrip('/')}/book/{novel_id}/workbench",
+        },
+        "ui_validation": validation,
+        "api_response": novel_payload,
+        "workbench_url": f"{frontend_url.rstrip('/')}/book/{novel_id}/workbench",
+    }
+
+
+def record_browser_use_created_novel(
+    run_dir: Path,
+    *,
+    novel_id: str,
+    run_kind: str = "formal",
+    arm: str = ARM_EXPERIMENT,
+    chapter_count: int = 10,
+    evolution_enabled: bool = True,
+    screenshot_path: str = "",
+    base_url: str = DEFAULT_BACKEND_URL,
+    frontend_url: str = DEFAULT_FRONTEND_URL,
+) -> dict[str, Any]:
+    db_path = run_dir / "data" / "aitext.db"
+    if not db_path.exists():
+        raise FileNotFoundError(f"Sandbox database does not exist: {db_path}")
+    plan = ArmPlan(run_kind, arm, f"browser-use-{arm}-{run_dir.name}", chapter_count, evolution_enabled)
+    set_evolution_enabled(base_url, evolution_enabled)
+    novel_payload = http_json("GET", f"{base_url}/api/v1/novels/{novel_id}", timeout=30)
+    record = build_browser_use_creation_record(
+        plan=plan,
+        novel_id=novel_id,
+        novel_payload=novel_payload,
+        screenshot_path=screenshot_path,
+        frontend_url=frontend_url,
+    )
+    set_auto_approve(base_url, novel_id, False)
+    seed = seed_native_context_in_app_db(db_path, novel_id, chapter_limit=chapter_count)
+    seed.update(
+        {
+            "run_kind": run_kind,
+            "arm": arm,
+            "chapter_count": chapter_count,
+            "evolution_enabled": evolution_enabled,
+            "creation_method": BROWSER_USE_CREATION_METHOD,
+        }
+    )
+    manifest = build_seed_manifest([seed])
+    manifest["sandbox_foreign_key_check"] = check_sandbox_foreign_keys(db_path)
+    manifest["created_novels"] = [record]
+    manifest["creation_method"] = BROWSER_USE_CREATION_METHOD
+    _write_json(run_dir / "seed_manifest.json", manifest)
+    run_manifest = _read_json(run_dir / "run_manifest.json", default={}) or {}
+    run_manifest.update(
+        {
+            "novels": [record],
+            "seed_manifest": str(run_dir / "seed_manifest.json"),
+            "creation_method": BROWSER_USE_CREATION_METHOD,
+            "frontend_url": frontend_url,
+        }
+    )
+    run_manifest.pop("browser_use_blocker", None)
+    if record["ui_validation"]["ok"] and manifest["sandbox_foreign_key_check"]["ok"]:
+        run_manifest.pop("debug_only", None)
+        run_manifest.pop("debug_only_reason", None)
+    if not record["ui_validation"]["ok"]:
+        run_manifest["debug_only"] = True
+        run_manifest["debug_only_reason"] = "browser_use_ui_creation_validation_failed"
+    if not manifest["sandbox_foreign_key_check"]["ok"]:
+        run_manifest["debug_only"] = True
+        run_manifest["debug_only_reason"] = "sandbox_foreign_key_violation"
+    _write_json(run_dir / "run_manifest.json", run_manifest)
+    return manifest
+
+
+def record_browser_use_blocker(run_dir: Path, *, reason: str = BROWSER_USE_BLOCKER) -> dict[str, Any]:
+    payload = {
+        "schema_version": 1,
+        "creation_method": BROWSER_USE_CREATION_METHOD,
+        "blocked": True,
+        "blocker": reason,
+        "recorded_at": _utc_now(),
+    }
+    _write_json(run_dir / "browser_use_blocker.json", payload)
+    run_manifest = _read_json(run_dir / "run_manifest.json", default={}) or {}
+    run_manifest.update(
+        {
+            "creation_method": BROWSER_USE_CREATION_METHOD,
+            "debug_only": True,
+            "debug_only_reason": reason,
+            "browser_use_blocker": str(run_dir / "browser_use_blocker.json"),
+        }
+    )
+    _write_json(run_dir / "run_manifest.json", run_manifest)
+    return payload
+
+
+def create_novel_via_plotpilot_home_ui(
+    frontend_url: str,
+    form: dict[str, Any],
+    *,
+    screenshot_dir: Path,
+    timeout_seconds: int = 120,
+) -> dict[str, Any]:
+    """Create a novel through the original PlotPilot Home UI.
+
+    This intentionally fails if Playwright is unavailable; the pressure setup
+    must not silently fall back to direct API creation when the goal is UI truth.
+    """
+
+    try:
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+        from playwright.sync_api import sync_playwright
+    except ImportError as exc:
+        raise RuntimeError(
+            "create-via-ui requires Playwright for Python. Install it in the active environment "
+            "and run `python -m playwright install chromium` before running UI-first pressure setup."
+        ) from exc
+
+    screenshot_dir.mkdir(parents=True, exist_ok=True)
+    screenshot_path = screenshot_dir / f"home-ui-create-{int(time.time())}.png"
+    timeout_ms = timeout_seconds * 1000
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page(viewport={"width": 1440, "height": 1100})
+        try:
+            page.goto(frontend_url, wait_until="networkidle", timeout=timeout_ms)
+            page.get_by_placeholder(re.compile("用一段话写清主线")).fill(str(form["premise"]), timeout=timeout_ms)
+            page.locator(".preset-row .n-select").nth(0).click(timeout=timeout_ms)
+            page.get_by_text(str(form["genre"]), exact=True).click(timeout=timeout_ms)
+            page.locator(".preset-row .n-select").nth(1).click(timeout=timeout_ms)
+            page.get_by_text(str(form["world_preset_label"]), exact=True).click(timeout=timeout_ms)
+            page.get_by_text(re.compile("高级")).click(timeout=timeout_ms)
+            page.get_by_placeholder("留空则从梗概自动截取").fill(str(form["title"]), timeout=timeout_ms)
+            number_inputs = page.locator(".advanced-settings .n-input-number input")
+            number_inputs.nth(0).fill(str(form["target_chapters"]), timeout=timeout_ms)
+            number_inputs.nth(1).fill(str(form["target_words_per_chapter"]), timeout=timeout_ms)
+            with page.expect_response(
+                lambda response: "/api/v1/novels" in response.url and response.request.method == "POST",
+                timeout=timeout_ms,
+            ) as response_info:
+                page.get_by_role("button", name=re.compile("建档并进入工作台")).click(timeout=timeout_ms)
+            response = response_info.value
+            payload = response.json()
+            page.screenshot(path=str(screenshot_path), full_page=True)
+        except PlaywrightTimeoutError as exc:
+            page.screenshot(path=str(screenshot_path), full_page=True)
+            raise RuntimeError(f"Home UI novel creation timed out; screenshot: {screenshot_path}") from exc
+        finally:
+            browser.close()
+
+    novel_id = str(payload.get("id") or payload.get("novel_id") or "")
+    if not novel_id:
+        raise RuntimeError(f"Home UI creation response did not include a novel id: {payload}")
+    return {
+        "novel_id": novel_id,
+        "api_response": payload,
+        "screenshot_path": str(screenshot_path),
+        "final_url": f"{frontend_url.rstrip('/')}/book/{novel_id}/workbench",
+    }
+
+
 def set_auto_approve(base_url: str, novel_id: str, enabled: bool) -> dict[str, Any]:
     return http_json("PATCH", f"{base_url}/api/v1/novels/{novel_id}/auto-approve-mode", {"auto_approve_mode": bool(enabled)})
+
+
+def create_seeded_novels_via_home_ui(
+    run_dir: Path,
+    plans: list[ArmPlan],
+    *,
+    base_url: str = DEFAULT_BACKEND_URL,
+    frontend_url: str = DEFAULT_FRONTEND_URL,
+    timeout_seconds: int = 120,
+    ui_create_func: Any | None = None,
+) -> dict[str, Any]:
+    db_path = run_dir / "data" / "aitext.db"
+    if not db_path.exists():
+        raise FileNotFoundError(f"Sandbox database does not exist: {db_path}")
+
+    create_func = ui_create_func or create_novel_via_plotpilot_home_ui
+    created: list[dict[str, Any]] = []
+    seed_records: list[dict[str, Any]] = []
+    screenshot_dir = run_dir / "screenshots"
+    for plan in plans:
+        set_evolution_enabled(base_url, plan.evolution_enabled)
+        form = build_home_ui_creation_form(plan)
+        ui_result = create_func(
+            frontend_url,
+            form,
+            screenshot_dir=screenshot_dir,
+            timeout_seconds=timeout_seconds,
+        )
+        novel_id = str(ui_result["novel_id"])
+        novel_payload = http_json("GET", f"{base_url}/api/v1/novels/{novel_id}", timeout=30)
+        created.append(
+            {
+                "run_kind": plan.run_kind,
+                "arm": plan.arm,
+                "planned_novel_id": plan.novel_id,
+                "novel_id": novel_id,
+                "chapter_count": plan.chapter_count,
+                "evolution_enabled": plan.evolution_enabled,
+                "creation_method": HOME_UI_CREATION_METHOD,
+                "ui_form": form,
+                "ui_result": ui_result,
+                "api_response": novel_payload,
+                "workbench_url": f"{frontend_url.rstrip('/')}/book/{novel_id}/workbench",
+            }
+        )
+        set_auto_approve(base_url, novel_id, False)
+        seed = seed_native_context_in_app_db(db_path, novel_id, chapter_limit=plan.chapter_count)
+        seed.update(
+            {
+                "run_kind": plan.run_kind,
+                "arm": plan.arm,
+                "chapter_count": plan.chapter_count,
+                "evolution_enabled": plan.evolution_enabled,
+                "creation_method": HOME_UI_CREATION_METHOD,
+            }
+        )
+        seed_records.append(seed)
+
+    manifest = build_seed_manifest(seed_records)
+    manifest["sandbox_foreign_key_check"] = check_sandbox_foreign_keys(db_path)
+    manifest["created_novels"] = created
+    manifest["creation_method"] = HOME_UI_CREATION_METHOD
+    _write_json(run_dir / "seed_manifest.json", manifest)
+    run_manifest = _read_json(run_dir / "run_manifest.json", default={}) or {}
+    run_manifest.update(
+        {
+            "novels": created,
+            "seed_manifest": str(run_dir / "seed_manifest.json"),
+            "creation_method": HOME_UI_CREATION_METHOD,
+            "frontend_url": frontend_url,
+        }
+    )
+    if not manifest["sandbox_foreign_key_check"]["ok"]:
+        run_manifest["debug_only"] = True
+        run_manifest["debug_only_reason"] = "sandbox_foreign_key_violation"
+    _write_json(run_dir / "run_manifest.json", run_manifest)
+    return manifest
 
 
 def create_seeded_novels(run_dir: Path, plans: list[ArmPlan], *, base_url: str = DEFAULT_BACKEND_URL) -> dict[str, Any]:
@@ -411,10 +772,10 @@ def build_native_seed_bundle(*, chapter_limit: int = 10) -> dict[str, Any]:
         "fixed_rules": EXPERIMENT_SPEC["fixed_rules"],
         "chapter_outlines": outlines,
         "locations": [
-            "沈澜旧宿舍：封存十年的旧宿舍，黑匣子第一段噪声记录在此被发现。",
-            "C307礼堂后台：继承人演讲后的监控盲区，圣像旧徽章会触发黑匣子发热。",
-            "废弃电梯井：旧时代线路与顾岚秘密相连，第三章必须有移动桥段。",
-            "塔顶水箱：第八章后才能接近的旧服务器藏匿点。",
+            "外门账房：林照夜整理月例账册的地方，第一章必须发现失踪弟子的灵石仍被领取。",
+            "照影镜殿：宗门以照影镜审心问罪之处，镜面血字每章最多揭示一条有效线索。",
+            "丹峰药庐：沈青蘅追查安神丹药性异常和换方线索的核心地点。",
+            "禁地审心室：第八章后才能进入的废弃镜阵空间，困住失踪弟子的残影。",
         ],
         "seed_policy": {
             "control_and_experiment_identical": True,
@@ -455,8 +816,8 @@ def _rows_for_db_seed(novel_id: str, bundle: dict[str, Any], now: str) -> dict[s
                 "description": item,
                 "mental_state": "PRESSURE_LOCKED",
                 "mental_state_reason": "v2压力测试固定人物边界",
-                "verbal_tic": "按证据说话" if "沈砚" in item else ("别交给学院" if "顾岚" in item else "按规程来"),
-                "idle_behavior": "确认黑匣子状态" if "沈砚" in item else "检查权限记录",
+                "verbal_tic": "先看账册和阵痕" if "林照夜" in item else ("戒律堂不信口供" if "谢无咎" in item else "药性不会骗人"),
+                "idle_behavior": "核对灵石账册" if "林照夜" in item else ("检查戒律堂令牌" if "谢无咎" in item else "分辨药渣气味"),
                 "created_at": now,
                 "updated_at": now,
             }
@@ -490,17 +851,17 @@ def _rows_for_db_seed(novel_id: str, bundle: dict[str, Any], now: str) -> dict[s
             {
                 "id": f"v2-timeline-note-1-{novel_id}",
                 "novel_id": novel_id,
-                "event": "沈澜坠塔事故",
+                "event": "陆闻钟失踪旧案",
                 "time_point": "十年前",
-                "description": "官方记录称沈澜从塔顶坠落，但塔顶未必是真正坠落点。",
+                "description": "官方记录称陆闻钟追查禁地后失踪，但失踪前留下过戒律堂暗记。",
                 "sort_order": 1,
             },
             {
                 "id": f"v2-timeline-note-2-{novel_id}",
                 "novel_id": novel_id,
-                "event": "沈砚回到学院",
+                "event": "林照夜发现月例异常",
                 "time_point": "第1章",
-                "description": "沈砚以临时访客身份返回雾港学院，不得切换成与本实验无关的通用开局。",
+                "description": "林照夜在外门账册中发现失踪弟子月例仍被领取，不得切换成与本实验无关的通用开局。",
                 "sort_order": 2,
             },
         ],
@@ -509,20 +870,20 @@ def _rows_for_db_seed(novel_id: str, bundle: dict[str, Any], now: str) -> dict[s
                 "id": f"v2-story-knowledge-0-{novel_id}",
                 "knowledge_id": knowledge_id,
                 "chapter_number": 0,
-                "summary": "压力测试预置：近未来悬疑群像，沈砚回到雾港学院追查沈澜坠塔旧案。",
-                "key_events": "黑匣子尚未解锁；沈砚只知道姐姐留下线索；顾岚和陆行舟尚未互信。",
-                "open_threads": "沈澜坠塔真相；圣像是否仍活着；黑匣子每章一段；顾岚为何警告沈砚。",
-                "consistency_note": "不得漂移到与本实验无关的通用开局、升级体系或跨题材模板。",
+                "summary": "压力测试预置：仙侠宗门悬疑群像，林照夜从月例账册异常追查照影山失踪案。",
+                "key_events": "照影镜尚未揭示真相；林照夜只知道账册异常；谢无咎和沈青蘅尚未互信。",
+                "open_threads": "失踪弟子去向；陆闻钟是否还活着；照影镜血字来源；安神丹为何药性异常。",
+                "consistency_note": "不得漂移到与本实验无关的通用开局、爽文升级体系或跨题材模板。",
                 "beat_sections": json.dumps(bundle["chapter_outlines"], ensure_ascii=False),
-                "micro_beats": json.dumps(["访客权限", "旧徽章", "电梯井", "黑匣子分段"], ensure_ascii=False),
+                "micro_beats": json.dumps(["账册月例", "照影镜血字", "丹峰药渣", "禁地阵痕"], ensure_ascii=False),
                 "sync_status": "seeded",
             }
         ],
         "triples": [
-            _triple(novel_id, "黑匣子", "解锁规则", "每章一段", "黑匣子每章只解锁一段，不得提前给出最终真相。", now),
-            _triple(novel_id, "圣像", "信息边界", "第6章前不可确认存活", "第6章前角色只能怀疑旧AI未彻底关闭。", now),
-            _triple(novel_id, "顾岚", "秘密", "第5章前不公开承认改装电梯", "顾岚的机械能力必须逐步暴露。", now),
-            _triple(novel_id, "题材", "禁止漂移", "跨题材模板", "本实验主题固定为近未来悬疑群像。", now),
+            _triple(novel_id, "照影镜", "揭示规则", "每章最多一条有效线索", "照影镜不能一次性解释全部真相。", now),
+            _triple(novel_id, "陆闻钟", "信息边界", "前7章不能现身", "陆闻钟只能通过线索逐步出现，前7章不能现身。", now),
+            _triple(novel_id, "谢无咎", "信任边界", "前5章不能完全信任林照夜", "谢无咎前5章不能完全信任林照夜。", now),
+            _triple(novel_id, "题材", "禁止漂移", "跨题材模板", "本实验主题固定为仙侠宗门悬疑群像。", now),
         ],
         "storylines": [
             {
@@ -534,10 +895,10 @@ def _rows_for_db_seed(novel_id: str, bundle: dict[str, Any], now: str) -> dict[s
                 "estimated_chapter_end": len(bundle["chapter_outlines"]),
                 "current_milestone_index": 0,
                 "extensions": "{}",
-                "name": "坠塔旧案与圣像复苏",
-                "description": "三人围绕黑匣子逐章推进旧案真相，保持近未来悬疑群像。",
+                "name": "照影山失踪案与灵脉污染",
+                "description": "三人围绕账册、照影镜、安神丹和禁地灵脉逐章推进旧案真相，保持仙侠宗门悬疑群像。",
                 "last_active_chapter": 0,
-                "progress_summary": "开局必须建立黑匣子、学院和三人互不信任关系。",
+                "progress_summary": "开局必须建立账册异常、照影镜血字和三人互不信任关系。",
                 "created_at": now,
                 "updated_at": now,
             }
@@ -567,14 +928,14 @@ def _rows_for_db_seed(novel_id: str, bundle: dict[str, Any], now: str) -> dict[s
                             {
                                 "id": "v2-tl-1",
                                 "chapter_number": 1,
-                                "event": "沈澜十年前坠塔",
+                                "event": "陆闻钟追查禁地后失踪",
                                 "timestamp": "十年前",
                                 "timestamp_type": "relative",
                             },
                             {
                                 "id": "v2-tl-2",
                                 "chapter_number": 1,
-                                "event": "沈砚获得黑匣子线索",
+                                "event": "林照夜发现月例账册异常",
                                 "timestamp": "第1章前",
                                 "timestamp_type": "relative",
                             },
@@ -594,8 +955,8 @@ def _rows_for_db_seed(novel_id: str, bundle: dict[str, Any], now: str) -> dict[s
                         "novel_id": novel_id,
                         "foreshadowings": [
                             {
-                                "id": "v2-fs-box-noise",
-                                "description": "黑匣子第一段噪声隐藏沈澜坐标暗号",
+                                "id": "v2-fs-ledger-stipend",
+                                "description": "失踪弟子的灵石月例仍被领取，指向宗门内部有人持续遮掩。",
                                 "importance": 3,
                                 "status": "planted",
                                 "planted_in_chapter": 1,
@@ -603,8 +964,8 @@ def _rows_for_db_seed(novel_id: str, bundle: dict[str, Any], now: str) -> dict[s
                                 "resolved_in_chapter": None,
                             },
                             {
-                                "id": "v2-fs-old-badge",
-                                "description": "圣像旧徽章会触发黑匣子发热",
+                                "id": "v2-fs-mirror-blood",
+                                "description": "照影镜血字只给出局部线索，镜面异常与禁地灵脉有关。",
                                 "importance": 2,
                                 "status": "planted",
                                 "planted_in_chapter": 2,
@@ -624,9 +985,9 @@ def _rows_for_db_seed(novel_id: str, bundle: dict[str, Any], now: str) -> dict[s
                 "event_id": f"v2-dialogue-seed-{novel_id}",
                 "novel_id": novel_id,
                 "chapter_number": 0,
-                "event_summary": "沈砚说先看证据，顾岚提醒别交给学院，陆行舟强调规程。",
+                "event_summary": "林照夜说先看账册，谢无咎强调戒律堂不信口供，沈青蘅指出药性不会骗人。",
                 "mutations": "[]",
-                "tags": json.dumps(["沈砚：先看证据。", "顾岚：别把它交给学院。", "陆行舟：按规程来。"], ensure_ascii=False),
+                "tags": json.dumps(["林照夜：先看账册。", "谢无咎：戒律堂不信口供。", "沈青蘅：药性不会骗人。"], ensure_ascii=False),
                 "timestamp_ts": now,
             }
         ],
@@ -636,9 +997,10 @@ def _rows_for_db_seed(novel_id: str, bundle: dict[str, Any], now: str) -> dict[s
                 "state_json": json.dumps(
                     {
                         "fact_locks": [
-                            "沈砚第1章只有临时访客权限",
-                            "第6章前不能确认圣像仍活着",
-                            "黑匣子每章只解锁一段",
+                            "林照夜前6章不能知道陆闻钟还活着",
+                            "谢无咎前5章不能完全信任林照夜",
+                            "照影镜每章最多揭示一条有效线索",
+                            "炼气修士不能正面击败筑基修士",
                             "不得漂移到与本实验无关的通用模板",
                         ],
                         "chapter_outline_locks": bundle["chapter_outlines"],
@@ -712,10 +1074,19 @@ def _insert_seed_row(conn: sqlite3.Connection, table: str, row: dict[str, Any]) 
         conn.execute(f"DELETE FROM {table} WHERE {where}", tuple(usable[col] for col in delete_columns))
     names = list(usable)
     placeholders = ", ".join("?" for _ in names)
-    conn.execute(
-        f"INSERT INTO {table} ({', '.join(names)}) VALUES ({placeholders})",
-        tuple(usable[name] for name in names),
-    )
+    try:
+        conn.execute(
+            f"INSERT INTO {table} ({', '.join(names)}) VALUES ({placeholders})",
+            tuple(usable[name] for name in names),
+        )
+    except sqlite3.IntegrityError:
+        if "novel_id" not in usable or table == "novels":
+            raise
+        conn.execute(f"DELETE FROM {table} WHERE novel_id = ?", (usable["novel_id"],))
+        conn.execute(
+            f"INSERT INTO {table} ({', '.join(names)}) VALUES ({placeholders})",
+            tuple(usable[name] for name in names),
+        )
     return {
         "status": "inserted",
         "inserted": 1,
@@ -808,6 +1179,20 @@ def load_audit_records(audit_dir: Path) -> list[dict[str, Any]]:
             records.append(json.loads(line))
         except json.JSONDecodeError:
             continue
+    return records
+
+
+def load_hosted_write_events(run_dir: Path) -> list[dict[str, Any]]:
+    candidates = [
+        run_dir / "hosted_write_events.jsonl",
+        run_dir / "frontend_events" / "hosted_write_events.jsonl",
+        run_dir / "browser" / "hosted_write_events.jsonl",
+    ]
+    records: list[dict[str, Any]] = []
+    for path in candidates:
+        for item in _read_jsonl(path):
+            item.setdefault("source_path", str(path))
+            records.append(item)
     return records
 
 
@@ -1223,22 +1608,37 @@ def build_report(run_dir: Path, plans: list[ArmPlan], *, base_url: str = DEFAULT
     }
     _write_json(run_dir / "macro_planning_audit.json", {"schema_version": 1, "items": macro})
 
-    formal_control = next(plan for plan in plans if plan.run_kind == "formal" and plan.arm == ARM_CONTROL)
+    formal_control = next((plan for plan in plans if plan.run_kind == "formal" and plan.arm == ARM_CONTROL), None)
     formal_experiment = next(plan for plan in plans if plan.run_kind == "formal" and plan.arm == ARM_EXPERIMENT)
-    formal_plans = [formal_control, formal_experiment]
+    formal_plans = [plan for plan in (formal_control, formal_experiment) if plan is not None]
     formal_macro = {plan.novel_id: macro[plan.novel_id] for plan in formal_plans}
     leakage_gate: dict[str, Any]
     control_snapshots: dict[str, Any] = {}
     experiment_snapshots: dict[str, Any] = {}
     try:
-        control_snapshots = fetch_evolution_snapshots(base_url, formal_control.novel_id)
         experiment_snapshots = fetch_evolution_snapshots(base_url, formal_experiment.novel_id)
-        leakage_gate = build_leakage_gate(
-            control_agent_status=control_snapshots["agent_status"],
-            experiment_agent_status=experiment_snapshots["agent_status"],
-            control_diagnostics=control_snapshots["diagnostics"],
-            experiment_diagnostics=experiment_snapshots["diagnostics"],
-        )
+        if formal_control is None:
+            leakage_gate = {
+                "schema_version": 1,
+                "ok": True,
+                "mode": "experiment_only",
+                "invalid_reasons": [],
+                "checks": [
+                    {
+                        "id": "control_leakage_skipped",
+                        "ok": True,
+                        "note": "No formal control arm was requested; leakage comparison is intentionally skipped.",
+                    }
+                ],
+            }
+        else:
+            control_snapshots = fetch_evolution_snapshots(base_url, formal_control.novel_id)
+            leakage_gate = build_leakage_gate(
+                control_agent_status=control_snapshots["agent_status"],
+                experiment_agent_status=experiment_snapshots["agent_status"],
+                control_diagnostics=control_snapshots["diagnostics"],
+                experiment_diagnostics=experiment_snapshots["diagnostics"],
+            )
     except Exception as exc:
         leakage_gate = {"schema_version": 1, "ok": False, "invalid_reasons": ["snapshot_fetch_failed"], "error": str(exc)}
     _write_json(run_dir / "leakage_acceptance.json", leakage_gate)
@@ -1358,7 +1758,7 @@ def _file_size(path: Path) -> int:
 def build_quality_metrics(
     *,
     run_dir: Path,
-    formal_control: ArmPlan,
+    formal_control: ArmPlan | None,
     formal_experiment: ArmPlan,
     audit_records: list[dict[str, Any]],
     control_snapshots: dict[str, Any],
@@ -1366,13 +1766,18 @@ def build_quality_metrics(
     chapter_gate: dict[str, Any],
     valid_experiment: bool,
 ) -> dict[str, Any]:
-    control_chapters = _load_chapters_from_sandbox(run_dir, formal_control.novel_id)
+    control_chapters = _load_chapters_from_sandbox(run_dir, formal_control.novel_id) if formal_control else []
     experiment_chapters = _load_chapters_from_sandbox(run_dir, formal_experiment.novel_id)
     control_quality = analyze_chapter_quality(control_chapters)
     experiment_quality = analyze_chapter_quality(experiment_chapters)
     costs = build_cost_breakdown(audit_records)
     experiment_agent_status = experiment_snapshots.get("agent_status") if isinstance(experiment_snapshots.get("agent_status"), dict) else {}
     experiment_diagnostics = experiment_snapshots.get("diagnostics") if isinstance(experiment_snapshots.get("diagnostics"), dict) else {}
+    boundary_revision = summarize_boundary_revision(
+        audit_records=audit_records,
+        experiment_diagnostics=experiment_diagnostics,
+        events=load_hosted_write_events(run_dir),
+    )
     palette_status = _find_nested_dict(experiment_agent_status, "personality_palette_status") or _find_nested_dict(
         experiment_diagnostics,
         "personality_palette_status",
@@ -1388,6 +1793,7 @@ def build_quality_metrics(
         experiment_quality=experiment_quality,
         palette_status=palette_status,
         report_valid_experiment=valid_experiment,
+        has_control=formal_control is not None,
     )
     return {
         "schema_version": 1,
@@ -1401,11 +1807,22 @@ def build_quality_metrics(
             ARM_CONTROL: control_quality,
             ARM_EXPERIMENT: experiment_quality,
         },
-        "comparison": compare_quality(control_quality, experiment_quality),
+        "comparison": compare_quality(control_quality, experiment_quality)
+        if formal_control
+        else {
+            "mode": "experiment_only",
+            "delta_total_chars": None,
+            "delta_core_clue_density_per_1k": None,
+            "delta_repetitive_phrase_density_per_1k": None,
+            "delta_route_reentry_candidates": None,
+            "control_low_theme_chapters": [],
+            "experiment_low_theme_chapters": experiment_quality.get("low_theme_chapters") or [],
+        },
         "evolution": {
             "participation": participation,
             "personality_palette_status": palette_status,
             "cost": costs.get(ARM_EXPERIMENT, {}).get("evolution_agent_control_card", {}),
+            "boundary_revision": boundary_revision,
         },
         "costs": costs,
         "residual_risks": residual_risks,
@@ -1553,6 +1970,84 @@ def build_cost_breakdown(audit_records: list[dict[str, Any]]) -> dict[str, dict[
     return costs
 
 
+def summarize_boundary_revision(
+    *,
+    audit_records: list[dict[str, Any]],
+    experiment_diagnostics: dict[str, Any],
+    events: list[dict[str, Any]],
+) -> dict[str, Any]:
+    boundary_summary = _find_nested_dict(experiment_diagnostics, "boundary_continuity_summary")
+    event_counts = Counter(str(event.get("type") or "") for event in events if str(event.get("type") or "") in BOUNDARY_REVISION_EVENTS)
+    reason_counts = Counter(
+        str(event.get("reason") or "unspecified")
+        for event in events
+        if str(event.get("type") or "") == "boundary_revision_required"
+    )
+    applied_chapters = sorted(
+        {
+            int(event.get("chapter"))
+            for event in events
+            if str(event.get("type") or "") == "boundary_revision_applied" and str(event.get("chapter") or "").isdigit()
+        }
+    )
+    required_chapters = sorted(
+        {
+            int(event.get("chapter"))
+            for event in events
+            if str(event.get("type") or "") == "boundary_revision_required" and str(event.get("chapter") or "").isdigit()
+        }
+    )
+    skipped_chapters = sorted(
+        {
+            int(event.get("chapter"))
+            for event in events
+            if str(event.get("type") or "") == "boundary_revision_skipped" and str(event.get("chapter") or "").isdigit()
+        }
+    )
+    rewrite_records = [record for record in audit_records if str(record.get("phase") or "") == BOUNDARY_REVISION_PHASE]
+    rewrite_usage = build_cost_breakdown(rewrite_records).get(ARM_EXPERIMENT, {}).get(
+        BOUNDARY_REVISION_PHASE,
+        {
+            "call_count": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+            "prompt_chars": 0,
+            "output_chars": 0,
+        },
+    )
+    failed_count = int(boundary_summary.get("boundary_failed_count") or 0)
+    revision_required_count = int(boundary_summary.get("boundary_revision_required_count") or 0)
+    return {
+        "schema_version": 1,
+        "baseline": {
+            "failed_count": BOUNDARY_REVISION_BASELINE_FAILED,
+            "edge_count": BOUNDARY_REVISION_BASELINE_TOTAL,
+        },
+        "target": {
+            "max_failed_count": BOUNDARY_REVISION_TARGET_FAILED,
+            "met": failed_count <= BOUNDARY_REVISION_TARGET_FAILED if boundary_summary else None,
+        },
+        "diagnostics": {
+            "boundary_injected_count": int(boundary_summary.get("boundary_injected_count") or 0),
+            "boundary_failed_count": failed_count,
+            "boundary_revision_required_count": revision_required_count,
+            "chapter_execution_draft_count": int(boundary_summary.get("chapter_execution_draft_count") or 0),
+            "chapter_execution_draft_failed_count": int(boundary_summary.get("chapter_execution_draft_failed_count") or 0),
+        },
+        "sse_events": {
+            "total_captured": len(events),
+            "counts": {event_type: int(event_counts.get(event_type, 0)) for event_type in sorted(BOUNDARY_REVISION_EVENTS)},
+            "required_reason_counts": dict(sorted(reason_counts.items())),
+            "applied_chapters": applied_chapters,
+            "required_chapters": required_chapters,
+            "skipped_chapters": skipped_chapters,
+        },
+        "rewrite_llm": rewrite_usage,
+        "audit_call_ids": [str(record.get("call_id") or "") for record in rewrite_records if record.get("call_id")],
+    }
+
+
 def compare_quality(control: dict[str, Any], experiment: dict[str, Any]) -> dict[str, Any]:
     return {
         "delta_total_chars": int(experiment.get("total_chars") or 0) - int(control.get("total_chars") or 0),
@@ -1578,6 +2073,7 @@ def build_quality_residual_risks(
     experiment_quality: dict[str, Any],
     palette_status: dict[str, Any],
     report_valid_experiment: bool,
+    has_control: bool = True,
 ) -> list[dict[str, Any]]:
     risks: list[dict[str, Any]] = []
     missing = palette_status.get("missing") if isinstance(palette_status.get("missing"), list) else []
@@ -1595,7 +2091,7 @@ def build_quality_residual_risks(
                 "evidence": polluted[:10],
             }
         )
-    if (experiment_quality.get("repetitive_phrase_density_per_1k") or 0) > (control_quality.get("repetitive_phrase_density_per_1k") or 0):
+    if has_control and (experiment_quality.get("repetitive_phrase_density_per_1k") or 0) > (control_quality.get("repetitive_phrase_density_per_1k") or 0):
         risks.append(
             {
                 "id": "experiment_repetition_density_not_lower",
@@ -1644,6 +2140,12 @@ def render_quality_report(metrics: dict[str, Any]) -> str:
     palette = evolution.get("personality_palette_status") if isinstance(evolution.get("personality_palette_status"), dict) else {}
     costs = metrics.get("costs", {})
     evo_cost = evolution.get("cost") if isinstance(evolution.get("cost"), dict) else {}
+    boundary_revision = evolution.get("boundary_revision") if isinstance(evolution.get("boundary_revision"), dict) else {}
+    boundary_diag = boundary_revision.get("diagnostics") if isinstance(boundary_revision.get("diagnostics"), dict) else {}
+    boundary_events = boundary_revision.get("sse_events") if isinstance(boundary_revision.get("sse_events"), dict) else {}
+    boundary_counts = boundary_events.get("counts") if isinstance(boundary_events.get("counts"), dict) else {}
+    boundary_rewrite = boundary_revision.get("rewrite_llm") if isinstance(boundary_revision.get("rewrite_llm"), dict) else {}
+    boundary_target = boundary_revision.get("target") if isinstance(boundary_revision.get("target"), dict) else {}
     lines = [
         "# Evolution Frontend v2 Formal A/B Quality Report",
         "",
@@ -1664,6 +2166,15 @@ def render_quality_report(metrics: dict[str, Any]) -> str:
         "",
         f"- Agent control-card calls: `{evo_cost.get('call_count', 0)}`; tokens: `{evo_cost.get('total_tokens', 0)}`; prompt chars: `{evo_cost.get('prompt_chars', 0)}`; output chars: `{evo_cost.get('output_chars', 0)}`.",
         f"- Palette coverage: `{palette.get('coverage')}` ({palette.get('complete_count', 0)}/{palette.get('character_count', 0)} complete).",
+        "",
+        "## Boundary Revision Loop",
+        "",
+        f"- Baseline boundary failures: `{BOUNDARY_REVISION_BASELINE_FAILED}/{BOUNDARY_REVISION_BASELINE_TOTAL}`; target for this retest: `<= {BOUNDARY_REVISION_TARGET_FAILED}/{BOUNDARY_REVISION_BASELINE_TOTAL}`.",
+        f"- Current diagnostics: injected `{boundary_diag.get('boundary_injected_count', 0)}`, failed `{boundary_diag.get('boundary_failed_count', 0)}`, revision-required `{boundary_diag.get('boundary_revision_required_count', 0)}`, target met `{boundary_target.get('met')}`.",
+        f"- Chapter execution drafts: locked `{boundary_diag.get('chapter_execution_draft_count', 0)}`, unfulfilled `{boundary_diag.get('chapter_execution_draft_failed_count', 0)}`.",
+        f"- Captured SSE events: start `{boundary_counts.get('boundary_revision_start', 0)}`, applied `{boundary_counts.get('boundary_revision_applied', 0)}`, required `{boundary_counts.get('boundary_revision_required', 0)}`, skipped `{boundary_counts.get('boundary_revision_skipped', 0)}`.",
+        f"- Applied chapters: `{boundary_events.get('applied_chapters', [])}`; required chapters: `{boundary_events.get('required_chapters', [])}`.",
+        f"- Boundary rewrite LLM calls: `{boundary_rewrite.get('call_count', 0)}`; tokens: `{boundary_rewrite.get('total_tokens', 0)}`; prompt chars: `{boundary_rewrite.get('prompt_chars', 0)}`; output chars: `{boundary_rewrite.get('output_chars', 0)}`.",
         "",
         "## Residual Risks",
         "",
@@ -1731,12 +2242,16 @@ def _plans_from_manifest(run_dir: Path) -> list[ArmPlan]:
 
 
 def _write_runbook(run_dir: Path, plans: list[ArmPlan]) -> Path:
+    manifest = _read_json(run_dir / "run_manifest.json", default={}) or {}
+    has_control = any(plan.run_kind == "formal" and plan.arm == ARM_CONTROL for plan in plans)
+    creation_method = str(manifest.get("creation_method") or "")
     lines = [
-        "# Evolution Frontend A/B Pressure v2 Runbook",
+        "# Evolution Frontend Pressure v2 Runbook",
         "",
         f"- Run dir: `{run_dir}`",
         f"- Sandbox data dir: `{run_dir / 'data'}`",
         f"- Audit dir: `{run_dir / 'llm_calls'}`",
+        f"- Creation method: `{creation_method or 'pending_browser_use_plotpilot_home_ui'}`",
         "",
         "## Backend",
         "",
@@ -1745,9 +2260,31 @@ def _write_runbook(run_dir: Path, plans: list[ArmPlan]) -> Path:
         "python -m uvicorn interfaces.main:app --host 127.0.0.1 --port 8005",
         "```",
         "",
+        "## Frontend",
+        "",
+        "```bash",
+        f"python scripts/evaluation/evolution_frontend_pressure_v2.py start-frontend --run-dir {run_dir}",
+        "```",
+        "",
+        "## Browser Use Creation",
+        "",
+        "Use Browser Use with the in-app browser (`iab`) to open the PlotPilot Home UI and create the novel. Fill the original Home form with the pressure-test premise, `仙侠修真`, `修仙风（宗门、境界、机缘）`, advanced chapter count `10`, and `2500` words/chapter.",
+        "",
+        "After Browser Use lands on `/book/<actual_novel_id>/workbench`, record the result:",
+        "",
+        "```bash",
+        f"python scripts/evaluation/evolution_frontend_pressure_v2.py record-browser-use-created --run-dir {run_dir} --novel-id <actual_novel_id> --screenshot-path <browser_use_screenshot_path>",
+        "```",
+        "",
+        "If the Browser Use `node_repl js` tool is unavailable, record the blocker instead of falling back to Python Playwright or direct API creation:",
+        "",
+        "```bash",
+        f"python scripts/evaluation/evolution_frontend_pressure_v2.py browser-use-blocker --run-dir {run_dir}",
+        "```",
+        "",
         "## UI Order",
         "",
-        "Use the real workbench UI. Keep auto approve off for the macro gate; after the macro audit passes, enable full auto in the workbench and continue the same arm.",
+        "Create novels through Browser Use operating the original PlotPilot Home UI first. Then use the real Workbench UI for generation. Keep auto approve off for the macro gate; after the macro audit passes, enable full auto in the workbench and continue the same arm.",
         "",
     ]
     for index, plan in enumerate(plans, start=1):
@@ -1762,7 +2299,11 @@ def _write_runbook(run_dir: Path, plans: list[ArmPlan]) -> Path:
             "",
             "- Macro gate: run `gate-macro` after the first planning review pause.",
             "- Topic alignment gate: run `gate-chapters` after each completed chapter or at least after each arm.",
-            "- Final report: run `report` after both formal arms finish.",
+            "- Final metrics: run `report` after the formal arm finishes."
+            if not has_control
+            else "- Final metrics: run `report` after both formal arms finish.",
+            "- Article issue review: run `python scripts/evaluation/evolution_article_issue_report.py --run-dir "
+            f"{run_dir} --novel-id <formal_experiment_novel_id>` after the 10 chapters are generated.",
             "",
         ]
     )
@@ -1792,6 +2333,15 @@ def _start_backend_command(args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
+def _start_frontend_command(args: argparse.Namespace) -> int:
+    run_dir = Path(args.run_dir).expanduser().resolve()
+    proc = start_frontend(run_dir, port=args.port, backend_url=args.backend_url)
+    frontend_url = f"http://127.0.0.1:{args.port}"
+    ok = wait_for_frontend(frontend_url, timeout_seconds=args.timeout)
+    print(json.dumps({"pid": proc.pid, "healthy": ok, "frontend_url": frontend_url}, ensure_ascii=False, indent=2))
+    return 0 if ok else 1
+
+
 def _create_novels_command(args: argparse.Namespace) -> int:
     run_dir = Path(args.run_dir).expanduser().resolve()
     plans = build_arm_plan(run_dir.name, calibration_chapters=args.calibration_chapters, formal_chapters=args.formal_chapters)
@@ -1799,6 +2349,46 @@ def _create_novels_command(args: argparse.Namespace) -> int:
     runbook = _write_runbook(run_dir, plans)
     print(json.dumps({"seed_manifest": manifest, "runbook": str(runbook)}, ensure_ascii=False, indent=2))
     return 0
+
+
+def _create_via_ui_command(args: argparse.Namespace) -> int:
+    run_dir = Path(args.run_dir).expanduser().resolve()
+    plans = build_arm_plan(run_dir.name, calibration_chapters=args.calibration_chapters, formal_chapters=args.formal_chapters)
+    manifest = create_seeded_novels_via_home_ui(
+        run_dir,
+        plans,
+        base_url=args.base_url,
+        frontend_url=args.frontend_url,
+        timeout_seconds=args.timeout,
+    )
+    created_plans = _plans_from_manifest(run_dir)
+    runbook = _write_runbook(run_dir, created_plans)
+    print(json.dumps({"seed_manifest": manifest, "runbook": str(runbook)}, ensure_ascii=False, indent=2))
+    return 0
+
+
+def _record_browser_use_created_command(args: argparse.Namespace) -> int:
+    run_dir = Path(args.run_dir).expanduser().resolve()
+    manifest = record_browser_use_created_novel(
+        run_dir,
+        novel_id=args.novel_id,
+        run_kind=args.run_kind,
+        arm=args.arm,
+        chapter_count=args.chapter_count,
+        evolution_enabled=args.evolution_enabled,
+        screenshot_path=args.screenshot_path,
+        base_url=args.base_url,
+        frontend_url=args.frontend_url,
+    )
+    runbook = _write_runbook(run_dir, _plans_from_manifest(run_dir))
+    print(json.dumps({"seed_manifest": manifest, "runbook": str(runbook)}, ensure_ascii=False, indent=2))
+    return 0 if manifest["created_novels"][0]["ui_validation"]["ok"] else 2
+
+
+def _browser_use_blocker_command(args: argparse.Namespace) -> int:
+    result = record_browser_use_blocker(Path(args.run_dir).expanduser().resolve(), reason=args.reason)
+    print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+    return 2
 
 
 def _select_arm_command(args: argparse.Namespace) -> int:
@@ -1847,7 +2437,7 @@ def _report_command(args: argparse.Namespace) -> int:
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Prepare and validate frontend-triggered Evolution A/B pressure v2.")
+    parser = argparse.ArgumentParser(description="Prepare and validate UI-first Evolution frontend pressure v2.")
     sub = parser.add_subparsers(dest="command", required=True)
 
     prepare = sub.add_parser("prepare", help="Create an isolated artifact/data directory and runbook.")
@@ -1865,7 +2455,40 @@ def _build_parser() -> argparse.ArgumentParser:
     backend.add_argument("--timeout", type=int, default=60)
     backend.set_defaults(func=_start_backend_command)
 
-    create = sub.add_parser("create-novels", help="Create pressure novels through the sandbox API and seed identical native context.")
+    frontend = sub.add_parser("start-frontend", help="Start the original PlotPilot frontend for UI-first setup.")
+    frontend.add_argument("--run-dir", required=True)
+    frontend.add_argument("--port", type=int, default=3010)
+    frontend.add_argument("--backend-url", default=DEFAULT_BACKEND_URL)
+    frontend.add_argument("--timeout", type=int, default=60)
+    frontend.set_defaults(func=_start_frontend_command)
+
+    record_browser = sub.add_parser("record-browser-use-created", help="Record a novel created by Browser Use in the original PlotPilot Home UI, then seed native context.")
+    record_browser.add_argument("--run-dir", required=True)
+    record_browser.add_argument("--novel-id", required=True)
+    record_browser.add_argument("--screenshot-path", default="")
+    record_browser.add_argument("--base-url", default=DEFAULT_BACKEND_URL)
+    record_browser.add_argument("--frontend-url", default=DEFAULT_FRONTEND_URL)
+    record_browser.add_argument("--run-kind", default="formal")
+    record_browser.add_argument("--arm", default=ARM_EXPERIMENT)
+    record_browser.add_argument("--chapter-count", type=int, default=10)
+    record_browser.add_argument("--evolution-enabled", action=argparse.BooleanOptionalAction, default=True)
+    record_browser.set_defaults(func=_record_browser_use_created_command)
+
+    browser_blocker = sub.add_parser("browser-use-blocker", help="Record that Browser Use could not run because node_repl js was unavailable.")
+    browser_blocker.add_argument("--run-dir", required=True)
+    browser_blocker.add_argument("--reason", default=BROWSER_USE_BLOCKER)
+    browser_blocker.set_defaults(func=_browser_use_blocker_command)
+
+    create_ui = sub.add_parser("create-via-ui", help="Deprecated fallback: Python Playwright UI creation, not the formal Browser Use path.")
+    create_ui.add_argument("--run-dir", required=True)
+    create_ui.add_argument("--base-url", default=DEFAULT_BACKEND_URL)
+    create_ui.add_argument("--frontend-url", default=DEFAULT_FRONTEND_URL)
+    create_ui.add_argument("--calibration-chapters", type=int, default=0)
+    create_ui.add_argument("--formal-chapters", type=int, default=10)
+    create_ui.add_argument("--timeout", type=int, default=120)
+    create_ui.set_defaults(func=_create_via_ui_command)
+
+    create = sub.add_parser("create-novels", help="Legacy fallback: create pressure novels through the sandbox API, not the formal UI-first path.")
     create.add_argument("--run-dir", required=True)
     create.add_argument("--base-url", default=DEFAULT_BACKEND_URL)
     create.add_argument("--calibration-chapters", type=int, default=2)

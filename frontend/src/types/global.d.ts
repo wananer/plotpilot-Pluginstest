@@ -20,6 +20,8 @@ declare global {
 
   interface Window {
     PlotPilotPlugins?: PlotPilotPluginRuntime
+    __PLOTPILOT_CAPTURE_HOSTED_WRITE_EVENTS__?: boolean
+    __PLOTPILOT_HOSTED_WRITE_EVENTS__?: Record<string, unknown>[]
     $message?: {
       success: (content: string) => void
       error: (content: string) => void

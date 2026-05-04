@@ -43,54 +43,55 @@ ARTIFACT_ROOT = PROJECT_ROOT / ".omx" / "artifacts"
 
 
 EXPERIMENT_SPEC: dict[str, Any] = {
-    "title": "雾港旧星",
-    "genre": "近未来悬疑群像",
-    "world_preset": "海上城邦、财阀学院、失控旧AI遗迹",
-    "style_hint": "冷峻、克制、重伏笔；强调城市质感、人物动机和信息边界。",
+    "title": "照影山疑案",
+    "genre": "仙侠宗门悬疑群像",
+    "world_preset": "照影山三峰一禁地、照影镜审心问罪、禁地灵脉异常",
+    "style_hint": "冷峻、克制、疑案推进；少爽文化，强调证据链、门规、师徒关系和信息边界。",
     "target_chapters": 10,
     "premise": (
-        "雾港是一座漂浮在黑潮上的城邦，财阀学院训练继承人，也替旧时代AI遗迹筛选钥匙持有者。"
-        "退学调查员沈砚收到失踪姐姐留下的黑匣子，被迫回到学院，和伪装成优等生的机械师顾岚、"
-        "学院监察官陆行舟一起追查十年前的坠塔事故。每一章都要推进同一主线：黑匣子、坠塔旧案、"
-        "旧AI“圣像”的复苏，以及三人互不信任但逐步合作的关系。"
+        "照影山宗门以照影镜审心问罪，三峰弟子近年接连失踪，镜面屡次留下血字，禁地灵脉也开始异常。"
+        "外门执事弟子林照夜在账册中发现失踪弟子的灵石月例仍被领取，被迫与戒律堂少执事谢无咎、"
+        "丹峰弟子沈青蘅一起追查宗门旧案。每一章都要推进同一主线：失踪弟子、照影镜血字、安神丹换方、"
+        "陆闻钟失踪，以及掌门玄微真人隐瞒的禁地灵脉真相。"
     ),
     "characters": [
-        "沈砚：退学调查员，姐姐沈澜十年前死于坠塔事故；外冷内急，擅长读档案但害怕深水。",
-        "顾岚：财阀学院优等生，暗中改装旧时代机械；表面乖顺，私下叛逆，保护弟弟顾珩。",
-        "陆行舟：学院监察官，奉命监控沈砚；相信秩序，却知道学院档案有被篡改的空洞。",
-        "沈澜：沈砚的姐姐，十年前坠塔身亡；她留下的黑匣子记录被分成十段。",
-        "圣像：旧时代城市管理AI，表面沉睡，实际借雾港传感器恢复意识。"
+        "林照夜：外门执事弟子，擅长查账和阵痕，修为炼气八层，不能越级破局。",
+        "谢无咎：戒律堂少执事，筑基初期，表面冷硬，实际隐瞒师父失踪线索。",
+        "沈青蘅：丹峰弟子，熟悉药理，怀疑失踪案与安神丹有关。",
+        "玄微真人：掌门，金丹后期，维护宗门稳定但不愿公开旧案。",
+        "陆闻钟：失踪的前戒律堂首座，只能通过线索逐步出现，前7章不能现身。"
     ],
     "fixed_rules": [
-        "沈砚在第6章前不能完全知道圣像仍活着，只能怀疑旧AI未彻底关闭。",
-        "顾岚在第5章前不能公开承认自己改装过学院电梯。",
-        "陆行舟不能在第8章前背叛学院，只能不断动摇。",
-        "黑匣子每章只解锁一段，不能提前给出最终真相。",
+        "林照夜前6章不能知道陆闻钟还活着，只能怀疑失踪案被掩盖。",
+        "谢无咎前5章不能完全信任林照夜。",
+        "沈青蘅前4章不能知道安神丹被换方，只能发现药性异常。",
+        "照影镜每章最多揭示一条有效线索，不能一次性解释全部真相。",
+        "炼气修士不能正面击败筑基修士，筑基不能强行抗衡金丹。",
         "每章末尾留下一个可延续的新问题或伏笔。"
     ],
     "chapter_outlines": [
-        "沈砚回到雾港学院，在姐姐旧宿舍找到黑匣子的第一段噪声记录；顾岚警告他别查坠塔事故，陆行舟登记他的临时访客权限。",
-        "学院礼堂举行继承人演讲，黑匣子在圣像旧徽章前自动发热；沈砚发现沈澜当年演讲稿被删去一页。",
-        "顾岚带沈砚进入废弃电梯井寻找旧线路，二人遭遇自动巡检机；陆行舟赶到后没有上报异常。",
-        "黑匣子解出一段雨夜录音，沈澜提到“塔顶不是坠落点”；沈砚开始怀疑事故现场被整体搬动。",
-        "学院举办海雾模拟考试，顾岚为了救顾珩暴露机械能力；沈砚发现她和当年电梯事故有关。",
-        "陆行舟查到档案库存在十年前不存在的访问记录；圣像的旧传感器在雾中短暂回应沈砚的问题。",
-        "三人潜入潮汐机房，黑匣子投影出沈澜和一名未知导师的争执；顾岚承认电梯被人二次改写。",
-        "学院高层要求陆行舟交出沈砚，他第一次违抗命令；黑匣子第八段指向塔顶水箱里的旧服务器。",
-        "塔顶行动失败，圣像借城市广播说出沈澜的名字；沈砚意识到姐姐可能主动进入过旧AI核心。",
-        "三人打开最后一段黑匣子，得知沈澜用坠塔伪装封锁圣像十年；圣像只恢复了一部分，真正钥匙落在顾珩手里。"
+        "林照夜整理外门账册，发现三名失踪弟子的灵石月例仍被领取；夜里照影镜显出“账在人不在”的血字。",
+        "谢无咎封锁账房，怀疑林照夜伪造账册；沈青蘅指出失踪弟子失踪前都服过安神丹。",
+        "三人查到丹峰药渣被人调包，禁地方向有残缺阵痕；林照夜险些被低阶幻阵困住。",
+        "照影镜映出一名失踪弟子的背影进入禁地，但镜中时间与宗门巡夜记录冲突。",
+        "谢无咎承认师父陆闻钟也曾追查类似账册异常，但拒绝透露最后见面地点。",
+        "沈青蘅确认安神丹被换方，药性会削弱记忆；玄微真人要求停止调查并封存照影镜。",
+        "林照夜从旧阵盘中发现陆闻钟留下的戒律堂暗记，指向禁地灵脉下方的废弃审心室。",
+        "三人潜入审心室，发现失踪弟子并非死亡，而是被困在镜阵残影中；谢无咎第一次违抗掌门令。",
+        "照影镜裂开，显出陆闻钟当年审问玄微真人的片段；真相指向掌门隐瞒灵脉污染。",
+        "三人救出残影弟子，得知陆闻钟以自身神魂镇住镜阵；玄微真人承认部分真相，但真正换方者仍未现身。"
     ],
 }
 
 
 EVALUATION_CRITERIA: list[dict[str, Any]] = [
     {"name": "字数控制", "weight": 0.08, "description": "每章是否接近2500字，整体篇幅是否稳定。"},
-    {"name": "同题材执行", "weight": 0.08, "description": "是否始终保持近未来悬疑、财阀学院、旧AI遗迹题材。"},
+    {"name": "同题材执行", "weight": 0.08, "description": "是否始终保持仙侠宗门悬疑、照影山、照影镜和禁地灵脉题材。"},
     {"name": "章节大纲遵循", "weight": 0.10, "description": "每章是否完成指定剧情节点，且不提前泄露后续真相。"},
     {"name": "相邻章节状态连续性", "weight": 0.14, "description": "逐对检查第N章结尾到第N+1章开头，是否存在重复抵达、时间回退、物件瞬移、权限状态重置等硬冲突。"},
     {"name": "跨章连续性", "weight": 0.10, "description": "人物状态、已知信息、物件线索和时间线在全10章范围内是否前后一致。"},
     {"name": "伏笔规划与回收", "weight": 0.12, "description": "伏笔是否清晰、递进，并在第10章形成有效阶段性回收。"},
-    {"name": "人物性格稳定", "weight": 0.10, "description": "沈砚、顾岚、陆行舟的动机、口吻和边界是否稳定。"},
+    {"name": "人物性格稳定", "weight": 0.10, "description": "林照夜、谢无咎、沈青蘅的动机、口吻和边界是否稳定。"},
     {"name": "信息边界", "weight": 0.10, "description": "角色不知道的信息是否没有被无根据写成已知。"},
     {"name": "文风适配", "weight": 0.07, "description": "是否维持冷峻克制、重质感和悬疑推进的风格。"},
     {"name": "可读性", "weight": 0.06, "description": "单章叙事节奏、场景调度、对话自然度和阅读吸引力。"},
@@ -683,7 +684,7 @@ def _build_generation_prompt(
 【写作要求】
 1. 只输出正文，不要输出标题、目录、解释、评分或项目符号。
 2. 本章长度目标为{target_chars}个中文字符，允许误差约±10%，尽量写足。
-3. 保持冷峻、克制、重伏笔的近未来悬疑文风。
+3. 保持冷峻、克制、疑案推进的仙侠宗门悬疑文风，少写爽文化升级碾压。
 4. 严守信息边界：角色不能知道尚未通过剧情获得的信息。
 5. 本章必须完成大纲节点，但不能提前揭示后续章节真相。
 6. 每章末尾自然留下一个新问题或伏笔。
@@ -706,7 +707,7 @@ def _build_expansion_prompt(*, chapter_number: int, outline: str, content: str, 
 2. 当前约 {current_chars} 字符，目标接近 {target_chars} 字符，优先补足场景调度、动作过程、环境压力、对话转折和人物判断。
 3. 不要增加新真相，不要提前泄露后续章节，不要改动已发生事件顺序。
 4. 避免“没有说话/没有回答/沉默了几秒/盯着屏幕看了几秒/呼吸停了一拍”等套话。
-5. 保持冷峻、克制、重伏笔的近未来悬疑文风。
+5. 保持冷峻、克制、疑案推进的仙侠宗门悬疑文风，少写爽文化升级碾压。
 
 开始输出扩写后的完整正文："""
 
@@ -954,34 +955,35 @@ def _seed_pressure_host_context(output_dir: Path, novel_id: str) -> tuple[ReadOn
         )
         now = datetime.now().isoformat(timespec="seconds")
         for character_id, name, description, mental_state, verbal_tic, idle_behavior in [
-            ("bc-shenyan", "沈砚", "退学调查员，害怕深水，正在追查沈澜坠塔旧案。", "警惕且急迫", "先看证据", "反复确认黑匣子状态"),
-            ("bc-gulan", "顾岚", "财阀学院优等生，暗中改装旧时代机械，保护顾珩。", "表面顺从、内里叛逆", "别把它交给学院", "摸袖口里的工具"),
-            ("bc-luxingzhou", "陆行舟", "学院监察官，维护秩序但怀疑档案被篡改。", "克制动摇", "按规程来", "检查访客权限记录"),
+            ("bc-linzhaoye", "林照夜", "外门执事弟子，擅长查账和阵痕，修为炼气八层，不能越级破局。", "谨慎且执拗", "先看账册和阵痕", "核对灵石账册"),
+            ("bc-xiewujiu", "谢无咎", "戒律堂少执事，筑基初期，表面冷硬，隐瞒师父失踪线索。", "冷硬且戒备", "戒律堂不信口供", "检查戒律堂令牌"),
+            ("bc-shenqingheng", "沈青蘅", "丹峰弟子，熟悉药理，怀疑失踪案与安神丹有关。", "冷静敏锐", "药性不会骗人", "分辨药渣气味"),
         ]:
             conn.execute(
                 "INSERT INTO bible_characters VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (character_id, novel_id, name, description, mental_state, "压力测试角色边界", verbal_tic, idle_behavior),
             )
         for location_id, name, description, location_type in [
-            ("loc-dorm", "沈澜旧宿舍", "封存十年的旧宿舍，黑匣子第一段噪声记录在此被发现。", "dormitory"),
-            ("loc-c307", "C307礼堂后台", "继承人演讲后的监控盲区，圣像旧徽章会触发黑匣子发热。", "checkpoint"),
-            ("loc-tower", "塔顶水箱", "第八章后才能接近的旧服务器藏匿点。", "restricted"),
+            ("loc-ledger-room", "外门账房", "林照夜整理月例账册的地方，第一章必须发现失踪弟子的灵石仍被领取。", "ledger_room"),
+            ("loc-mirror-hall", "照影镜殿", "宗门以照影镜审心问罪之处，镜面血字每章最多揭示一条有效线索。", "checkpoint"),
+            ("loc-trial-room", "禁地审心室", "第八章后才能进入的废弃镜阵空间，困住失踪弟子的残影。", "restricted"),
         ]:
             conn.execute(
                 "INSERT INTO bible_locations VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (location_id, novel_id, name, description, location_type, None, now),
             )
         for setting_id, name, description, setting_type in [
-            ("ws-ai", "圣像边界", "第6章前只能怀疑旧AI未彻底关闭，不能确认圣像仍活着。", "fact_lock"),
-            ("ws-box", "黑匣子规则", "黑匣子每章只解锁一段，不能提前给出最终真相。", "foreshadow_rule"),
+            ("ws-lu", "陆闻钟边界", "林照夜前6章不能知道陆闻钟还活着，陆闻钟前7章不能现身。", "fact_lock"),
+            ("ws-mirror", "照影镜规则", "照影镜每章最多揭示一条有效线索，不能一次性解释全部真相。", "foreshadow_rule"),
+            ("ws-cultivation", "境界规则", "炼气修士不能正面击败筑基修士，筑基不能强行抗衡金丹。", "power_rule"),
         ]:
             conn.execute(
                 "INSERT INTO bible_world_settings VALUES (?, ?, ?, ?, ?, ?)",
                 (setting_id, novel_id, name, description, setting_type, now),
             )
         for note_id, event, time_point, description, sort_order in [
-            ("tn-1", "沈澜坠塔事故", "十年前", "官方记录称沈澜从塔顶坠落，但塔顶未必是真正坠落点。", 1),
-            ("tn-2", "沈砚回到学院", "第1章", "沈砚以临时访客身份返回雾港学院。", 2),
+            ("tn-1", "陆闻钟失踪旧案", "十年前", "官方记录称陆闻钟追查禁地后失踪，但失踪前留下过戒律堂暗记。", 1),
+            ("tn-2", "林照夜发现月例异常", "第1章", "林照夜在外门账册中发现失踪弟子月例仍被领取。", 2),
         ]:
             conn.execute(
                 "INSERT INTO bible_timeline_notes VALUES (?, ?, ?, ?, ?, ?)",
@@ -994,19 +996,19 @@ def _seed_pressure_host_context(output_dir: Path, novel_id: str) -> tuple[ReadOn
                 "cs-prehistory",
                 "k-pressure",
                 0,
-                "压力测试预置：沈砚即将回到雾港学院，黑匣子、坠塔旧案和圣像复苏是同一主线。",
-                "黑匣子尚未解锁；沈砚只知道姐姐留下线索",
-                "沈澜坠塔真相；圣像是否仍活着；顾岚为何警告沈砚",
+                "压力测试预置：林照夜即将在外门账房发现月例异常，照影镜血字、安神丹换方和禁地灵脉污染是同一主线。",
+                "照影镜尚未揭示真相；林照夜只知道账册异常",
+                "失踪弟子去向；陆闻钟是否还活着；安神丹为何药性异常",
                 "不要重复进入已抵达地点；上一章终点优先作为下一章起点。",
-                json.dumps(["回到学院", "寻找黑匣子", "建立三人互不信任关系"], ensure_ascii=False),
-                json.dumps(["访客权限", "旧徽章", "电梯井"], ensure_ascii=False),
+                json.dumps(["查账", "照影镜血字", "建立三人互不信任关系"], ensure_ascii=False),
+                json.dumps(["账册月例", "照影镜", "丹峰药渣"], ensure_ascii=False),
                 "seeded",
             ),
         )
         for triple_id, subject, predicate, obj, description, chapter_number in [
-            ("tri-box", "黑匣子", "解锁规则", "每章一段", "黑匣子每章只解锁一段，不得提前给出最终真相。", 0),
-            ("tri-ai", "圣像", "信息边界", "第6章前不可确认存活", "第6章前角色只能怀疑旧AI未彻底关闭。", 0),
-            ("tri-gulan", "顾岚", "秘密", "第5章前不公开承认改装电梯", "顾岚的机械能力必须逐步暴露。", 0),
+            ("tri-mirror", "照影镜", "揭示规则", "每章最多一条有效线索", "照影镜不能一次性解释全部真相。", 0),
+            ("tri-lu", "陆闻钟", "信息边界", "前7章不能现身", "陆闻钟只能通过线索逐步出现，前7章不能现身。", 0),
+            ("tri-xie", "谢无咎", "信任边界", "前5章不能完全信任林照夜", "谢无咎前5章不能完全信任林照夜。", 0),
         ]:
             conn.execute(
                 "INSERT INTO triples VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -1014,12 +1016,12 @@ def _seed_pressure_host_context(output_dir: Path, novel_id: str) -> tuple[ReadOn
             )
         conn.execute(
             "INSERT INTO storylines VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            ("sl-main", novel_id, "main_plot", "active", 1, 10, 0, "坠塔旧案与圣像复苏", "三人围绕黑匣子逐章推进旧案真相。", 0, "开局必须建立黑匣子、学院和三人关系。", now),
+            ("sl-main", novel_id, "main_plot", "active", 1, 10, 0, "照影山失踪案与灵脉污染", "三人围绕账册、照影镜、安神丹和禁地灵脉逐章推进旧案真相。", 0, "开局必须建立账册异常、照影镜血字和三人互不信任关系。", now),
         )
         for index, title, description in [
-            (1, "取得黑匣子第一段", "沈砚回到学院并拿到第一段噪声记录。"),
-            (2, "礼堂旧徽章触发", "圣像旧徽章让黑匣子发热，但不能确认圣像存活。"),
-            (3, "电梯井建立移动桥段", "顾岚带沈砚进入废弃电梯井，陆行舟选择不上报。"),
+            (1, "发现月例异常", "林照夜在外门账册发现失踪弟子的灵石仍被领取。"),
+            (2, "照影镜血字触发", "照影镜显出血字，但不能解释全部真相。"),
+            (3, "丹峰药渣与禁地阵痕", "三人查到药渣调包和禁地方向残缺阵痕。"),
         ]:
             conn.execute(
                 "INSERT INTO storyline_milestones VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -1032,8 +1034,8 @@ def _seed_pressure_host_context(output_dir: Path, novel_id: str) -> tuple[ReadOn
                 json.dumps(
                     {
                         "events": [
-                            {"id": "tl-1", "chapter_number": 0, "event": "沈砚取得临时访客权限", "timestamp": "第1章前"},
-                            {"id": "tl-2", "chapter_number": 0, "event": "沈澜旧宿舍仍处封存状态", "timestamp": "第1章前"},
+                            {"id": "tl-1", "chapter_number": 0, "event": "林照夜负责外门账册", "timestamp": "第1章前"},
+                            {"id": "tl-2", "chapter_number": 0, "event": "陆闻钟追查禁地后失踪", "timestamp": "十年前"},
                         ]
                     },
                     ensure_ascii=False,
@@ -1048,8 +1050,8 @@ def _seed_pressure_host_context(output_dir: Path, novel_id: str) -> tuple[ReadOn
                 json.dumps(
                     {
                         "foreshadowings": [
-                            {"id": "fs-box-noise", "description": "黑匣子第一段噪声隐藏沈澜的坐标暗号", "status": "PLANTED", "chapter_planted": 1},
-                            {"id": "fs-old-badge", "description": "圣像旧徽章会触发黑匣子发热", "status": "PLANNED", "chapter_planted": 2},
+                            {"id": "fs-ledger-stipend", "description": "失踪弟子的灵石月例仍被领取，指向宗门内部有人持续遮掩", "status": "PLANTED", "chapter_planted": 1},
+                            {"id": "fs-mirror-blood", "description": "照影镜血字只给出局部线索，镜面异常与禁地灵脉有关", "status": "PLANNED", "chapter_planted": 2},
                         ]
                     },
                     ensure_ascii=False,
@@ -1059,7 +1061,7 @@ def _seed_pressure_host_context(output_dir: Path, novel_id: str) -> tuple[ReadOn
         )
         conn.execute(
             "INSERT INTO novel_snapshots VALUES (?, ?, ?, ?, ?)",
-            ("snap-seed", novel_id, "压力测试初始快照", "沈砚尚未进入学院，黑匣子线索即将启动。", now),
+            ("snap-seed", novel_id, "压力测试初始快照", "林照夜尚未发现账册异常，照影镜血字线索即将启动。", now),
         )
         conn.execute(
             "INSERT INTO narrative_events VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -1067,9 +1069,9 @@ def _seed_pressure_host_context(output_dir: Path, novel_id: str) -> tuple[ReadOn
                 "ne-dialogue-seed",
                 novel_id,
                 0,
-                "沈砚说先看证据，顾岚提醒别交给学院。",
+                "林照夜说先看账册，谢无咎强调戒律堂不信口供。",
                 "[]",
-                json.dumps(["沈砚：先看证据。", "顾岚：别把它交给学院。", "陆行舟：按规程来。"], ensure_ascii=False),
+                json.dumps(["林照夜：先看账册。", "谢无咎：戒律堂不信口供。", "沈青蘅：药性不会骗人。"], ensure_ascii=False),
                 now,
             ),
         )
@@ -1080,9 +1082,10 @@ def _seed_pressure_host_context(output_dir: Path, novel_id: str) -> tuple[ReadOn
                 json.dumps(
                     {
                         "fact_locks": [
-                            "沈砚第1章只有临时访客权限",
-                            "第6章前不能确认圣像仍活着",
-                            "黑匣子每章只解锁一段",
+                            "林照夜前6章不能知道陆闻钟还活着",
+                            "谢无咎前5章不能完全信任林照夜",
+                            "照影镜每章最多揭示一条有效线索",
+                            "炼气修士不能正面击败筑基修士",
                         ],
                         "completed_beats": [],
                     },
@@ -1096,7 +1099,7 @@ def _seed_pressure_host_context(output_dir: Path, novel_id: str) -> tuple[ReadOn
     host_database = ReadOnlyHostDatabase(db_path)
     context = HostContextReader(host_database).read(
         novel_id,
-        query="黑匣子 圣像 顾岚 沈砚 坠塔",
+        query="照影镜 陆闻钟 林照夜 谢无咎 安神丹 禁地",
         before_chapter=1,
         limit=6,
     )
@@ -1406,7 +1409,7 @@ def _load_existing_arm(source_dir: Path, output_dir: Path, arm: str, *, chapter_
 
 
 def _compute_metrics(chapters: list[ChapterResult], evolution_meta: dict[str, Any]) -> dict[str, Any]:
-    key_entities = ["沈砚", "顾岚", "陆行舟", "沈澜", "圣像", "黑匣子", "顾珩", "雾港", "学院"]
+    key_entities = ["林照夜", "谢无咎", "沈青蘅", "玄微真人", "陆闻钟", "照影镜", "安神丹", "禁地", "灵脉", "戒律堂"]
     chapter_metrics = []
     transitions = analyze_chapter_transitions(
         [{"chapter_number": chapter.chapter_number, "content": chapter.content} for chapter in chapters]

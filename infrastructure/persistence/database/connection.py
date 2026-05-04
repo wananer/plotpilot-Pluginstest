@@ -175,6 +175,39 @@ def _apply_last_chapter_audit_columns(conn: sqlite3.Connection) -> None:
         "audit_progress": (
             "ALTER TABLE novels ADD COLUMN audit_progress TEXT"
         ),
+        "boundary_gate_status": (
+            "ALTER TABLE novels ADD COLUMN boundary_gate_status TEXT"
+        ),
+        "last_boundary_issue": (
+            "ALTER TABLE novels ADD COLUMN last_boundary_issue TEXT"
+        ),
+        "revision_attempts": (
+            "ALTER TABLE novels ADD COLUMN revision_attempts INTEGER DEFAULT 0"
+        ),
+        "chapter_draft_status": (
+            "ALTER TABLE novels ADD COLUMN chapter_draft_status TEXT"
+        ),
+        "last_chapter_draft_issue": (
+            "ALTER TABLE novels ADD COLUMN last_chapter_draft_issue TEXT"
+        ),
+        "route_gate_status": (
+            "ALTER TABLE novels ADD COLUMN route_gate_status TEXT"
+        ),
+        "last_route_issue": (
+            "ALTER TABLE novels ADD COLUMN last_route_issue TEXT"
+        ),
+        "auto_revision_history": (
+            "ALTER TABLE novels ADD COLUMN auto_revision_history TEXT"
+        ),
+        "constraint_gate_status": (
+            "ALTER TABLE novels ADD COLUMN constraint_gate_status TEXT"
+        ),
+        "last_constraint_issue": (
+            "ALTER TABLE novels ADD COLUMN last_constraint_issue TEXT"
+        ),
+        "constraint_revision_history": (
+            "ALTER TABLE novels ADD COLUMN constraint_revision_history TEXT"
+        ),
     }
     for col, sql in migrations.items():
         if col not in cols:

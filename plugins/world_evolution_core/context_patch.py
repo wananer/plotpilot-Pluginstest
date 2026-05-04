@@ -15,6 +15,7 @@ TIER_T0 = "intended_t0"
 TIER_T1 = "intended_t1"
 
 T0_CONTEXT_KINDS = {
+    "chapter_boundary_bridge",
     "chapter_state_bridge",
     "focus_character_state",
     "background_character_constraint",
@@ -132,6 +133,20 @@ def build_context_patch(
                 "token_budget": 520,
                 "content": _render_facts(recent_facts),
                 "items": recent_facts,
+            }
+        )
+
+    boundary_bridge = _render_chapter_boundary_bridge(recent_summaries)
+    if boundary_bridge:
+        blocks.append(
+            {
+                "id": "chapter_boundary_bridge",
+                "title": "章节边界桥接硬约束",
+                "kind": "chapter_boundary_bridge",
+                "priority": 84,
+                "token_budget": 180,
+                "content": boundary_bridge,
+                "items": (recent_summaries[-1].get("carry_forward") or {}).get("boundary_state") if recent_summaries else {},
             }
         )
 
@@ -757,6 +772,40 @@ def _render_state_board(chapter_summaries: list[dict[str, Any]], volume_summarie
         if recent:
             lines.append("近期小总结：" + " / ".join(recent))
     return "\n".join(line for line in lines if line)
+
+
+def _render_chapter_boundary_bridge(chapter_summaries: list[dict[str, Any]]) -> str:
+    if not chapter_summaries:
+        return ""
+    latest = chapter_summaries[-1]
+    carry = latest.get("carry_forward") if isinstance(latest.get("carry_forward"), dict) else {}
+    boundary = carry.get("boundary_state") if isinstance(carry.get("boundary_state"), dict) else {}
+    if not boundary:
+        return ""
+    location = _clean_display_text(boundary.get("ending_location") or "")
+    goal = _clean_display_text(boundary.get("active_goal") or "")
+    threat = _clean_display_text(boundary.get("immediate_threat") or "")
+    action = _clean_display_text(boundary.get("last_action") or "")
+    cliffhanger = _clean_display_text(boundary.get("unresolved_cliffhanger") or "")
+    required = _clean_display_text(boundary.get("required_next_opening") or "")
+    lines = [
+        f"开场合同：上一章第{latest.get('chapter_number')}章结尾不能被跳过。",
+        "本章前100-300字必须先兑现、撤离、移动、跳时、失败/被打断或视角桥接，再进入新场景。",
+    ]
+    if location:
+        lines.append(f"- 结尾地点：{location}")
+    if goal:
+        lines.append(f"- 未完成目标：{goal[:160]}")
+    if threat:
+        lines.append(f"- 即时威胁：{threat[:160]}")
+    if action:
+        lines.append(f"- 最后动作：{action[:160]}")
+    if cliffhanger:
+        lines.append(f"- 尾钩：{cliffhanger[:160]}")
+    lines.append(f"- 开场要求：{required or '若换地点，必须写移动、撤离、失败、跳时或视角桥接。'}")
+    lines.append("- 允许换场方式：原地续接 / 撤离 / 移动路径 / 跳时 / 失败或被打断 / 视角桥接。")
+    lines.append("- 禁止：直接换地点、把上一章尾钩当作已解决、把角色写成首次抵达同一地点。")
+    return "\n".join(lines)
 
 
 def _render_object_states(value: Any) -> str:

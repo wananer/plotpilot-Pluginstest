@@ -19,6 +19,8 @@ logger = logging.getLogger(__name__)
 DRIFT_ALERT_CONSECUTIVE = 5
 # 相似度告警阈值
 DRIFT_ALERT_THRESHOLD = 0.75
+# 连续风格漂移进入统一质量核时的复核阈值
+STYLE_DRIFT_REVIEW_THRESHOLD = 0.65
 
 # 常见形容词集合（与 VoiceFingerprintService 保持一致）
 _COMMON_ADJECTIVES = set(
@@ -229,6 +231,7 @@ class VoiceDriftService:
         """获取漂移报告（全量评分 + 告警状态）。"""
         scores = self.score_repo.list_by_novel(novel_id)
         drift_alert = self._check_drift_alert(novel_id)
+        style_issue = self._build_style_issue(scores, drift_alert)
 
         return {
             "novel_id": novel_id,
@@ -237,6 +240,8 @@ class VoiceDriftService:
             "alert_threshold": DRIFT_ALERT_THRESHOLD,
             "alert_consecutive": DRIFT_ALERT_CONSECUTIVE,
             "mode": "llm" if self.use_llm_mode else "statistics",
+            "style_issue": style_issue,
+            "constraint_status": "needs_review" if style_issue.get("severity") == "needs_review" else "passed",
         }
 
     # ------------------------------------------------------------------
@@ -302,3 +307,29 @@ class VoiceDriftService:
 
         recent = valid_scores[-DRIFT_ALERT_CONSECUTIVE:]
         return all(s["similarity_score"] < DRIFT_ALERT_THRESHOLD for s in recent)
+
+    def _build_style_issue(self, scores: list[dict], drift_alert: bool) -> dict:
+        valid_scores = [s for s in scores if s.get("similarity_score") is not None]
+        if not drift_alert or not valid_scores:
+            return {}
+
+        recent = valid_scores[-DRIFT_ALERT_CONSECUTIVE:]
+        severest = min(float(s.get("similarity_score") or 0.0) for s in recent)
+        severity = "warning"
+        if severest < STYLE_DRIFT_REVIEW_THRESHOLD:
+            severity = "needs_review"
+        return {
+            "constraint_type": "narrative_voice",
+            "scope": "chapter_style",
+            "anchor": "voice_fingerprint",
+            "severity": severity,
+            "confidence": round(sum(1 for s in recent if float(s.get("similarity_score") or 0.0) < DRIFT_ALERT_THRESHOLD) / max(len(recent), 1), 2),
+            "repair_hint": "优先修正文风节奏、句长、描写密度和视角一致性，不要改动剧情事实、人物关系和地点时间。",
+            "evidence": [
+                {
+                    "chapter_number": s.get("chapter_number"),
+                    "similarity_score": s.get("similarity_score"),
+                }
+                for s in recent
+            ],
+        }

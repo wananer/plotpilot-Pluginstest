@@ -8,6 +8,23 @@
 
     <n-alert v-if="loadError" type="error" :title="loadError" class="drift-alert" closable @close="loadError = ''" />
 
+    <n-alert
+      v-if="report && report.style_issue && Object.keys(report.style_issue).length"
+      :type="report.constraint_status === 'needs_review' ? 'error' : 'warning'"
+      title="统一质量状态：文风漂移"
+      class="drift-alert"
+    >
+      <div class="quality-summary">
+        <span>级别：{{ report.style_issue.severity === 'needs_review' ? '需要复核' : '告警' }}</span>
+        <span v-if="typeof report.style_issue.confidence === 'number'">
+          置信度：{{ Math.round(report.style_issue.confidence * 100) }}%
+        </span>
+      </div>
+      <div v-if="report.style_issue.repair_hint" class="repair-hint">
+        {{ report.style_issue.repair_hint }}
+      </div>
+    </n-alert>
+
     <!-- 告警横幅 -->
     <n-alert
       v-if="report && report.drift_alert"
@@ -210,6 +227,17 @@ onMounted(load)
 }
 .drift-alert {
   margin: 0;
+}
+.quality-summary {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  font-size: 12px;
+}
+.repair-hint {
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 1.5;
 }
 .score-table {
   border-radius: 6px;

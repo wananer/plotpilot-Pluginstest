@@ -2,6 +2,7 @@ from domain.novel.entities.novel import AutopilotStatus, Novel, NovelStage
 from domain.novel.value_objects.novel_id import NovelId
 
 from application.engine.services.autopilot_daemon import AutopilotDaemon
+import pytest
 
 
 class RecordingRepository:
@@ -50,3 +51,63 @@ def test_flush_honors_external_stop_when_memory_still_running():
 
     assert daemon.novel_repository.saved is novel
     assert novel.autopilot_status == AutopilotStatus.STOPPED
+
+
+@pytest.mark.asyncio
+async def test_boundary_review_pause_cannot_be_auto_approved():
+    daemon = make_daemon(AutopilotStatus.RUNNING)
+    novel = make_novel(AutopilotStatus.RUNNING)
+    novel.current_stage = NovelStage.PAUSED_FOR_REVIEW
+    novel.auto_approve_mode = True
+    novel.boundary_gate_status = "needs_review"
+
+    await daemon._process_novel(novel)
+
+    assert novel.autopilot_status == AutopilotStatus.STOPPED
+    assert novel.current_stage == NovelStage.PAUSED_FOR_REVIEW
+    assert daemon.novel_repository.saved is novel
+
+
+@pytest.mark.asyncio
+async def test_chapter_draft_review_pause_cannot_be_auto_approved():
+    daemon = make_daemon(AutopilotStatus.RUNNING)
+    novel = make_novel(AutopilotStatus.RUNNING)
+    novel.current_stage = NovelStage.PAUSED_FOR_REVIEW
+    novel.auto_approve_mode = True
+    novel.chapter_draft_status = "needs_review"
+
+    await daemon._process_novel(novel)
+
+    assert novel.autopilot_status == AutopilotStatus.STOPPED
+    assert novel.current_stage == NovelStage.PAUSED_FOR_REVIEW
+    assert daemon.novel_repository.saved is novel
+
+
+@pytest.mark.asyncio
+async def test_route_review_pause_cannot_be_auto_approved():
+    daemon = make_daemon(AutopilotStatus.RUNNING)
+    novel = make_novel(AutopilotStatus.RUNNING)
+    novel.current_stage = NovelStage.PAUSED_FOR_REVIEW
+    novel.auto_approve_mode = True
+    novel.route_gate_status = "needs_review"
+
+    await daemon._process_novel(novel)
+
+    assert novel.autopilot_status == AutopilotStatus.STOPPED
+    assert novel.current_stage == NovelStage.PAUSED_FOR_REVIEW
+    assert daemon.novel_repository.saved is novel
+
+
+@pytest.mark.asyncio
+async def test_constraint_review_pause_cannot_be_auto_approved():
+    daemon = make_daemon(AutopilotStatus.RUNNING)
+    novel = make_novel(AutopilotStatus.RUNNING)
+    novel.current_stage = NovelStage.PAUSED_FOR_REVIEW
+    novel.auto_approve_mode = True
+    novel.constraint_gate_status = "needs_review"
+
+    await daemon._process_novel(novel)
+
+    assert novel.autopilot_status == AutopilotStatus.STOPPED
+    assert novel.current_stage == NovelStage.PAUSED_FOR_REVIEW
+    assert daemon.novel_repository.saved is novel

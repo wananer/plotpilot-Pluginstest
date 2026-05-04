@@ -70,6 +70,17 @@ class FileNovelRepository(NovelRepository):
             "consecutive_error_count": novel.consecutive_error_count,
             "current_beat_index": novel.current_beat_index,
             "target_words_per_chapter": novel.target_words_per_chapter,
+            "boundary_gate_status": getattr(novel, "boundary_gate_status", None),
+            "last_boundary_issue": getattr(novel, "last_boundary_issue", {}) or {},
+            "revision_attempts": getattr(novel, "revision_attempts", 0),
+            "chapter_draft_status": getattr(novel, "chapter_draft_status", None),
+            "last_chapter_draft_issue": getattr(novel, "last_chapter_draft_issue", {}) or {},
+            "route_gate_status": getattr(novel, "route_gate_status", None),
+            "last_route_issue": getattr(novel, "last_route_issue", {}) or {},
+            "auto_revision_history": getattr(novel, "auto_revision_history", []) or [],
+            "constraint_gate_status": getattr(novel, "constraint_gate_status", None),
+            "last_constraint_issue": getattr(novel, "last_constraint_issue", {}) or {},
+            "constraint_revision_history": getattr(novel, "constraint_revision_history", []) or [],
         }
 
     @staticmethod
@@ -104,4 +115,15 @@ class FileNovelRepository(NovelRepository):
             consecutive_error_count=int(data.get("consecutive_error_count") or 0),
             current_beat_index=int(data.get("current_beat_index") or 0),
             target_words_per_chapter=int(data.get("target_words_per_chapter") or 2500),
+            boundary_gate_status=data.get("boundary_gate_status"),
+            last_boundary_issue=data.get("last_boundary_issue") or {},
+            revision_attempts=int(data.get("revision_attempts") or 0),
+            chapter_draft_status=data.get("chapter_draft_status"),
+            last_chapter_draft_issue=data.get("last_chapter_draft_issue") or {},
+            route_gate_status=data.get("route_gate_status"),
+            last_route_issue=data.get("last_route_issue") or {},
+            auto_revision_history=data.get("auto_revision_history") or [],
+            constraint_gate_status=data.get("constraint_gate_status"),
+            last_constraint_issue=data.get("last_constraint_issue") or {},
+            constraint_revision_history=data.get("constraint_revision_history") or [],
         )

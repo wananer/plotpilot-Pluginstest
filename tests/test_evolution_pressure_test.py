@@ -5,9 +5,15 @@ from types import SimpleNamespace
 from scripts.evaluation.evolution_frontend_pressure_v2 import (
     ARM_CONTROL,
     ARM_EXPERIMENT,
+    BROWSER_USE_BLOCKER,
+    BROWSER_USE_CREATION_METHOD,
+    HOME_UI_CREATION_METHOD,
     analyze_chapter_quality,
     build_base_input_gate,
+    build_arm_plan,
     build_cost_breakdown,
+    build_browser_use_creation_record,
+    build_home_ui_creation_form,
     build_formal_acceptance,
     build_leakage_gate,
     build_quality_residual_risks,
@@ -18,8 +24,21 @@ from scripts.evaluation.evolution_frontend_pressure_v2 import (
     check_audit_completeness,
     evaluate_chapter_topic_alignment_series,
     evaluate_macro_planning_gate,
+    create_seeded_novels_via_home_ui,
+    record_browser_use_blocker,
+    record_browser_use_created_novel,
     seed_native_context_in_app_db,
+    summarize_boundary_revision,
     start_backend,
+)
+import scripts.evaluation.evolution_frontend_pressure_v2 as frontend_pressure_v2
+from scripts.evaluation.evolution_article_issue_report import (
+    build_quality_summary as build_article_quality_summary,
+    build_report as build_article_issue_report,
+    deterministic_issues as deterministic_article_issues,
+    issue_quality_category,
+    parse_llm_issue_json,
+    write_report as write_article_issue_report,
 )
 from scripts.evaluation.evolution_pressure_test import (
     ChapterResult,
@@ -200,6 +219,30 @@ def test_selected_chapter_outlines_supports_calibration_limit():
     assert len(_selected_chapter_outlines(999)) == EXPERIMENT_SPEC["target_chapters"]
 
 
+def test_frontend_pressure_v2_zero_calibration_uses_experiment_only_formal_arm():
+    plans = build_arm_plan("xianxia-case-test", calibration_chapters=0, formal_chapters=10)
+
+    assert len(plans) == 1
+    assert plans[0].run_kind == "formal"
+    assert plans[0].arm == ARM_EXPERIMENT
+    assert plans[0].chapter_count == 10
+    assert plans[0].evolution_enabled is True
+
+
+def test_frontend_pressure_v2_home_ui_form_uses_original_plotpilot_defaults():
+    plan = build_arm_plan("xianxia-ui-test", calibration_chapters=0, formal_chapters=10)[0]
+
+    form = build_home_ui_creation_form(plan)
+
+    assert form["premise"] == EXPERIMENT_SPEC["premise"]
+    assert form["genre"] == "仙侠修真"
+    assert form["world_preset"] == "修仙风"
+    assert form["world_preset_label"] == "修仙风（宗门、境界、机缘）"
+    assert form["target_chapters"] == 10
+    assert form["target_words_per_chapter"] == 2500
+    assert form["use_advanced"] is True
+
+
 def test_embedding_preflight_status_reports_vector_store_disabled(monkeypatch):
     monkeypatch.setenv("VECTOR_STORE_ENABLED", "false")
 
@@ -376,7 +419,7 @@ def test_pressure_host_context_seed_is_readable_and_isolated(tmp_path):
 
     context = HostContextReader(host_database).read(
         "pressure-experiment-test",
-        query="黑匣子 圣像 顾岚",
+        query="照影镜 安神丹 谢无咎",
         before_chapter=2,
     )
 
@@ -485,6 +528,148 @@ def test_frontend_pressure_v2_seeds_identical_native_context_for_both_arms(tmp_p
     assert {event["chapter_number"] for event in timeline_payload["events"]} == {1}
 
 
+def test_frontend_pressure_v2_create_via_home_ui_records_actual_novel_and_seed(monkeypatch, tmp_path):
+    run_dir = tmp_path / "run"
+    data_dir = run_dir / "data"
+    data_dir.mkdir(parents=True)
+    db_path = data_dir / "aitext.db"
+    _create_frontend_v2_seed_schema(db_path)
+    (run_dir / "run_manifest.json").write_text(json.dumps({"schema_version": 1}), encoding="utf-8")
+    plans = build_arm_plan("xianxia-ui-create", calibration_chapters=0, formal_chapters=10)
+    calls: list[dict[str, str]] = []
+
+    def fake_http_json(method, url, payload=None, *, timeout=30):
+        calls.append({"method": method, "url": url})
+        if method == "GET" and "/api/v1/novels/" in url:
+            novel_id = url.rsplit("/", 1)[-1]
+            return {
+                "id": novel_id,
+                "title": "照影山疑案",
+                "premise": EXPERIMENT_SPEC["premise"],
+                "target_chapters": 10,
+                "target_words_per_chapter": 2500,
+            }
+        return {"ok": True}
+
+    def fake_ui_create(frontend_url, form, *, screenshot_dir, timeout_seconds):
+        assert frontend_url == "http://127.0.0.1:3010"
+        assert form["target_chapters"] == 10
+        screenshot_dir.mkdir(parents=True, exist_ok=True)
+        screenshot_path = screenshot_dir / "created.png"
+        screenshot_path.write_text("fake screenshot", encoding="utf-8")
+        return {
+            "novel_id": "novel-created-by-home-ui",
+            "api_response": {"id": "novel-created-by-home-ui"},
+            "screenshot_path": str(screenshot_path),
+            "final_url": f"{frontend_url}/book/novel-created-by-home-ui/workbench",
+        }
+
+    monkeypatch.setattr(frontend_pressure_v2, "http_json", fake_http_json)
+
+    manifest = create_seeded_novels_via_home_ui(
+        run_dir,
+        plans,
+        base_url="http://127.0.0.1:8005",
+        frontend_url="http://127.0.0.1:3010",
+        ui_create_func=fake_ui_create,
+    )
+
+    run_manifest = json.loads((run_dir / "run_manifest.json").read_text(encoding="utf-8"))
+    created = run_manifest["novels"][0]
+    assert manifest["creation_method"] == HOME_UI_CREATION_METHOD
+    assert run_manifest["creation_method"] == HOME_UI_CREATION_METHOD
+    assert created["novel_id"] == "novel-created-by-home-ui"
+    assert created["planned_novel_id"] == plans[0].novel_id
+    assert created["creation_method"] == HOME_UI_CREATION_METHOD
+    assert created["ui_form"]["genre"] == "仙侠修真"
+    assert created["ui_form"]["world_preset"] == "修仙风"
+    assert manifest["seed_records"][0]["novel_id"] == "novel-created-by-home-ui"
+    assert any(call["method"] == "PUT" and "/plugins/world_evolution_core/enabled" in call["url"] for call in calls)
+    assert any(call["method"] == "PATCH" and "/auto-approve-mode" in call["url"] for call in calls)
+
+
+def test_frontend_pressure_v2_browser_use_record_validates_actual_novel_and_seed(monkeypatch, tmp_path):
+    run_dir = tmp_path / "run-browser"
+    data_dir = run_dir / "data"
+    data_dir.mkdir(parents=True)
+    db_path = data_dir / "aitext.db"
+    _create_frontend_v2_seed_schema(db_path)
+    (run_dir / "run_manifest.json").write_text(json.dumps({"schema_version": 1}), encoding="utf-8")
+    calls: list[dict[str, str]] = []
+
+    def fake_http_json(method, url, payload=None, *, timeout=30):
+        calls.append({"method": method, "url": url})
+        if method == "GET" and "/api/v1/novels/" in url:
+            return {
+                "id": "novel-browser-use",
+                "title": "照影山疑案",
+                "premise": EXPERIMENT_SPEC["premise"],
+                "target_chapters": 10,
+                "target_words_per_chapter": 2500,
+            }
+        return {"ok": True}
+
+    monkeypatch.setattr(frontend_pressure_v2, "http_json", fake_http_json)
+
+    manifest = record_browser_use_created_novel(
+        run_dir,
+        novel_id="novel-browser-use",
+        screenshot_path=str(run_dir / "screenshots" / "browser-use.png"),
+        base_url="http://127.0.0.1:8005",
+        frontend_url="http://127.0.0.1:3010",
+    )
+
+    run_manifest = json.loads((run_dir / "run_manifest.json").read_text(encoding="utf-8"))
+    created = run_manifest["novels"][0]
+    assert manifest["creation_method"] == BROWSER_USE_CREATION_METHOD
+    assert run_manifest["creation_method"] == BROWSER_USE_CREATION_METHOD
+    assert created["creation_method"] == BROWSER_USE_CREATION_METHOD
+    assert created["browser_use"]["backend"] == "iab"
+    assert created["browser_use"]["screenshot_path"].endswith("browser-use.png")
+    assert created["ui_validation"]["ok"] is True
+    assert created["ui_form"]["title"] == "照影山疑案"
+    assert created["ui_form"]["target_chapters"] == 10
+    assert manifest["seed_records"][0]["novel_id"] == "novel-browser-use"
+    assert any(call["method"] == "PUT" and "/plugins/world_evolution_core/enabled" in call["url"] for call in calls)
+    assert any(call["method"] == "PATCH" and "/auto-approve-mode" in call["url"] for call in calls)
+
+
+def test_frontend_pressure_v2_browser_use_blocker_is_recorded(tmp_path):
+    run_dir = tmp_path / "run-blocker"
+    run_dir.mkdir()
+    (run_dir / "run_manifest.json").write_text(json.dumps({"schema_version": 1}), encoding="utf-8")
+
+    blocker = record_browser_use_blocker(run_dir)
+    run_manifest = json.loads((run_dir / "run_manifest.json").read_text(encoding="utf-8"))
+
+    assert blocker["blocked"] is True
+    assert blocker["blocker"] == BROWSER_USE_BLOCKER
+    assert run_manifest["creation_method"] == BROWSER_USE_CREATION_METHOD
+    assert run_manifest["debug_only"] is True
+    assert run_manifest["debug_only_reason"] == BROWSER_USE_BLOCKER
+    assert (run_dir / "browser_use_blocker.json").exists()
+
+
+def test_frontend_pressure_v2_browser_use_creation_record_flags_mismatched_ui_values():
+    plan = build_arm_plan("browser-use-record", calibration_chapters=0, formal_chapters=10)[0]
+
+    record = build_browser_use_creation_record(
+        plan=plan,
+        novel_id="novel-bad",
+        novel_payload={
+            "id": "novel-bad",
+            "premise": "缺少主题",
+            "target_chapters": 8,
+            "target_words_per_chapter": 1800,
+        },
+        screenshot_path="/tmp/s.png",
+    )
+
+    assert record["creation_method"] == BROWSER_USE_CREATION_METHOD
+    assert record["ui_validation"]["ok"] is False
+    assert record["ui_validation"]["premise_contains_title"] is False
+
+
 def test_frontend_pressure_v2_fk_gate_detects_bad_global_triple_anchor(tmp_path):
     db_path = tmp_path / "aitext.db"
     with sqlite3.connect(db_path) as conn:
@@ -569,6 +754,27 @@ def test_frontend_pressure_v2_seeds_native_foreshadow_registry_payload(tmp_path)
     assert len(registry.get_unresolved()) == 2
 
 
+def test_frontend_pressure_v2_seed_replaces_ui_created_unique_context(tmp_path):
+    db_path = tmp_path / "aitext.db"
+    _create_frontend_v2_seed_schema(db_path)
+    novel_id = "browser-use-ui-created"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("CREATE UNIQUE INDEX ux_bibles_novel_id ON bibles(novel_id)")
+        conn.execute(
+            "INSERT INTO bibles (id, novel_id, schema_version, extensions) VALUES (?, ?, ?, ?)",
+            ("ui-bible", novel_id, 1, "{}"),
+        )
+        conn.commit()
+
+    seed = seed_native_context_in_app_db(db_path, novel_id, chapter_limit=2)
+
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute("SELECT id FROM bibles WHERE novel_id = ?", (novel_id,)).fetchall()
+    assert seed["counts"]["bibles"] == 1
+    assert len(rows) == 1
+    assert rows[0][0] != "ui-bible"
+
+
 def test_frontend_pressure_v2_seed_gate_compares_control_and_experiment_per_run_kind(tmp_path):
     db_path = tmp_path / "aitext.db"
     _create_frontend_v2_seed_schema(db_path)
@@ -598,7 +804,7 @@ def test_frontend_pressure_v2_macro_gate_requires_premise_and_positive_theme_hit
                     "system": "规划",
                     "user": (
                         EXPERIMENT_SPEC["premise"]
-                        + " 类型：近未来悬疑群像。世界观：海上城邦/财阀学院/旧AI遗迹。"
+                        + " 类型：仙侠宗门悬疑群像。世界观：照影山/照影镜/禁地灵脉。"
                     ),
                 }
             },
@@ -606,7 +812,7 @@ def test_frontend_pressure_v2_macro_gate_requires_premise_and_positive_theme_hit
         ),
         encoding="utf-8",
     )
-    output_path.write_text("雾港、黑匣子、坠塔、圣像和沈砚/顾岚/陆行舟构成十章规划。", encoding="utf-8")
+    output_path.write_text("照影山、照影镜、禁地灵脉、林照夜、谢无咎和沈青蘅构成十章规划。", encoding="utf-8")
     record = {
         "novel_id": "frontend-v2-control-off-test",
         "phase": "chapter_outline_suggestion",
@@ -640,7 +846,7 @@ def test_frontend_pressure_v2_macro_gate_requires_positive_terms_in_prompt(tmp_p
         ),
         encoding="utf-8",
     )
-    output_path.write_text("雾港、黑匣子、坠塔、圣像和旧AI构成两章规划。", encoding="utf-8")
+    output_path.write_text("照影山、照影镜、禁地和灵脉构成两章规划。", encoding="utf-8")
     record = {
         "novel_id": "frontend-v2-control-off-test",
         "phase": "chapter_outline_suggestion",
@@ -813,8 +1019,8 @@ def test_frontend_pressure_v2_start_backend_detaches_process(tmp_path, monkeypat
 def test_frontend_pressure_v2_topic_alignment_gate_stops_on_two_low_theme_chapters():
     result = evaluate_chapter_topic_alignment_series(
         [
-            {"chapter_number": 1, "content": "陌生故事开场，没有雾港与黑匣子。"},
-            {"chapter_number": 2, "content": "人物继续闲谈，仍没有旧AI和坠塔线。"},
+            {"chapter_number": 1, "content": "陌生故事开场，没有照影山与照影镜。"},
+            {"chapter_number": 2, "content": "人物继续闲谈，仍没有禁地和灵脉线。"},
         ]
     )
 
@@ -825,8 +1031,8 @@ def test_frontend_pressure_v2_topic_alignment_gate_stops_on_two_low_theme_chapte
 def test_frontend_pressure_v2_topic_alignment_gate_ignores_empty_draft_placeholders():
     chapters = chapters_for_topic_alignment_gate(
         [
-            {"number": 1, "status": "completed", "content": "雾港里，沈砚带着黑匣子追查坠塔旧案。"},
-            {"number": 2, "status": "completed", "content": "顾岚和陆行舟在财阀学院发现旧AI圣像线索。"},
+            {"number": 1, "status": "completed", "content": "照影山里，林照夜带着账册追查照影镜血字。"},
+            {"number": 2, "status": "completed", "content": "谢无咎和沈青蘅在丹峰发现安神丹与禁地灵脉线索。"},
             {"number": 3, "status": "draft", "content": ""},
             {"number": 4, "status": "draft", "content": "   "},
         ]
@@ -906,14 +1112,14 @@ def test_frontend_pressure_v2_formal_acceptance_ignores_calibration_placeholders
 def test_frontend_pressure_v2_quality_metrics_surface_repetition_and_palette_risks():
     control_quality = analyze_chapter_quality(
         [
-            {"chapter_number": 1, "content": "雾港里，沈砚带着黑匣子追查坠塔旧案。"},
-            {"chapter_number": 2, "content": "顾岚和陆行舟在财阀学院发现旧AI圣像线索。"},
+            {"chapter_number": 1, "content": "照影山里，林照夜带着账册追查照影镜血字。"},
+            {"chapter_number": 2, "content": "谢无咎和沈青蘅在丹峰发现安神丹与禁地灵脉线索。"},
         ]
     )
     experiment_quality = analyze_chapter_quality(
         [
-            {"chapter_number": 1, "content": "雾港里，沈砚带着黑匣子追查坠塔旧案。沈砚没有说话。"},
-            {"chapter_number": 2, "content": "顾岚和陆行舟在财阀学院发现旧AI圣像线索。顾岚没有回答。"},
+            {"chapter_number": 1, "content": "照影山里，林照夜带着账册追查照影镜血字。林照夜没有说话。"},
+            {"chapter_number": 2, "content": "谢无咎和沈青蘅在丹峰发现安神丹与禁地灵脉线索。谢无咎没有回答。"},
         ]
     )
     costs = build_cost_breakdown(
@@ -933,7 +1139,7 @@ def test_frontend_pressure_v2_quality_metrics_surface_repetition_and_palette_ris
         palette_status={
             "missing": [
                 {"name": "水箱", "missing_fields": ["base"], "source": "unspecified"},
-                {"name": "沈砚", "missing_fields": ["base"], "source": "native_bible_derived"},
+                {"name": "林照夜", "missing_fields": ["base"], "source": "native_bible_derived"},
             ]
         },
         report_valid_experiment=True,
@@ -943,3 +1149,155 @@ def test_frontend_pressure_v2_quality_metrics_surface_repetition_and_palette_ris
     assert experiment_quality["repetitive_phrase_total"] == 2
     assert costs["experiment_on"]["evolution_agent_control_card"]["total_tokens"] == 15
     assert any(risk["id"] == "evolution_non_character_palette_entities" for risk in risks)
+
+
+def test_article_issue_report_deterministic_checks_flag_theme_rules_and_repetition():
+    chapters = [
+        {
+            "chapter_number": 1,
+            "content": "陌生都市开局。" * 120,
+        },
+        {
+            "chapter_number": 2,
+            "content": "照影山外门账房里，林照夜查账，照影镜血字仍在。林照夜击败筑基修士。没有说话。没有回答。沉默了几秒。",
+        },
+        {
+            "chapter_number": 3,
+            "content": "照影山禁地旁，谢无咎和沈青蘅查到安神丹药渣，照影镜照出阵痕。",
+        },
+    ]
+
+    issues = deterministic_article_issues(chapters, expected_chapters=10)
+    issue_types = {item["type"] for item in issues}
+
+    assert "章节大纲偏离" in issue_types
+    assert "题材/世界观漂移" in issue_types
+    assert "境界规则冲突" in issue_types
+    assert "重复套话" in issue_types
+    assert any(item["chapter_number"] == 0 and item["severity"] == "critical" for item in issues)
+
+
+def test_article_issue_report_parses_llm_json_and_normalizes_issue_types():
+    parsed = parse_llm_issue_json(
+        """
+```json
+{
+  "issues": [
+    {
+      "type": "境界规则冲突",
+      "severity": "high",
+      "chapter_number": 2,
+      "evidence": "林照夜击败筑基修士",
+      "impact": "破坏境界规则",
+      "suggestion": "改成借助阵法逃脱"
+    }
+  ],
+  "overall_assessment": "主要问题是越级破局。"
+}
+```
+"""
+    )
+
+    assert parsed is not None
+    assert parsed["issues"][0]["type"] == "境界规则冲突"
+    assert parsed["issues"][0]["source"] == "llm"
+    assert parsed["overall_assessment"] == "主要问题是越级破局。"
+
+
+def test_article_issue_report_separates_continuity_blocking_from_style_warning():
+    issues = [
+        {
+            "type": "章节承接失败",
+            "severity": "high",
+            "chapter_number": 2,
+            "evidence": "上一章地下大厅，下一章直接档案馆。",
+        },
+        {
+            "issue_type": "evolution_style_drift",
+            "constraint_type": "narrative_voice",
+            "severity": "warning",
+            "chapter_number": 8,
+            "evidence": [{"similarity_score": 0.7}],
+            "repair_hint": "保持句长和视角一致。",
+            "confidence": 1.0,
+        },
+    ]
+
+    summary = build_article_quality_summary(issues)
+
+    assert issue_quality_category(issues[0]) == "continuity"
+    assert issue_quality_category(issues[1]) == "style"
+    assert summary["continuity_blocking_count"] == 1
+    assert summary["style_warning_count"] == 1
+    assert summary["style_needs_review_count"] == 0
+
+
+def test_article_issue_report_writes_json_and_markdown(tmp_path):
+    run_dir = tmp_path / "run"
+    data_dir = run_dir / "data"
+    data_dir.mkdir(parents=True)
+    db_path = data_dir / "aitext.db"
+    novel_id = "frontend-v2-experiment-on-test"
+    content = "照影山外门账房里，林照夜查账，照影镜血字仍在，谢无咎和沈青蘅追查安神丹。" * 80
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("CREATE TABLE chapters (novel_id TEXT, number INTEGER, title TEXT, content TEXT)")
+        for chapter_number in range(1, 11):
+            conn.execute(
+                "INSERT INTO chapters VALUES (?, ?, ?, ?)",
+                (novel_id, chapter_number, f"第{chapter_number}章", content),
+            )
+        conn.commit()
+
+    report = build_article_issue_report(run_dir, novel_id, no_llm=True)
+    json_path, md_path = write_article_issue_report(run_dir, report)
+
+    assert report["chapter_count"] == 10
+    assert report["llm_review"]["status"] == "not_run"
+    assert "continuity_blocking_count" in report["summary"]
+    assert "style_warning_count" in report["summary"]
+    assert json_path.exists()
+    assert md_path.exists()
+    assert json.loads(json_path.read_text(encoding="utf-8"))["novel_id"] == novel_id
+
+
+def test_frontend_pressure_v2_boundary_revision_metrics_count_events_and_rewrite_cost():
+    summary = summarize_boundary_revision(
+        audit_records=[
+            {
+                "arm": "experiment_on",
+                "phase": "hosted_write_boundary_revision",
+                "call_id": "call-1",
+                "prompt_chars": 1200,
+                "output_chars": 180,
+                "token_usage": {"input_tokens": 100, "output_tokens": 40, "total_tokens": 140},
+            },
+            {
+                "arm": "experiment_on",
+                "phase": "chapter_generation_stream",
+                "call_id": "call-2",
+                "token_usage": {"total_tokens": 999},
+            },
+        ],
+        experiment_diagnostics={
+            "boundary_continuity_summary": {
+                "boundary_injected_count": 9,
+                "boundary_failed_count": 2,
+                "boundary_revision_required_count": 1,
+            }
+        },
+        events=[
+            {"type": "boundary_revision_start", "chapter": 2},
+            {"type": "boundary_revision_applied", "chapter": 2},
+            {"type": "boundary_revision_required", "chapter": 6, "reason": "recheck_still_failed"},
+            {"type": "boundary_revision_skipped", "chapter": 7, "reason": "no_boundary_revision_required"},
+        ],
+    )
+
+    assert summary["target"]["met"] is True
+    assert summary["diagnostics"]["boundary_failed_count"] == 2
+    assert summary["sse_events"]["counts"]["boundary_revision_applied"] == 1
+    assert summary["sse_events"]["applied_chapters"] == [2]
+    assert summary["sse_events"]["required_reason_counts"] == {"recheck_still_failed": 1}
+    assert summary["rewrite_llm"]["call_count"] == 1
+    assert summary["rewrite_llm"]["total_tokens"] == 140
+    assert summary["audit_call_ids"] == ["call-1"]

@@ -50,6 +50,22 @@
         <div class="label">上章张力</div>
         <div class="value" :style="{ color: tensionColor }">{{ tensionLabel }}</div>
       </div>
+      <div class="ap-cell">
+        <div class="label">章节承接</div>
+        <div class="value" :class="boundaryStatusClass">{{ boundaryStatusLabel }}</div>
+      </div>
+      <div class="ap-cell">
+        <div class="label">章前草稿</div>
+        <div class="value" :class="chapterDraftStatusClass">{{ chapterDraftStatusLabel }}</div>
+      </div>
+      <div class="ap-cell">
+        <div class="label">章节路线承接</div>
+        <div class="value" :class="routeStatusClass">{{ routeStatusLabel }}</div>
+      </div>
+      <div class="ap-cell">
+        <div class="label">统一约束状态</div>
+        <div class="value" :class="constraintStatusClass">{{ constraintStatusLabel }}</div>
+      </div>
     </div>
 
     <!-- 单本挂起 / 失败计数过高：与监控大盘「熔断保护 → 重置」同源接口 -->
@@ -78,9 +94,23 @@
 
     <!-- 审阅等待：宏观规划完成后、或某一幕「首次」生成章节规划后各需确认一次；确认后同幕不会反复要求审批 -->
     <n-alert v-if="needsReview" type="warning" :show-icon="true" style="margin: 4px 0; font-size: 12px">
-      <strong>待审阅确认</strong>：请在侧栏查看刚生成的大纲/结构，确认后点
-      <strong>「确认大纲，继续写作」</strong>。
-      宏观规划完成后会停一次；之后每一幕<strong>仅在首次生成该幕章节规划</strong>时再停一次，不会无限循环。
+      <template v-if="status?.chapter_draft_status === 'needs_review'">
+        <strong>章前状态草稿失败</strong>：本章时间、地点、人物或承接动作未能锁定/兑现，需要人工复核。
+      </template>
+      <template v-else-if="status?.constraint_gate_status === 'needs_review'">
+        <strong>统一约束失败</strong>：时间、地点、人物、物件、目标或威胁约束未被兑现，需要人工复核。
+      </template>
+      <template v-else-if="status?.boundary_gate_status === 'needs_review'">
+        <strong>章节承接失败</strong>：后端已自动修订 {{ status?.revision_attempts || 0 }} 次，仍需人工复核本章开头。
+      </template>
+      <template v-else-if="status?.route_gate_status === 'needs_review'">
+        <strong>章节路线承接失败</strong>：本章路线、人物状态或跨幕承接仍需人工复核。
+      </template>
+      <template v-else>
+        <strong>待审阅确认</strong>：请在侧栏查看刚生成的大纲/结构，确认后点
+        <strong>「确认大纲，继续写作」</strong>。
+        宏观规划完成后会停一次；之后每一幕<strong>仅在首次生成该幕章节规划</strong>时再停一次，不会无限循环。
+      </template>
     </n-alert>
 
     <!-- 仅流式正文预览（与监控大盘终端日志分离，避免双 SSE 卡顿） -->
@@ -288,6 +318,62 @@ const tensionColor = computed(() => {
   const t = status.value?.last_chapter_tension || 0
   return t >= 8 ? '#d03050' : t >= 5 ? '#f0a020' : '#18a058'
 })
+
+const boundaryStatusLabel = computed(() => {
+  const s = status.value?.boundary_gate_status
+  if (s === 'auto_revised') return '已自动修订'
+  if (s === 'needs_review') return '需要复核'
+  if (s === 'skipped') return '未触发'
+  return '通过'
+})
+
+const boundaryStatusClass = computed(() => ({
+  'boundary-ok': status.value?.boundary_gate_status == null || status.value?.boundary_gate_status === 'passed',
+  'boundary-revised': status.value?.boundary_gate_status === 'auto_revised',
+  'boundary-review': status.value?.boundary_gate_status === 'needs_review',
+}))
+
+const chapterDraftStatusLabel = computed(() => {
+  const s = status.value?.chapter_draft_status
+  if (s === 'auto_revised') return '已自动修订'
+  if (s === 'needs_review') return '需要复核'
+  if (s === 'skipped') return '未触发'
+  return '已锁定'
+})
+
+const chapterDraftStatusClass = computed(() => ({
+  'boundary-ok': status.value?.chapter_draft_status == null || status.value?.chapter_draft_status === 'passed',
+  'boundary-revised': status.value?.chapter_draft_status === 'auto_revised',
+  'boundary-review': status.value?.chapter_draft_status === 'needs_review',
+}))
+
+const routeStatusLabel = computed(() => {
+  const s = status.value?.route_gate_status
+  if (s === 'auto_revised') return '已自动修订'
+  if (s === 'needs_review') return '需要复核'
+  if (s === 'skipped') return '未触发'
+  return '通过'
+})
+
+const routeStatusClass = computed(() => ({
+  'boundary-ok': status.value?.route_gate_status == null || status.value?.route_gate_status === 'passed',
+  'boundary-revised': status.value?.route_gate_status === 'auto_revised',
+  'boundary-review': status.value?.route_gate_status === 'needs_review',
+}))
+
+const constraintStatusLabel = computed(() => {
+  const s = status.value?.constraint_gate_status
+  if (s === 'auto_revised') return '已自动修订'
+  if (s === 'needs_review') return '需要复核'
+  if (s === 'skipped') return '未触发'
+  return '通过'
+})
+
+const constraintStatusClass = computed(() => ({
+  'boundary-ok': status.value?.constraint_gate_status == null || status.value?.constraint_gate_status === 'passed',
+  'boundary-revised': status.value?.constraint_gate_status === 'auto_revised',
+  'boundary-review': status.value?.constraint_gate_status === 'needs_review',
+}))
 
 // 格式化
 function formatWords(n) {
@@ -679,7 +765,7 @@ onUnmounted(() => {
 
 .ap-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 8px;
   padding: 4px 0;
 }
@@ -712,6 +798,18 @@ onUnmounted(() => {
   font-variant-numeric: tabular-nums;
   line-height: 1.3;
   word-break: break-word;
+}
+
+.boundary-ok {
+  color: #18a058 !important;
+}
+
+.boundary-revised {
+  color: #2080f0 !important;
+}
+
+.boundary-review {
+  color: #d03050 !important;
 }
 
 @media (max-width: 720px) {

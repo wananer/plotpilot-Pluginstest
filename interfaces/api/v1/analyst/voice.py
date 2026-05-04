@@ -2,7 +2,7 @@
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from pydantic import BaseModel, Field
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from application.analyst.services.voice_sample_service import VoiceSampleService
 from interfaces.api.dependencies import (
@@ -143,6 +143,8 @@ class DriftReportResponse(BaseModel):
     drift_alert: bool
     alert_threshold: float
     alert_consecutive: int
+    style_issue: dict[str, Any] = Field(default_factory=dict)
+    constraint_status: str = "passed"
 
 
 class ScoreChapterRequest(BaseModel):
@@ -204,6 +206,8 @@ def get_drift_report(
             drift_alert=report["drift_alert"],
             alert_threshold=report["alert_threshold"],
             alert_consecutive=report["alert_consecutive"],
+            style_issue=report.get("style_issue") or {},
+            constraint_status=report.get("constraint_status") or "passed",
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get drift report: {str(e)}")

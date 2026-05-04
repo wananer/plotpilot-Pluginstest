@@ -6,7 +6,7 @@ from hashlib import sha256
 from typing import Any
 
 
-HARD_CONTEXT_KINDS = {"chapter_state_bridge", "continuity_risk"}
+HARD_CONTEXT_KINDS = {"chapter_boundary_bridge", "chapter_state_bridge", "continuity_risk"}
 STABLE_CONTEXT_KINDS = {"usage_protocol"}
 
 

@@ -1,7 +1,10 @@
 """Deterministic supplementary review rules for Evolution World."""
 from __future__ import annotations
 
+import re
 from typing import Any, Optional
+
+from .continuity import review_continuity_constraints_against_content
 
 PLUGIN_NAME = "world_evolution_core"
 
@@ -16,6 +19,66 @@ REPETITION_PHRASES = [
     "掌心发烫",
     "像是等",
 ]
+
+BOUNDARY_BRIDGE_MARKERS = [
+    "离开",
+    "撤离",
+    "赶往",
+    "沿着",
+    "穿过",
+    "绕过",
+    "绕路",
+    "数小时后",
+    "第二天",
+    "没能进入",
+    "追到",
+    "逃到",
+    "逃离",
+    "冲出",
+    "半小时后",
+    "几分钟后",
+    "被打断",
+    "改道",
+    "退回",
+    "撤到",
+    "返回",
+    "路上",
+    "途中",
+    "坠入",
+    "摔进",
+    "钻进",
+    "爬出",
+    "分头",
+    "汇合",
+]
+BOUNDARY_LOCATION_MARKERS = [
+    "B3",
+    "B3-07",
+    "B5",
+    "C307",
+    "AI核心机房",
+    "核心机房",
+    "礼堂后台",
+    "礼堂",
+    "塔顶",
+    "水箱",
+    "电梯井",
+    "消防梯",
+    "安全屋",
+    "控制室",
+    "锅炉房",
+    "舞台",
+    "后台",
+    "地下大厅",
+    "档案馆侧门",
+    "档案馆",
+    "城市记忆存储站03号节点",
+    "废弃工厂",
+    "回收站",
+    "D区",
+    "中枢大楼",
+]
+CHARACTER_STATE_MARKERS = ("受伤", "流血", "昏迷", "被追", "追踪", "倒计时", "携带", "拿着", "握着", "背包", "口袋", "坠入", "跌入", "被困")
 
 
 def character_is_mentioned(card: dict[str, Any], content: str) -> bool:
@@ -250,38 +313,132 @@ def review_extraction_pollution(cards: list[dict[str, Any]], facts: list[dict[st
     return issues
 
 
-def review_boundary_state(previous_summaries: list[dict[str, Any]], content: str, chapter_number: int) -> list[dict[str, Any]]:
-    if not previous_summaries:
-        return []
-    previous = previous_summaries[-1]
-    carry = previous.get("carry_forward") if isinstance(previous.get("carry_forward"), dict) else {}
-    previous_locations = [str(item) for item in carry.get("last_known_locations") or [] if str(item).strip()]
-    if not previous_locations:
-        return []
-    opening = str(content or "")[:520]
-    if any(location and location in opening for location in previous_locations):
-        if any(token in opening for token in ("才找到", "第一次找到", "重新进入", "又一次进入", "再次抵达", "终于找到")):
-            return [
+class BoundaryContinuityGate:
+    """Validate that a new chapter opening pays off the previous ending."""
+
+    def __init__(self, opening_chars: int = 800) -> None:
+        self.opening_chars = max(500, min(int(opening_chars or 800), 800))
+
+    def check(self, previous_summaries: list[dict[str, Any]], content: str, chapter_number: int) -> dict[str, Any]:
+        issues = self.review(previous_summaries, content, chapter_number)
+        return {
+            "gate": "boundary_continuity",
+            "passed": not any(issue.get("revision_required") for issue in issues),
+            "revision_required": any(issue.get("revision_required") for issue in issues),
+            "opening_window_chars": self.opening_chars,
+            "issues": issues,
+        }
+
+    def review(self, previous_summaries: list[dict[str, Any]], content: str, chapter_number: int) -> list[dict[str, Any]]:
+        if not previous_summaries:
+            return []
+        previous = previous_summaries[-1]
+        carry = previous.get("carry_forward") if isinstance(previous.get("carry_forward"), dict) else {}
+        boundary = carry.get("boundary_state") if isinstance(carry.get("boundary_state"), dict) else {}
+        previous_locations = [str(item) for item in carry.get("last_known_locations") or [] if str(item).strip()]
+        route_state = carry.get("route_state") if isinstance(carry.get("route_state"), dict) else {}
+        if not route_state and isinstance(carry.get("continuity_route_state"), dict):
+            route_state = carry.get("continuity_route_state")
+        character_positions = carry.get("character_positions") if isinstance(carry.get("character_positions"), dict) else {}
+        ending_location = str(boundary.get("ending_location") or "").strip()
+        if ending_location:
+            previous_locations = _dedupe([ending_location, *previous_locations])
+        route_end = str(route_state.get("end_location") or "").strip()
+        if route_end:
+            previous_locations = _dedupe([route_end, *previous_locations])
+        if not previous_locations and not boundary:
+            return []
+
+        opening = str(content or "")[: self.opening_chars]
+        issues: list[dict[str, Any]] = []
+        if any(location and location in opening for location in previous_locations):
+            if any(token in opening for token in ("才找到", "第一次找到", "重新进入", "又一次进入", "再次抵达", "终于找到")):
+                issues.append(
+                    _boundary_issue(
+                        "evolution_boundary_location_jump",
+                        chapter_number,
+                        "上一章结尾已将角色停在同一地点，本章开头又写成重新/首次抵达，疑似章节首尾回滚。",
+                        previous,
+                        opening,
+                    )
+                )
+
+        opening_locations = _extract_boundary_locations(opening)
+        changed_location = bool(previous_locations and opening_locations and not set(previous_locations) & set(opening_locations))
+        if changed_location and not _has_boundary_bridge(opening, previous_locations=previous_locations, current_locations=opening_locations):
+            issues.append(
                 _boundary_issue(
+                    "evolution_route_missing_transition",
                     chapter_number,
-                    "上一章结尾已将角色停在同一地点，本章开头又写成重新/首次抵达，疑似章节首尾回滚。",
+                    f"上一章终点在 {', '.join(previous_locations[:3])}，本章开头切换地点但缺少明确移动/跳时桥段。",
                     previous,
                     opening,
                 )
-            ]
-        return []
-    if any(token in opening for token in ("回到", "来到", "抵达", "进入", "走进")) and not any(
-        token in opening for token in ("后来", "数小时后", "第二天", "转场", "离开", "赶往", "沿着", "穿过", "绕过")
-    ):
-        return [
-            _boundary_issue(
-                chapter_number,
-                f"上一章终点在 {', '.join(previous_locations[:3])}，本章开头切换地点但缺少明确移动/跳时桥段。",
-                previous,
-                opening,
             )
-        ]
-    return []
+        elif not opening_locations and previous_locations and any(token in opening for token in ("回到", "来到", "抵达", "进入", "走进")) and not _has_boundary_bridge(opening, previous_locations=previous_locations):
+            issues.append(
+                _boundary_issue(
+                    "evolution_route_missing_transition",
+                    chapter_number,
+                    f"上一章终点在 {', '.join(previous_locations[:3])}，本章开头有抵达/进入动作但未交代从上一终点如何过渡。",
+                    previous,
+                    opening,
+                )
+            )
+
+        if route_state and _route_state_requires_bridge(route_state, opening, previous_locations, opening_locations):
+            issues.append(
+                _boundary_issue(
+                    "evolution_route_missing_transition",
+                    chapter_number,
+                    "上一章路线状态要求交代移动路径、耗时、同行/分离人物或威胁变化，但本章开头没有可见路线桥。",
+                    previous,
+                    opening,
+                )
+            )
+
+        character_issue = _character_state_issue(character_positions, opening)
+        if character_issue:
+            issues.append(
+                _boundary_issue(
+                    "evolution_character_state_drop",
+                    chapter_number,
+                    character_issue,
+                    previous,
+                    opening,
+                )
+            )
+
+        cliffhanger = str(boundary.get("unresolved_cliffhanger") or "").strip()
+        threat = str(boundary.get("immediate_threat") or "").strip()
+        if (cliffhanger or threat) and not _boundary_terms_handled(opening, cliffhanger or threat):
+            issues.append(
+                _boundary_issue(
+                    "evolution_unresolved_cliffhanger_skip",
+                    chapter_number,
+                    "上一章留下即时威胁/尾钩，但本章开头没有兑现、撤离、被打断或解释后果。",
+                    previous,
+                    opening,
+                )
+            )
+
+        goal = str(boundary.get("active_goal") or "").strip()
+        if goal and not _boundary_terms_handled(opening, goal) and not _has_boundary_bridge(opening, previous_locations=previous_locations, current_locations=opening_locations):
+            issues.append(
+                _boundary_issue(
+                    "evolution_boundary_goal_skip",
+                    chapter_number,
+                    "上一章结尾目标未在本章开头被继续、失败、中断或改道，读者会感到行动链断裂。",
+                    previous,
+                    opening,
+                )
+            )
+        issues.extend(review_continuity_constraints_against_content(previous, opening, chapter_number, opening_chars=self.opening_chars))
+        return issues[:6]
+
+
+def review_boundary_state(previous_summaries: list[dict[str, Any]], content: str, chapter_number: int) -> list[dict[str, Any]]:
+    return BoundaryContinuityGate().review(previous_summaries, content, chapter_number)
 
 
 def review_route_conflicts(conflicts: list[dict[str, Any]], chapter_number: int) -> list[dict[str, Any]]:
@@ -338,6 +495,9 @@ def _issue_family(issue_type: str) -> str:
     text = str(issue_type or "")
     for marker, family in (
         ("route", "route"),
+        ("entity_identity", "entity_identity"),
+        ("time_pressure", "time_pressure"),
+        ("constraint", "continuity_constraint"),
         ("boundary", "boundary_state"),
         ("palette", "personality_palette"),
         ("pollution", "entity_pollution"),
@@ -386,23 +546,143 @@ def _extract_short_terms(value: Any) -> list[str]:
     return terms[:6]
 
 
-def _boundary_issue(chapter_number: int, description: str, previous: dict[str, Any], opening: str) -> dict[str, Any]:
+def _boundary_issue(issue_type: str, chapter_number: int, description: str, previous: dict[str, Any], opening: str) -> dict[str, Any]:
     issue = review_issue(
-        "evolution_boundary_state",
-        "warning",
+        issue_type,
+        "critical",
         description,
         chapter_number,
-        "下一章开头必须承接上一章终点；若跳时空，先补一句转场、移动路径或视角桥接。",
+        "必须先重写本章开头100-300字：承接上一章终点；若跳时空，先补移动、撤离、失败、跳时或视角桥接。",
     )
     ending = previous.get("ending_state") if isinstance(previous.get("ending_state"), dict) else {}
+    carry = previous.get("carry_forward") if isinstance(previous.get("carry_forward"), dict) else {}
+    route_state = carry.get("route_state") if isinstance(carry.get("route_state"), dict) else {}
+    if not route_state and isinstance(carry.get("continuity_route_state"), dict):
+        route_state = carry.get("continuity_route_state")
+    character_positions = carry.get("character_positions") if isinstance(carry.get("character_positions"), dict) else {}
+    previous_ending = str(ending.get("excerpt") or "")[:220]
+    current_opening = str(opening or "")[:220]
+    bridge_type = _required_bridge_type(issue_type, opening)
     issue["evidence"] = [
         {
             "previous_chapter": previous.get("chapter_number"),
-            "previous_ending": str(ending.get("excerpt") or "")[:220],
-            "current_opening": str(opening or "")[:220],
+            "previous_ending": previous_ending,
+            "current_opening": current_opening,
         }
     ]
+    issue["gate"] = "boundary_continuity"
+    issue["revision_required"] = True
+    issue["revision_mode"] = "manual_or_host_revision_required"
+    issue["opening_revision_brief"] = {
+        "target": "rewrite_opening_100_300_chars",
+        "previous_chapter": previous.get("chapter_number"),
+        "previous_ending_evidence": previous_ending,
+        "current_opening_problem": description,
+        "required_bridge_type": bridge_type,
+        "route_state": route_state,
+        "character_positions": character_positions,
+        "rewrite_requirements": [
+            "开头先处理上一章结尾地点、尾钩、即时威胁和最后动作。",
+            "同时兑现上一章路线状态：起点/终点、移动方式、耗时、同行或分离人物。",
+            "若有人受伤、被追踪、携带关键物件或处于倒计时，开头必须交代其状态变化。",
+            f"采用{bridge_type}，让读者看见因果桥后再进入本章新场景。",
+            "不要重置为首次抵达；不要跳过未完成目标或句子未完的尾钩。",
+        ],
+        "preserve_after_opening": "保留当前章节后续有效内容，只替换或补写开头承接段。",
+    }
     return issue
+
+
+def _extract_boundary_locations(text: str) -> list[str]:
+    found = [marker for marker in BOUNDARY_LOCATION_MARKERS if marker in text]
+    generic = re.findall(r"[\u4e00-\u9fffA-Za-z0-9_-]{0,8}(?:机房|礼堂|后台|塔顶|水箱|电梯井|消防梯|安全屋|控制室|锅炉房|走廊|通道|门口|舞台|支柱)", text or "")
+    return _dedupe([*found, *generic])[:8]
+
+
+def _route_state_requires_bridge(route_state: dict[str, Any], opening: str, previous_locations: list[str], current_locations: list[str]) -> bool:
+    end_location = str(route_state.get("end_location") or "").strip()
+    if not end_location:
+        return False
+    if end_location in str(opening or ""):
+        return False
+    if _has_boundary_bridge(opening, previous_locations=previous_locations, current_locations=current_locations):
+        return False
+    if any(location and location in str(opening or "") for location in previous_locations[:4]):
+        return False
+    if any(token in str(opening or "") for token in ("回到", "来到", "抵达", "进入", "推开", "走进", "站在")):
+        return True
+    return bool(current_locations)
+
+
+def _character_state_issue(character_positions: dict[str, Any], opening: str) -> str:
+    if not isinstance(character_positions, dict) or not character_positions:
+        return ""
+    text = str(opening or "")
+    missing = []
+    stateful = []
+    for name, state in list(character_positions.items())[:4]:
+        if str(name) and str(name) not in text:
+            missing.append(str(name))
+        state_text = str(state.get("state") or "") if isinstance(state, dict) else str(state or "")
+        if any(marker in state_text for marker in CHARACTER_STATE_MARKERS):
+            if not any(marker in text for marker in CHARACTER_STATE_MARKERS) and not any(term in text for term in _split_terms(state_text)[:6]):
+                stateful.append(str(name))
+    if stateful:
+        return f"上一章人物状态（伤势、携带物、追踪或被困）未在本章开头交代：{', '.join(stateful[:4])}。"
+    if len(missing) >= 2 and not _has_boundary_bridge(text):
+        return f"上一章在场人物无交代地从本章开头消失：{', '.join(missing[:4])}。"
+    return ""
+
+
+def _has_boundary_bridge(text: str, *, previous_locations: Optional[list[str]] = None, current_locations: Optional[list[str]] = None) -> bool:
+    value = str(text or "")
+    previous_locations = previous_locations or []
+    current_locations = current_locations or []
+    if any(marker in value for marker in BOUNDARY_BRIDGE_MARKERS):
+        return True
+    movement = r"(?:赶往|抵达|来到|进入|回到|转入|撤到|退到|逃到|绕路到|转移到|移动到)"
+    if re.search(rf"从.{{1,32}}{movement}.{{1,32}}", value):
+        return True
+    if re.search(r"(?:沿着|穿过|绕过|经由|顺着).{1,32}(?:来到|抵达|进入|回到|赶往|撤到|退到).{1,32}", value):
+        return True
+    if previous_locations and current_locations:
+        previous_pattern = "|".join(re.escape(item) for item in previous_locations[:4] if item)
+        current_pattern = "|".join(re.escape(item) for item in current_locations[:4] if item)
+        if previous_pattern and current_pattern and re.search(rf"(?:从|离开|撤离|退出).{{0,16}}(?:{previous_pattern}).{{0,40}}(?:到|赶往|抵达|进入|转入|撤到).{{0,16}}(?:{current_pattern})", value):
+            return True
+    if re.search(r"(?:几分钟|半小时|数小时|一夜|第二天|天亮后|夜色压下来).{0,24}(?:后|之后|过去|抵达|回到|来到)", value):
+        return True
+    if re.search(r"(?:没能|失败|中断|被打断|被迫|不得不).{0,24}(?:离开|撤离|改道|退回|转移)", value):
+        return True
+    return False
+
+
+def _boundary_terms_handled(opening: str, value: str) -> bool:
+    text = str(opening or "")
+    terms = [term for term in _split_terms(value) if len(term) >= 2]
+    if not terms:
+        return _has_boundary_bridge(text)
+    if any(term in text for term in terms[:8]):
+        return True
+    consequence_markers = ("蓝光", "爆发", "后果", "反噬", "门开", "门后", "呼吸声", "徽章", "录音", "封条")
+    if any(marker in text for marker in consequence_markers) and any(marker in text for marker in ("撤离", "拽离", "拉开", "退开", "逃离", "被迫", "中断", "爆发")):
+        return True
+    return _has_boundary_bridge(text) and any(marker in text for marker in ("失败", "没能", "中断", "撤离", "被迫", "放弃", "改道", "回头", "拽离", "退开"))
+
+
+def _required_bridge_type(issue_type: str, opening: str) -> str:
+    text = str(opening or "")
+    if issue_type == "evolution_route_missing_transition":
+        return "路线桥接/耗时桥接/撤离桥接"
+    if issue_type == "evolution_character_state_drop":
+        return "人物状态承接/分离交代"
+    if issue_type == "evolution_unresolved_cliffhanger_skip":
+        return "原地续接/撤离/被打断"
+    if "撤离" in text or "逃离" in text or "退回" in text:
+        return "撤离桥接"
+    if issue_type == "evolution_boundary_goal_skip":
+        return "目标继续/失败/改道"
+    return "移动桥接/视角桥接"
 
 
 def _sample_phrase_context(content: str, phrase: str) -> str:
@@ -447,6 +727,18 @@ def _looks_like_palette_drift(content: str) -> bool:
 
 def _as_strings(items: Any) -> list[str]:
     return [str(item or "").strip() for item in (items or []) if str(item or "").strip()]
+
+
+def _dedupe(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result = []
+    for item in items:
+        value = str(item or "").strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
+    return result
 
 
 def _mentions_key_terms(content: str, phrase: str) -> bool:

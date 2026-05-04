@@ -15,6 +15,14 @@ export interface DriftReportResponse {
   drift_alert: boolean
   alert_threshold: number
   alert_consecutive: number
+  style_issue?: {
+    constraint_type?: string
+    severity?: string
+    confidence?: number
+    repair_hint?: string
+    evidence?: Array<{ chapter_number?: number; similarity_score?: number }>
+  }
+  constraint_status?: string
 }
 
 export interface ScoreChapterResponse {

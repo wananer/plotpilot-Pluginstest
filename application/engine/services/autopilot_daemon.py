@@ -24,6 +24,7 @@ from application.engine.services.context_builder import ContextBuilder
 from application.engine.services.background_task_service import BackgroundTaskService, TaskType
 from application.workflows.auto_novel_generation_workflow import AutoNovelGenerationWorkflow
 from application.engine.services.chapter_aftermath_pipeline import ChapterAftermathPipeline
+from application.engine.services.hosted_write_service import HostedWriteService
 from application.engine.services.style_constraint_builder import build_style_summary
 from application.ai.llm_audit import llm_audit_context
 from application.ai.llm_output_sanitize import strip_reasoning_artifacts
@@ -31,6 +32,14 @@ from application.ai.llm_retry_policy import LLM_MAX_TOTAL_ATTEMPTS
 from application.workflows.beat_continuation import format_prior_draft_for_prompt
 from domain.novel.value_objects.chapter_id import ChapterId
 from domain.novel.value_objects.word_count import WordCount
+from plugins.world_evolution_core.continuity import (
+    build_chapter_execution_draft,
+    render_chapter_execution_draft,
+    repair_chapter_execution_draft,
+    review_chapter_execution_draft,
+    review_execution_draft_against_content,
+)
+from plugins.world_evolution_core.repositories import EvolutionWorldRepository
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +104,13 @@ class AutopilotDaemon:
                 chapter_repository=chapter_repository,
                 foreshadowing_repository=foreshadowing_repository,
             )
+        self.boundary_gate = HostedWriteService(
+            workflow=chapter_workflow,
+            chapter_service=None,
+            novel_service=None,
+            llm_service=llm_service,
+        )
+        self.evolution_repository = EvolutionWorldRepository()
 
     def run_forever(self):
         """守护进程主循环（事务最小化原则）"""
@@ -203,6 +219,260 @@ class AutopilotDaemon:
         self._merge_autopilot_status_from_db(novel)
         self.novel_repository.save(novel)
 
+    def _merge_style_constraint_issue(self, novel: Novel, drift_result: Dict[str, Any]) -> None:
+        drift_too_high = bool(drift_result.get("drift_alert", False))
+        style_constraint_issue = drift_result.get("constraint_issue") if isinstance(drift_result.get("constraint_issue"), dict) else {}
+        style_constraint_status = str(drift_result.get("constraint_status") or "").strip()
+        if not style_constraint_issue:
+            return
+
+        style_audit_issue = {
+            "issue_type": "evolution_style_drift",
+            "constraint_type": style_constraint_issue.get("constraint_type") or "narrative_voice",
+            "severity": style_constraint_issue.get("severity") or ("needs_review" if drift_too_high else "warning"),
+            "repair_hint": style_constraint_issue.get("repair_hint"),
+            "confidence": style_constraint_issue.get("confidence"),
+            "evidence": style_constraint_issue.get("evidence") or [],
+            "source": "chapter_aftermath_pipeline.voice_drift",
+        }
+        existing_audit_issues = list(getattr(novel, "last_audit_issues", []) or [])
+        novel.last_audit_issues = [issue for issue in existing_audit_issues if issue.get("issue_type") != "evolution_style_drift"]
+        novel.last_audit_issues.append(style_audit_issue)
+
+        if style_constraint_status == "needs_review":
+            novel.last_constraint_issue = style_audit_issue
+            novel.constraint_gate_status = "needs_review"
+        elif getattr(novel, "constraint_gate_status", None) not in {"needs_review", "auto_revised"}:
+            novel.constraint_gate_status = "passed"
+
+    def _record_boundary_gate_events(
+        self,
+        novel: Novel,
+        chapter_number: int,
+        events: list[dict[str, Any]],
+    ) -> bool:
+        """保存章节边界 Gate 快照；返回 True 表示必须阻断自动驾驶。"""
+        attempts = 0
+        for event in events:
+            if event.get("type") == "boundary_revision_start":
+                attempts = max(attempts, int(event.get("attempt") or 0))
+            elif event.get("type") in {"boundary_revision_applied", "boundary_revision_required"}:
+                attempts = max(attempts, int(event.get("attempts") or 0))
+        novel.revision_attempts = attempts
+
+        required = next(
+            (event for event in reversed(events) if event.get("type") == "boundary_revision_required"),
+            None,
+        )
+        if required:
+            route_issue = self._route_issue_from_boundary_event(required)
+            novel.boundary_gate_status = "needs_review"
+            novel.constraint_gate_status = "needs_review"
+            novel.last_boundary_issue = {
+                "chapter": chapter_number,
+                "reason": required.get("reason"),
+                "revision_mode": required.get("revision_mode"),
+                "opening_revision_brief": required.get("opening_revision_brief") or {},
+                "remaining_issues": required.get("remaining_issues") or [],
+                "message": required.get("message"),
+            }
+            novel.last_constraint_issue = dict(novel.last_boundary_issue)
+            novel.last_constraint_issue["remaining_constraint_issues"] = self._constraint_issues_from_event(required)
+            if route_issue:
+                novel.route_gate_status = "needs_review"
+                novel.last_route_issue = route_issue
+            return True
+
+        applied = next(
+            (event for event in reversed(events) if event.get("type") == "boundary_revision_applied"),
+            None,
+        )
+        if applied:
+            route_issue = self._route_issue_from_boundary_event(applied)
+            novel.boundary_gate_status = "auto_revised"
+            novel.constraint_gate_status = "auto_revised"
+            novel.last_boundary_issue = {
+                "chapter": chapter_number,
+                "issue_type": applied.get("issue_type"),
+                "auto_revised_reason": applied.get("auto_revised_reason"),
+                "before_opening": applied.get("before_opening"),
+                "after_opening_digest": applied.get("after_opening_digest"),
+                "remaining_risk": bool(applied.get("remaining_risk")),
+                "replaced_opening_chars": applied.get("replaced_opening_chars"),
+                "rewritten_opening_chars": applied.get("rewritten_opening_chars"),
+            }
+            history = list(getattr(novel, "auto_revision_history", []) or [])
+            revision_item = {
+                "chapter": chapter_number,
+                "issue_type": applied.get("issue_type"),
+                "constraint_type": applied.get("constraint_type"),
+                "auto_revised_reason": applied.get("auto_revised_reason"),
+                "before_opening": applied.get("before_opening"),
+                "after_opening_digest": applied.get("after_opening_digest"),
+                "remaining_risk": bool(applied.get("remaining_risk")),
+                "attempts": applied.get("attempts"),
+            }
+            history.append(revision_item)
+            novel.auto_revision_history = history[-20:]
+            constraint_history = list(getattr(novel, "constraint_revision_history", []) or [])
+            constraint_history.append(revision_item)
+            novel.constraint_revision_history = constraint_history[-20:]
+            novel.last_constraint_issue = dict(novel.last_boundary_issue)
+            if route_issue:
+                novel.route_gate_status = "auto_revised"
+                novel.last_route_issue = route_issue
+            else:
+                novel.route_gate_status = "passed"
+                novel.last_route_issue = {}
+            return False
+
+        novel.boundary_gate_status = "passed"
+        novel.last_boundary_issue = {}
+        novel.route_gate_status = "passed"
+        novel.last_route_issue = {}
+        novel.constraint_gate_status = "passed"
+        novel.last_constraint_issue = {}
+        return False
+
+    def _constraint_issues_from_event(self, event: dict[str, Any]) -> list[dict[str, Any]]:
+        issues = []
+        for item in event.get("remaining_issues") or []:
+            if isinstance(item, dict) and (item.get("constraint_type") or "constraint" in str(item.get("issue_type") or "")):
+                issues.append(item)
+        brief = event.get("opening_revision_brief") if isinstance(event.get("opening_revision_brief"), dict) else {}
+        for item in brief.get("continuity_constraints") or []:
+            if isinstance(item, dict):
+                issues.append({"constraint_type": item.get("constraint_type"), "constraint": item})
+        return issues[:6]
+
+    def _route_issue_from_boundary_event(self, event: dict[str, Any]) -> dict[str, Any]:
+        issue_type = str(event.get("issue_type") or "")
+        if "route" not in issue_type and "character_state" not in issue_type:
+            remaining = event.get("remaining_issues") or []
+            issue_type = ""
+            for item in remaining:
+                if isinstance(item, dict) and ("route" in str(item.get("issue_type") or "") or "character_state" in str(item.get("issue_type") or "")):
+                    issue_type = str(item.get("issue_type") or "")
+                    break
+        if "route" not in issue_type and "character_state" not in issue_type:
+            return {}
+        brief = event.get("opening_revision_brief") if isinstance(event.get("opening_revision_brief"), dict) else {}
+        return {
+            "issue_type": issue_type,
+            "reason": event.get("reason") or event.get("auto_revised_reason") or event.get("message"),
+            "revision_mode": event.get("revision_mode"),
+            "opening_revision_brief": brief,
+            "remaining_risk": bool(event.get("remaining_risk")),
+        }
+
+    def _previous_chapter_summary(self, novel_id: str, chapter_number: int) -> Optional[dict[str, Any]]:
+        try:
+            summaries = self.evolution_repository.list_chapter_summaries(
+                novel_id,
+                before_chapter=chapter_number,
+                limit=1,
+            )
+        except Exception as exc:
+            logger.warning("[%s] 读取上一章摘要失败（chapter=%s）：%s", novel_id, chapter_number, exc)
+            return None
+        return summaries[-1] if summaries else None
+
+    def _prepare_chapter_execution_draft(
+        self,
+        novel: Novel,
+        chapter_number: int,
+        outline: str,
+    ) -> tuple[Optional[dict[str, Any]], bool]:
+        """Build and gate the pre-generation chapter state draft.
+
+        Returns (draft, should_pause).
+        """
+        novel_id = novel.novel_id.value
+        previous_summary = self._previous_chapter_summary(novel_id, chapter_number)
+        draft = build_chapter_execution_draft(novel_id, chapter_number, outline, previous_summary)
+        issues = review_chapter_execution_draft(previous_summary, draft, chapter_number)
+        if issues:
+            draft = repair_chapter_execution_draft(draft, previous_summary)
+            issues = review_chapter_execution_draft(previous_summary, draft, chapter_number)
+            if issues:
+                novel.chapter_draft_status = "needs_review"
+                novel.constraint_gate_status = "needs_review"
+                novel.last_chapter_draft_issue = {
+                    "chapter": chapter_number,
+                    "reason": "chapter_execution_draft_conflict",
+                    "issues": issues,
+                    "draft": draft,
+                }
+                novel.last_constraint_issue = dict(novel.last_chapter_draft_issue)
+                return draft, True
+            novel.chapter_draft_status = "auto_revised"
+            novel.constraint_gate_status = "auto_revised"
+            novel.last_chapter_draft_issue = {
+                "chapter": chapter_number,
+                "reason": "chapter_execution_draft_auto_revised",
+                "draft": draft,
+            }
+            novel.last_constraint_issue = dict(novel.last_chapter_draft_issue)
+            return draft, False
+
+        novel.chapter_draft_status = "passed"
+        novel.last_chapter_draft_issue = {}
+        if getattr(novel, "constraint_gate_status", None) not in {"auto_revised", "needs_review"}:
+            novel.constraint_gate_status = "passed"
+            novel.last_constraint_issue = {}
+        return draft, False
+
+    def _record_execution_draft_content_gate(
+        self,
+        novel: Novel,
+        chapter_number: int,
+        draft: Optional[dict[str, Any]],
+        content: str,
+    ) -> bool:
+        if not draft:
+            return False
+        issues = review_execution_draft_against_content(draft, content, chapter_number)
+        if not issues:
+            if getattr(novel, "chapter_draft_status", None) not in {"auto_revised"}:
+                novel.chapter_draft_status = "passed"
+                novel.last_chapter_draft_issue = {}
+            if getattr(novel, "constraint_gate_status", None) not in {"auto_revised", "needs_review"}:
+                novel.constraint_gate_status = "passed"
+            return False
+        novel.chapter_draft_status = "needs_review"
+        novel.constraint_gate_status = "needs_review"
+        novel.last_chapter_draft_issue = {
+            "chapter": chapter_number,
+            "reason": "chapter_execution_draft_unfulfilled",
+            "issues": issues,
+            "draft": draft,
+        }
+        novel.last_constraint_issue = dict(novel.last_chapter_draft_issue)
+        return True
+
+    def _attach_execution_draft_to_summary(
+        self,
+        novel_id: str,
+        chapter_number: int,
+        draft: Optional[dict[str, Any]],
+    ) -> None:
+        if not draft:
+            return
+        try:
+            summaries = self.evolution_repository.list_chapter_summaries(
+                novel_id,
+                before_chapter=chapter_number + 1,
+                limit=1,
+            )
+            summary = summaries[-1] if summaries else None
+            if not summary or int(summary.get("chapter_number") or 0) != chapter_number:
+                return
+            summary = dict(summary)
+            summary["execution_draft"] = draft
+            self.evolution_repository.save_chapter_summary(novel_id, chapter_number, summary)
+        except Exception as exc:
+            logger.warning("[%s] 保存章前状态草稿到章节摘要失败（chapter=%s）：%s", novel_id, chapter_number, exc)
+
     async def _process_novel(self, novel: Novel):
         """处理单个小说（全流程）"""
         try:
@@ -226,6 +496,26 @@ class AutopilotDaemon:
                 logger.info(f"[{novel.novel_id}] 🔍 开始审计")
                 await self._handle_auditing(novel)
             elif novel.current_stage == NovelStage.PAUSED_FOR_REVIEW:
+                if getattr(novel, "chapter_draft_status", None) == "needs_review":
+                    logger.warning(f"[{novel.novel_id}] 章前状态草稿待人工复核，全自动模式不得跳过")
+                    novel.autopilot_status = AutopilotStatus.STOPPED
+                    self._save_novel_state(novel)
+                    return
+                if getattr(novel, "boundary_gate_status", None) == "needs_review":
+                    logger.warning(f"[{novel.novel_id}] 章节边界连续性待人工复核，全自动模式不得跳过")
+                    novel.autopilot_status = AutopilotStatus.STOPPED
+                    self._save_novel_state(novel)
+                    return
+                if getattr(novel, "route_gate_status", None) == "needs_review":
+                    logger.warning(f"[{novel.novel_id}] 章节路线/人物状态待人工复核，全自动模式不得跳过")
+                    novel.autopilot_status = AutopilotStatus.STOPPED
+                    self._save_novel_state(novel)
+                    return
+                if getattr(novel, "constraint_gate_status", None) == "needs_review":
+                    logger.warning(f"[{novel.novel_id}] 统一连续性约束待人工复核，全自动模式不得跳过")
+                    novel.autopilot_status = AutopilotStatus.STOPPED
+                    self._save_novel_state(novel)
+                    return
                 # 全自动模式：跳过审阅，直接进入下一阶段
                 if getattr(novel, 'auto_approve_mode', False):
                     logger.info(f"[{novel.novel_id}] 🚀 全自动模式：跳过人工审阅")
@@ -559,6 +849,26 @@ class AutopilotDaemon:
         if needs_buffer:
             outline = f"【缓冲章：日常过渡】{outline}。主角战后休整，与配角闲聊，展示收获，节奏轻松。"
 
+        execution_draft, should_pause_for_draft = self._prepare_chapter_execution_draft(
+            novel,
+            chapter_num,
+            outline,
+        )
+        if should_pause_for_draft:
+            novel.current_stage = NovelStage.PAUSED_FOR_REVIEW
+            novel.autopilot_status = AutopilotStatus.STOPPED
+            novel.audit_progress = None
+            self._flush_novel(novel)
+            logger.warning(
+                "[%s] 第 %s 章章前状态草稿 Gate 未通过，已暂停自动驾驶",
+                novel.novel_id,
+                chapter_num,
+            )
+            return
+        draft_block = render_chapter_execution_draft(execution_draft or {})
+        if draft_block:
+            outline = f"{draft_block}\n\n【章节大纲】\n{outline}"
+
         logger.info(f"[{novel.novel_id}] 📖 开始写第 {chapter_num} 章：{outline[:60]}...")
         logger.info(f"[{novel.novel_id}]    进度: {current_chapters}/{target_chapters} 章（目标）")
 
@@ -744,10 +1054,60 @@ class AutopilotDaemon:
             self._flush_novel(novel)
             return
 
+        if chapter_content.strip():
+            should_pause_for_draft_content = self._record_execution_draft_content_gate(
+                novel,
+                chapter_num,
+                execution_draft,
+                chapter_content,
+            )
+            if should_pause_for_draft_content:
+                await self._upsert_chapter_content(novel, next_chapter_node, chapter_content, status="draft")
+                novel.current_stage = NovelStage.PAUSED_FOR_REVIEW
+                novel.autopilot_status = AutopilotStatus.STOPPED
+                novel.audit_progress = None
+                self._flush_novel(novel)
+                logger.warning(
+                    "[%s] 第 %s 章正文未兑现章前状态草稿，已保存草稿并暂停自动驾驶",
+                    novel.novel_id,
+                    chapter_num,
+                )
+                return
+            novel.audit_progress = "boundary_continuity"
+            self._flush_novel(novel)
+            chapter_content, boundary_events = await self.boundary_gate._maybe_revise_boundary_opening(
+                novel.novel_id.value,
+                chapter_num,
+                chapter_content,
+            )
+            should_pause_for_boundary = self._record_boundary_gate_events(
+                novel,
+                chapter_num,
+                boundary_events,
+            )
+            if should_pause_for_boundary:
+                await self._upsert_chapter_content(novel, next_chapter_node, chapter_content, status="draft")
+                novel.current_stage = NovelStage.PAUSED_FOR_REVIEW
+                novel.autopilot_status = AutopilotStatus.STOPPED
+                novel.audit_progress = None
+                self._flush_novel(novel)
+                logger.warning(
+                    "[%s] 第 %s 章边界连续性 Gate 未通过，已保存草稿并暂停自动驾驶",
+                    novel.novel_id,
+                    chapter_num,
+                )
+                return
+            self._flush_novel(novel)
+
         if use_wf and chapter_content.strip():
             try:
                 await self.chapter_workflow.post_process_generated_chapter(
                     novel.novel_id.value, chapter_num, outline, chapter_content, scene_director=None
+                )
+                self._attach_execution_draft_to_summary(
+                    novel.novel_id.value,
+                    chapter_num,
+                    execution_draft,
                 )
                 logger.info(f"[{novel.novel_id}]    ✅ post_process_generated_chapter 完成")
             except Exception as e:
@@ -887,7 +1247,7 @@ class AutopilotDaemon:
         novel.last_audit_foreshadow_stored = bool(drift_result.get("foreshadow_stored", False))
         novel.last_audit_triples_extracted = bool(drift_result.get("triples_extracted", False))
         novel.last_audit_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-
+        self._merge_style_constraint_issue(novel, drift_result)
         drift_too_high = bool(drift_result.get("drift_alert", False))
         similarity_score = drift_result.get("similarity_score")
         similarity_below_threshold = self._similarity_below_warning_threshold(similarity_score)

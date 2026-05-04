@@ -254,3 +254,12 @@ class TestVoiceAPI:
         # Assert - POV-specific fingerprint is independent and falls back to an empty profile.
         assert response.status_code == 200
         assert response.json()["sample_count"] == 0
+
+    def test_drift_report_includes_unified_constraint_fields(self, client, test_novel_id):
+        response = client.get(f"/api/v1/novels/{test_novel_id}/voice/drift")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert "style_issue" in data
+        assert "constraint_status" in data
+        assert data["constraint_status"] == "passed"

@@ -344,6 +344,7 @@ def get_hosted_write_service() -> HostedWriteService:
         get_chapter_service(),
         get_novel_service(),
         chapter_aftermath_pipeline=get_chapter_aftermath_pipeline(),
+        llm_service=get_llm_service(),
     )
 
 

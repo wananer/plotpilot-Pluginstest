@@ -123,6 +123,33 @@ def _autopilot_status_zh(status: str) -> str:
     }.get(status, status)
 
 
+def _boundary_status_payload(novel) -> Dict[str, Any]:
+    status = getattr(novel, "boundary_gate_status", None) or "passed"
+    issue = getattr(novel, "last_boundary_issue", None) or {}
+    attempts = int(getattr(novel, "revision_attempts", 0) or 0)
+    draft_status = getattr(novel, "chapter_draft_status", None) or "passed"
+    draft_issue = getattr(novel, "last_chapter_draft_issue", None) or {}
+    route_status = getattr(novel, "route_gate_status", None) or "passed"
+    route_issue = getattr(novel, "last_route_issue", None) or {}
+    auto_revision_history = getattr(novel, "auto_revision_history", None) or []
+    constraint_status = getattr(novel, "constraint_gate_status", None) or status
+    constraint_issue = getattr(novel, "last_constraint_issue", None) or issue
+    constraint_revision_history = getattr(novel, "constraint_revision_history", None) or auto_revision_history
+    return {
+        "boundary_gate_status": status,
+        "last_boundary_issue": issue,
+        "revision_attempts": attempts,
+        "chapter_draft_status": draft_status,
+        "last_chapter_draft_issue": draft_issue,
+        "route_gate_status": route_status,
+        "last_route_issue": route_issue,
+        "auto_revision_history": auto_revision_history[-10:],
+        "constraint_gate_status": constraint_status,
+        "last_constraint_issue": constraint_issue,
+        "constraint_revision_history": constraint_revision_history[-10:],
+    }
+
+
 class StartRequest(BaseModel):
     max_auto_chapters: Optional[int] = 9999  # 保护上限，默认几乎无限制，由 target_chapters 控制实际完成点
 
@@ -251,6 +278,7 @@ async def get_autopilot_status(novel_id: str):
             "issues": getattr(novel, "last_audit_issues", []) or [],
         }
 
+    boundary_payload = _boundary_status_payload(novel)
     return {
         "autopilot_status": novel.autopilot_status.value,
         "current_stage": novel.current_stage.value,
@@ -275,6 +303,7 @@ async def get_autopilot_status(novel_id: str):
         "auto_approve_mode": getattr(novel, "auto_approve_mode", False),
         "last_chapter_audit": last_chapter_audit,
         "audit_progress": getattr(novel, "audit_progress", None),  # 审计进度指示
+        **boundary_payload,
     }
 
 
@@ -772,6 +801,7 @@ async def autopilot_events(novel_id: str):
                     "target_chapters": novel.target_chapters,
                     "needs_review": novel.current_stage.value == "paused_for_review",
                     "consecutive_error_count": getattr(novel, "consecutive_error_count", 0),
+                    **_boundary_status_payload(novel),
                 }
                 yield f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
 

@@ -1705,7 +1705,10 @@ async def test_boundary_state_issue_solidifies_capsule(tmp_path):
             "payload": {"content": "沈砚第一次找到C307，重新进入房间。"},
         }
     )
-    assert any(item["issue_type"] == "evolution_boundary_state" for item in review["data"]["issues"])
+    boundary_issues = [item for item in review["data"]["issues"] if item["issue_type"] == "evolution_boundary_location_jump"]
+    assert boundary_issues
+    assert boundary_issues[0]["revision_required"] is True
+    assert "opening_revision_brief" in boundary_issues[0]
 
     service.after_chapter_review(
         {
@@ -2614,6 +2617,29 @@ def test_diagnostics_degrades_when_route_map_fails(tmp_path):
     assert route_risks
     assert route_risks[0]["affected_feature"] == "route_conflict"
     assert "route graph corrupted" in json.dumps(route_risks, ensure_ascii=False)
+
+
+def test_diagnostics_summary_separates_continuity_and_style_counts():
+    from plugins.world_evolution_core.diagnostics import _risk_summary
+
+    summary = _risk_summary(
+        [
+            {
+                "severity": "critical",
+                "source": "route_continuity",
+                "affected_feature": "chapter_route",
+            },
+            {
+                "severity": "warning",
+                "source": "voice_drift",
+                "affected_feature": "narrative_voice",
+            },
+        ]
+    )
+
+    assert summary["continuity_blocking_count"] == 1
+    assert summary["style_warning_count"] == 1
+    assert summary["style_needs_review_count"] == 0
 
 
 def test_context_patch_injects_host_context_blocks(tmp_path):

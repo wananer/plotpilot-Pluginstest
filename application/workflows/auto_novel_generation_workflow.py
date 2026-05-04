@@ -878,6 +878,16 @@ class AutoNovelGenerationWorkflow:
                     f"\n9. 本章第 {beat_index + 1}/{total_beats} 段：与前后节拍连贯，避免同章内重复铺垫或重复对白。\n"
                 )
 
+        continuity_directive = (
+            "【章节边界硬规则】\n"
+            "若本章大纲包含“章前状态草稿硬约束”，它是最高优先级的生成前状态合同；"
+            "正文前100-300字必须先兑现其中的时间点、起始地点、在场人物、开头承接动作、即时威胁和关键物件状态。"
+            "若上下文包含“章节边界承接硬约束”或“章末节选，供本章开头承接”，"
+            "本章第一段必须先承接上一章章末的时间、地点、在场角色、危险状态和关键物件；"
+            "若需要跳时空或换场，必须先写清楚逃脱、移动、撤离、昏迷醒来、被带走或再次抵达的因果桥。"
+            "禁止直接重置场景，禁止把上一章未解决的即时危机当作已经自然解决。"
+        )
+
         # ★ V6: 从 MemoryEngine 获取 fact_lock 文本块（T0 注入）
         fact_lock = ""
         if self.memory_engine:
@@ -914,7 +924,8 @@ class AutoNovelGenerationWorkflow:
 5. 推进情节发展
 6. 使用生动的场景描写和细节
 {length_rule}
-8. 用中文写作，使用第三人称叙事{beat_extra}"""
+8. 用中文写作，使用第三人称叙事
+9. {continuity_directive}{beat_extra}"""
 
         user_message = f"""请根据以下大纲撰写本章内容：
 
@@ -926,6 +937,7 @@ class AutoNovelGenerationWorkflow:
 - 必须有明确的冲突或戏剧张力
 - 场景要具体生动，不要空泛叙述
 - 推进主线情节，不要原地踏步
+- 开头必须先兑现上一章结尾状态；跳时空或换场必须先补因果桥
 - 结尾要有悬念或转折"""
 
         prior_draft_section = ""
@@ -966,6 +978,7 @@ class AutoNovelGenerationWorkflow:
                 "context": context,
                 "fact_lock": fact_lock,
                 "length_rule": length_rule,
+                "continuity_directive": continuity_directive,
                 "beat_extra": beat_extra,
                 "outline": outline,
                 "prior_draft": prior_draft_section,
@@ -974,7 +987,17 @@ class AutoNovelGenerationWorkflow:
             fallback_system=system_message,
             fallback_user=user_message,
         )
-        return resolved.to_prompt()
+        prompt = resolved.to_prompt()
+        system = prompt.system or ""
+        user = prompt.user or ""
+        if "章节边界硬规则" not in system and "章节边界硬规则" not in user:
+            system = f"{system}\n\n{continuity_directive}".strip()
+        if "开头必须先兑现上一章结尾状态" not in user:
+            user = (
+                f"{user}\n\n关键补充：开头必须先兑现上一章结尾状态；"
+                "跳时空或换场必须先补因果桥。"
+            ).strip()
+        return Prompt(system=system, user=user)
 
     async def _extract_chapter_state(self, content: str, chapter_number: int) -> ChapterState:
         """从生成的内容中提取章节状态

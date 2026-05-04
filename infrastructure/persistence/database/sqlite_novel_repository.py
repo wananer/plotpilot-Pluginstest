@@ -30,9 +30,13 @@ class SqliteNovelRepository(NovelRepository):
                 last_audit_vector_stored, last_audit_foreshadow_stored,
                 last_audit_triples_extracted, last_audit_quality_scores, last_audit_issues,
                 target_words_per_chapter, audit_progress,
+                boundary_gate_status, last_boundary_issue, revision_attempts,
+                chapter_draft_status, last_chapter_draft_issue,
+                route_gate_status, last_route_issue, auto_revision_history,
+                constraint_gate_status, last_constraint_issue, constraint_revision_history,
                 created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 title = excluded.title,
                 slug = excluded.slug,
@@ -61,6 +65,17 @@ class SqliteNovelRepository(NovelRepository):
                 last_audit_issues = excluded.last_audit_issues,
                 target_words_per_chapter = excluded.target_words_per_chapter,
                 audit_progress = excluded.audit_progress,
+                boundary_gate_status = excluded.boundary_gate_status,
+                last_boundary_issue = excluded.last_boundary_issue,
+                revision_attempts = excluded.revision_attempts,
+                chapter_draft_status = excluded.chapter_draft_status,
+                last_chapter_draft_issue = excluded.last_chapter_draft_issue,
+                route_gate_status = excluded.route_gate_status,
+                last_route_issue = excluded.last_route_issue,
+                auto_revision_history = excluded.auto_revision_history,
+                constraint_gate_status = excluded.constraint_gate_status,
+                last_constraint_issue = excluded.last_constraint_issue,
+                constraint_revision_history = excluded.constraint_revision_history,
                 updated_at = excluded.updated_at
         """
         now = datetime.utcnow().isoformat()
@@ -95,6 +110,23 @@ class SqliteNovelRepository(NovelRepository):
         lai_json = json.dumps(lai) if lai else None
         twpc = getattr(novel, "target_words_per_chapter", 2500)
         audit_progress = getattr(novel, "audit_progress", None)
+        boundary_gate_status = getattr(novel, "boundary_gate_status", None)
+        last_boundary_issue = getattr(novel, "last_boundary_issue", {}) or {}
+        last_boundary_issue_json = json.dumps(last_boundary_issue) if last_boundary_issue else None
+        revision_attempts = int(getattr(novel, "revision_attempts", 0) or 0)
+        chapter_draft_status = getattr(novel, "chapter_draft_status", None)
+        last_chapter_draft_issue = getattr(novel, "last_chapter_draft_issue", {}) or {}
+        last_chapter_draft_issue_json = json.dumps(last_chapter_draft_issue) if last_chapter_draft_issue else None
+        route_gate_status = getattr(novel, "route_gate_status", None)
+        last_route_issue = getattr(novel, "last_route_issue", {}) or {}
+        last_route_issue_json = json.dumps(last_route_issue) if last_route_issue else None
+        auto_revision_history = getattr(novel, "auto_revision_history", []) or []
+        auto_revision_history_json = json.dumps(auto_revision_history) if auto_revision_history else None
+        constraint_gate_status = getattr(novel, "constraint_gate_status", None)
+        last_constraint_issue = getattr(novel, "last_constraint_issue", {}) or {}
+        last_constraint_issue_json = json.dumps(last_constraint_issue) if last_constraint_issue else None
+        constraint_revision_history = getattr(novel, "constraint_revision_history", []) or []
+        constraint_revision_history_json = json.dumps(constraint_revision_history) if constraint_revision_history else None
 
         self.db.execute(sql, (
             novel_id,
@@ -125,6 +157,17 @@ class SqliteNovelRepository(NovelRepository):
             lai_json,
             twpc,
             audit_progress,
+            boundary_gate_status,
+            last_boundary_issue_json,
+            revision_attempts,
+            chapter_draft_status,
+            last_chapter_draft_issue_json,
+            route_gate_status,
+            last_route_issue_json,
+            auto_revision_history_json,
+            constraint_gate_status,
+            last_constraint_issue_json,
+            constraint_revision_history_json,
             now,
             now
         ))
@@ -188,6 +231,18 @@ class SqliteNovelRepository(NovelRepository):
         laqs = json.loads(laqs_json) if laqs_json else {}
         lai_json = row.get("last_audit_issues")
         lai = json.loads(lai_json) if lai_json else []
+        lbi_json = row.get("last_boundary_issue")
+        lbi = json.loads(lbi_json) if lbi_json else {}
+        lcdi_json = row.get("last_chapter_draft_issue")
+        lcdi = json.loads(lcdi_json) if lcdi_json else {}
+        lri_json = row.get("last_route_issue")
+        lri = json.loads(lri_json) if lri_json else {}
+        arh_json = row.get("auto_revision_history")
+        arh = json.loads(arh_json) if arh_json else []
+        lci_json = row.get("last_constraint_issue")
+        lci = json.loads(lci_json) if lci_json else {}
+        crh_json = row.get("constraint_revision_history")
+        crh = json.loads(crh_json) if crh_json else []
         
         return Novel(
             id=novel_id,
@@ -217,6 +272,17 @@ class SqliteNovelRepository(NovelRepository):
             last_audit_issues=lai,
             target_words_per_chapter=row.get("target_words_per_chapter", 2500),
             audit_progress=row.get("audit_progress"),
+            boundary_gate_status=row.get("boundary_gate_status"),
+            last_boundary_issue=lbi,
+            revision_attempts=row.get("revision_attempts", 0) or 0,
+            chapter_draft_status=row.get("chapter_draft_status"),
+            last_chapter_draft_issue=lcdi,
+            route_gate_status=row.get("route_gate_status"),
+            last_route_issue=lri,
+            auto_revision_history=arh,
+            constraint_gate_status=row.get("constraint_gate_status"),
+            last_constraint_issue=lci,
+            constraint_revision_history=crh,
         )
 
     def delete(self, novel_id: NovelId) -> None:

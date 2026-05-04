@@ -57,6 +57,53 @@ def test_alert_when_consecutive_low_scores():
     assert svc._check_drift_alert("novel-1")
 
 
+def test_drift_report_returns_unified_style_issue_for_consecutive_low_scores():
+    low = [
+        {
+            "chapter_number": index + 1,
+            "similarity_score": 0.7,
+            "adjective_density": 0.01,
+            "avg_sentence_length": 40,
+            "sentence_count": 20,
+            "computed_at": "2026-05-04T00:00:00",
+        }
+        for index in range(DRIFT_ALERT_CONSECUTIVE)
+    ]
+    svc = _make_service(scores=low)
+
+    report = svc.get_drift_report("novel-1")
+
+    assert report["drift_alert"] is True
+    assert report["constraint_status"] == "passed"
+    assert report["style_issue"]["constraint_type"] == "narrative_voice"
+    assert report["style_issue"]["severity"] == "warning"
+    assert report["style_issue"]["repair_hint"]
+    assert report["constraint_status"] in {"passed", "auto_revised", "needs_review", "skipped"}
+    assert report["constraint_status"] != "warning"
+    for key in ("constraint_type", "severity", "evidence", "repair_hint", "confidence"):
+        assert key in report["style_issue"]
+
+
+def test_drift_report_needs_review_only_for_severe_consecutive_drift():
+    low = [
+        {
+            "chapter_number": index + 1,
+            "similarity_score": 0.5,
+            "adjective_density": 0.01,
+            "avg_sentence_length": 40,
+            "sentence_count": 20,
+            "computed_at": "2026-05-04T00:00:00",
+        }
+        for index in range(DRIFT_ALERT_CONSECUTIVE)
+    ]
+    svc = _make_service(scores=low)
+
+    report = svc.get_drift_report("novel-1")
+
+    assert report["constraint_status"] == "needs_review"
+    assert report["style_issue"]["severity"] == "needs_review"
+
+
 def test_no_alert_when_one_high_score():
     mixed = [{"similarity_score": 0.5}] * (DRIFT_ALERT_CONSECUTIVE - 1)
     mixed.append({"similarity_score": 0.9})

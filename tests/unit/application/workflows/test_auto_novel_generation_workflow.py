@@ -292,6 +292,18 @@ class TestBuildPrompt:
         assert "HIGH" in prompt.system
         assert "CTX" in prompt.system
 
+    def test_build_prompt_enforces_chapter_boundary_opening(self, workflow):
+        """章节生成提示必须把上一章边界承接作为开头硬规则。"""
+        prompt = workflow._build_prompt(
+            context="=== 章节边界承接硬约束 ===\n【章末节选，供本章开头承接】三人随石室下坠。",
+            outline="下一章调查审心室",
+        )
+
+        assert "章节边界硬规则" in prompt.system
+        assert "章前状态草稿硬约束" in prompt.system
+        assert "开头必须先兑现上一章结尾状态" in prompt.user
+        assert "禁止直接重置场景" in prompt.system
+
 class TestConflictDetectionIntegration:
     """测试冲突检测集成"""
 

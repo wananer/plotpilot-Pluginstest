@@ -62,6 +62,20 @@ class Novel(BaseEntity):
         target_words_per_chapter: int = 2500,
         # 审计进度指示
         audit_progress: Optional[str] = None,
+        # 章节边界连续性 Gate 状态
+        boundary_gate_status: Optional[str] = None,
+        last_boundary_issue: Optional[Dict[str, Any]] = None,
+        revision_attempts: int = 0,
+        # 章前状态草稿 Gate 状态
+        chapter_draft_status: Optional[str] = None,
+        last_chapter_draft_issue: Optional[Dict[str, Any]] = None,
+        # 章节路线/人物状态 Gate 状态
+        route_gate_status: Optional[str] = None,
+        last_route_issue: Optional[Dict[str, Any]] = None,
+        auto_revision_history: Optional[List[Dict[str, Any]]] = None,
+        constraint_gate_status: Optional[str] = None,
+        last_constraint_issue: Optional[Dict[str, Any]] = None,
+        constraint_revision_history: Optional[List[Dict[str, Any]]] = None,
     ):
         super().__init__(id.value)
         self.novel_id = id
@@ -102,6 +116,21 @@ class Novel(BaseEntity):
         self.target_words_per_chapter = target_words_per_chapter
         # 审计进度指示
         self.audit_progress = audit_progress
+        # 章节边界连续性 Gate 状态：passed / auto_revised / needs_review / skipped
+        self.boundary_gate_status = boundary_gate_status
+        self.last_boundary_issue = last_boundary_issue or {}
+        self.revision_attempts = revision_attempts
+        # 章前状态草稿 Gate 状态：passed / auto_revised / needs_review / skipped
+        self.chapter_draft_status = chapter_draft_status
+        self.last_chapter_draft_issue = last_chapter_draft_issue or {}
+        # 章节路线承接 Gate 状态：passed / auto_revised / needs_review / skipped
+        self.route_gate_status = route_gate_status
+        self.last_route_issue = last_route_issue or {}
+        self.auto_revision_history = auto_revision_history or []
+        # 统一约束 Gate 状态：passed / auto_revised / needs_review / skipped
+        self.constraint_gate_status = constraint_gate_status
+        self.last_constraint_issue = last_constraint_issue or {}
+        self.constraint_revision_history = constraint_revision_history or []
 
     def add_chapter(self, chapter: Chapter) -> None:
         """添加章节（必须连续）"""

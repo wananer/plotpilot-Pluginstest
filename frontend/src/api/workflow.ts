@@ -253,6 +253,25 @@ export interface HostedWritePayload {
   auto_outline: boolean
 }
 
+function captureHostedWriteEvent(novelId: string, event: Record<string, unknown>): void {
+  if (typeof window === 'undefined') return
+  const queryCapture = new URLSearchParams(window.location.search).get('captureHostedWriteEvents') === '1'
+  if (!window.__PLOTPILOT_CAPTURE_HOSTED_WRITE_EVENTS__ && !queryCapture) return
+  const enriched = {
+    ...event,
+    novel_id: novelId,
+    captured_at: new Date().toISOString(),
+  }
+  const events = window.__PLOTPILOT_HOSTED_WRITE_EVENTS__ ?? []
+  events.push(enriched)
+  window.__PLOTPILOT_HOSTED_WRITE_EVENTS__ = events.slice(-1000)
+  try {
+    localStorage.setItem(`plotpilot:hosted-write-events:${novelId}`, JSON.stringify(window.__PLOTPILOT_HOSTED_WRITE_EVENTS__))
+  } catch {
+    // Best-effort capture for evaluation runs only.
+  }
+}
+
 /**
  * POST /api/v1/novels/{novel_id}/hosted-write-stream — 托管多章连写（SSE，每行 JSON）
  */
@@ -292,6 +311,7 @@ export async function consumeHostedWriteStream(
           const raw = parseSseDataLine(line)
           if (!raw || typeof raw !== 'object' || raw === null) continue
           const o = raw as Record<string, unknown>
+          captureHostedWriteEvent(novelId, o)
           handlers.onEvent?.(o)
           if (o.type === 'error') {
             handlers.onError?.(String(o.message ?? 'error'))

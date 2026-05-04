@@ -33,6 +33,7 @@ AUDIT_PHASES = {
     "chapter_review_timeline",
     "chapter_review_storyline",
     "chapter_review_foreshadow",
+    "hosted_write_boundary_revision",
     "evolution_agent_control_card",
     "evolution_agent_reflection",
     "scoring",

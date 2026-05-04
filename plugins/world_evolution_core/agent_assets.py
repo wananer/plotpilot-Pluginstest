@@ -104,6 +104,10 @@ SOLIDIFIABLE_ISSUE_TYPES = {
     "evolution_character_logic",
     "evolution_plot_continuity",
     "evolution_boundary_state",
+    "evolution_boundary_location_jump",
+    "evolution_unresolved_cliffhanger_skip",
+    "evolution_boundary_goal_skip",
+    "evolution_missing_time_bridge",
     "evolution_entity_pollution",
     "evolution_character_pollution",
     "evolution_location_pollution",
@@ -354,11 +358,11 @@ def solidify_capsules_from_review(
             "title": _capsule_title(issue),
             "category": _capsule_category(issue),
             "signals": _signals_for_issue(issue),
-            "summary": str(issue.get("description") or "").strip()[:260],
-            "guidance": str(issue.get("suggestion") or "").strip()[:260],
+            "summary": _capsule_summary(issue),
+            "guidance": _capsule_guidance(issue),
             "source_issue_type": str(issue.get("issue_type") or ""),
             "severity": str(issue.get("severity") or ""),
-            "evidence": list(issue.get("evidence") or [])[:4],
+            "evidence": _capsule_evidence(issue),
             "chapter_number": chapter_number,
             "first_seen_chapter": previous.get("first_seen_chapter") or chapter_number,
             "last_seen_chapter": chapter_number,
@@ -753,6 +757,8 @@ def _signals_for_issue(issue: dict[str, Any]) -> list[str]:
         signals.extend(["route_conflict", "location_jump", "chapter_bridge"])
     if "boundary" in issue_type:
         signals.extend(["chapter_bridge", "ending_state", "state_reset"])
+    if issue_type in {"evolution_unresolved_cliffhanger_skip", "evolution_missing_time_bridge"}:
+        signals.extend(["chapter_bridge", "location_jump", "ending_state"])
     if "cognition" in issue_type or "belief" in issue_type:
         signals.extend(["character_cognition", "knowledge_boundary"])
     if "capability" in issue_type:
@@ -801,16 +807,53 @@ def _signals_for_issue(issue: dict[str, Any]) -> list[str]:
 def _capsule_id(issue: dict[str, Any]) -> str:
     issue_type = str(issue.get("issue_type") or "")
     suggestion = str(issue.get("suggestion") or "")
-    evidence = str(issue.get("evidence") or "")
+    evidence = str(_capsule_evidence(issue) or "")
     digest = sha256("|".join([issue_type, suggestion, evidence[:420]]).encode("utf-8")).hexdigest()[:16]
     return f"cap_{digest}"
+
+
+def _capsule_summary(issue: dict[str, Any]) -> str:
+    if _is_boundary_revision_issue(issue):
+        return "章节开头未兑现上一章结尾状态，需要把边界承接作为开场硬门槛。"
+    return str(issue.get("description") or "").strip()[:260]
+
+
+def _capsule_guidance(issue: dict[str, Any]) -> str:
+    if _is_boundary_revision_issue(issue):
+        brief = issue.get("opening_revision_brief") if isinstance(issue.get("opening_revision_brief"), dict) else {}
+        bridge_type = str(brief.get("required_bridge_type") or "原地续接/撤离/移动/跳时/失败/视角桥接")
+        return f"下一次相邻章节开头先写100-300字桥接，采用{bridge_type}；只固化策略，不复述失败正文。"
+    return str(issue.get("suggestion") or "").strip()[:260]
+
+
+def _capsule_evidence(issue: dict[str, Any]) -> list[dict[str, Any]]:
+    if _is_boundary_revision_issue(issue):
+        brief = issue.get("opening_revision_brief") if isinstance(issue.get("opening_revision_brief"), dict) else {}
+        return [
+            {
+                "gate": "boundary_continuity",
+                "revision_required": True,
+                "revision_mode": issue.get("revision_mode") or "manual_or_host_revision_required",
+                "required_bridge_type": brief.get("required_bridge_type") or "chapter_boundary_bridge",
+                "target": brief.get("target") or "rewrite_opening_100_300_chars",
+            }
+        ]
+    return list(issue.get("evidence") or [])[:4]
+
+
+def _is_boundary_revision_issue(issue: dict[str, Any]) -> bool:
+    issue_type = str(issue.get("issue_type") or "")
+    return bool(issue.get("revision_required")) and (
+        "boundary" in issue_type
+        or issue_type in {"evolution_unresolved_cliffhanger_skip", "evolution_missing_time_bridge"}
+    )
 
 
 def _capsule_category(issue: dict[str, Any]) -> str:
     issue_type = str(issue.get("issue_type") or "")
     if issue_type.startswith("evolution_route_"):
         return "route"
-    if "boundary" in issue_type:
+    if "boundary" in issue_type or issue_type in {"evolution_unresolved_cliffhanger_skip", "evolution_missing_time_bridge"}:
         return "continuity"
     if "entity_pollution" in issue_type:
         return "entity_hygiene"

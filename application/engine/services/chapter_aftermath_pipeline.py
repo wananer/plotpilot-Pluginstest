@@ -97,6 +97,8 @@ class ChapterAftermathPipeline:
             "foreshadow_stored": False,
             "triples_extracted": False,
             "plugin_after_commit_ok": False,
+            "constraint_status": "passed",
+            "constraint_issue": {},
         }
 
         if not content or not str(content).strip():
@@ -177,6 +179,8 @@ class ChapterAftermathPipeline:
                 out["drift_alert"] = bool(vr.get("drift_alert", False))
                 out["similarity_score"] = vr.get("similarity_score")
                 out["voice_mode"] = vr.get("mode", "statistics")
+                out["constraint_status"] = vr.get("constraint_status") or "passed"
+                out["constraint_issue"] = vr.get("style_issue") or {}
                 logger.debug(
                     "文风评分完成 novel=%s ch=%s mode=%s drift=%s",
                     novel_id,

@@ -6,10 +6,9 @@ import io
 import logging
 import os
 import re
-import tempfile
 import zipfile
 from pathlib import Path
-from typing import Iterator, List, Optional, Tuple
+from typing import Iterator, List, Tuple
 
 from domain.novel.repositories.novel_repository import NovelRepository
 from domain.novel.repositories.chapter_repository import ChapterRepository
@@ -145,76 +144,7 @@ class ExportService:
             raise
 
     def _export_to_epub(self, novel: Novel, chapters: list[Chapter]) -> Tuple[bytes, str, str]:
-        try:
-            from ebooklib import epub
-        except ModuleNotFoundError:
-            return self._export_to_epub_stdlib(novel, chapters)
-
-        book = epub.EpubBook()
-        uid = _novel_id_str(novel)
-        book.set_identifier(f"plotpilot:{uid}")
-        book.set_title(novel.title or "未命名")
-        book.set_language("zh")
-        book.add_author(novel.author or "未知作者")
-
-        intro = epub.EpubHtml(
-            title="简介",
-            file_name="intro.xhtml",
-            lang="zh",
-        )
-        premise = html.escape((novel.premise or "").strip() or "（无简介）")
-        intro.content = f"""<?xml version="1.0" encoding="utf-8"?>
-<!DOCTYPE html>
-<html xmlns="http://www.w3.org/1999/xhtml" lang="zh">
-<head><title>简介</title><meta charset="utf-8"/></head>
-<body>
-<h1>{html.escape(novel.title or "未命名")}</h1>
-<p>作者：{html.escape(novel.author or "—")}</p>
-<p>{premise}</p>
-</body>
-</html>"""
-        book.add_item(intro)
-
-        spine_items: List[epub.EpubHtml] = [intro]
-        for i, ch in enumerate(chapters):
-            fname = f"chap_{i + 1:03d}.xhtml"
-            title_txt = _chapter_display_title(ch)
-            title_esc = html.escape(title_txt)
-            body = _content_to_html_paragraphs(ch.content or "")
-            item = epub.EpubHtml(title=title_txt, file_name=fname, lang="zh")
-            item.content = f"""<?xml version="1.0" encoding="utf-8"?>
-<!DOCTYPE html>
-<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" lang="zh">
-<head><title>{title_esc}</title><meta charset="utf-8"/></head>
-<body>
-<h1>{title_esc}</h1>
-{body}
-</body>
-</html>"""
-            book.add_item(item)
-            spine_items.append(item)
-
-        book.toc = tuple([intro] + spine_items[1:])
-        book.add_item(epub.EpubNcx())
-        # 不使用空 EpubNav（ebooklib 生成 nav 时会解析正文，空文档会触发 lxml Document is empty）
-        book.spine = spine_items
-
-        tmp_path: Optional[str] = None
-        try:
-            fd, tmp_path = tempfile.mkstemp(suffix=".epub")
-            os.close(fd)
-            epub.write_epub(tmp_path, book, {})
-            with open(tmp_path, "rb") as f:
-                data = f.read()
-        finally:
-            if tmp_path and os.path.isfile(tmp_path):
-                try:
-                    os.unlink(tmp_path)
-                except OSError:
-                    pass
-
-        stem = _safe_filename_stem(novel.title)
-        return data, "application/epub+zip", f"{stem}.epub"
+        return self._export_to_epub_stdlib(novel, chapters)
 
     def _export_to_epub_stdlib(self, novel: Novel, chapters: list[Chapter]) -> Tuple[bytes, str, str]:
         """Generate a minimal EPUB with the standard library when ebooklib is absent."""

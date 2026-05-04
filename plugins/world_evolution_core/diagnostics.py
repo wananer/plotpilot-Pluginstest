@@ -8,6 +8,8 @@ from typing import Any
 from plugins.platform.hook_dispatcher import list_hooks
 
 from .personality_palette import palette_missing_fields, personality_palette_status
+from .continuity import review_execution_draft_against_content
+from .review_rules import review_boundary_state
 
 PLUGIN_NAME = "world_evolution_core"
 DIAGNOSTICS_SCHEMA_VERSION = 1
@@ -58,6 +60,8 @@ def build_diagnostics(
     context_budget_summary = _context_budget_summary(repository, novel_id)
     review_candidate_summary = _review_candidate_summary(repository, novel_id)
     injection_gate_summary = _injection_gate_summary(repository, novel_id)
+    boundary_continuity_summary = _boundary_continuity_summary(repository, novel_id)
+    _check_boundary_continuity(risks, boundary_continuity_summary)
     plugin_leakage_check = _plugin_leakage_check(repository, novel_id, agent_status)
     planning_alignment = agent_status.get("planning_alignment") if isinstance(agent_status.get("planning_alignment"), dict) else {}
     native_context_alignment = agent_status.get("native_context_alignment") if isinstance(agent_status.get("native_context_alignment"), dict) else {}
@@ -101,6 +105,7 @@ def build_diagnostics(
         "context_budget_summary": context_budget_summary,
         "review_candidate_summary": review_candidate_summary,
         "injection_gate_summary": injection_gate_summary,
+        "boundary_continuity_summary": boundary_continuity_summary,
         "knowledge_freshness": knowledge_freshness,
         "risks": risks,
     }
@@ -232,6 +237,120 @@ def _review_candidate_summary(repository: Any, novel_id: str) -> dict[str, Any]:
         "by_type": by_type,
         "by_risk": by_risk,
     }
+
+
+def _boundary_continuity_summary(repository: Any, novel_id: str) -> dict[str, Any]:
+    summaries = repository.list_chapter_summaries(novel_id, limit=500) if hasattr(repository, "list_chapter_summaries") else []
+    injection_records = repository.list_context_injection_records(novel_id, limit=500) if hasattr(repository, "list_context_injection_records") else []
+    injected_count = sum(
+        1
+        for record in injection_records
+        if any(
+            (block.get("id") == "chapter_boundary_bridge" or block.get("kind") == "chapter_boundary_bridge")
+            for block in _context_blocks_from_record(record)
+        )
+    )
+    with_boundary = 0
+    with_execution_draft = 0
+    execution_draft_failed = 0
+    failed: list[dict[str, Any]] = []
+    revision_required_count = 0
+    route_bridge_failed_count = 0
+    character_state_failed_count = 0
+    cross_act_bridge_failed_count = 0
+    for index, summary in enumerate(summaries):
+        carry = summary.get("carry_forward") if isinstance(summary.get("carry_forward"), dict) else {}
+        if isinstance(carry.get("boundary_state"), dict) and carry.get("boundary_state"):
+            with_boundary += 1
+        execution_draft = summary.get("execution_draft") if isinstance(summary.get("execution_draft"), dict) else {}
+        if execution_draft:
+            with_execution_draft += 1
+            current_opening_for_draft = str((summary.get("opening_state") or {}).get("excerpt") or "")
+            draft_issues = review_execution_draft_against_content(
+                execution_draft,
+                current_opening_for_draft,
+                int(summary.get("chapter_number") or 0),
+            )
+            execution_draft_failed += len(draft_issues)
+            for issue in draft_issues:
+                failed.append(
+                    {
+                        "chapter_number": summary.get("chapter_number"),
+                        "issue_type": issue.get("issue_type"),
+                        "description": issue.get("description") or "章前状态草稿未兑现",
+                        "revision_required": bool(issue.get("revision_required")),
+                        "revision_mode": "rewrite_opening",
+                        "opening_revision_brief": issue.get("opening_revision_brief"),
+                        "evidence": issue.get("evidence"),
+                    }
+                )
+        if index == 0:
+            continue
+        current_opening = str((summary.get("opening_state") or {}).get("excerpt") or "")
+        issues = review_boundary_state([summaries[index - 1]], current_opening, int(summary.get("chapter_number") or 0))
+        for issue in issues:
+            if issue.get("revision_required"):
+                revision_required_count += 1
+            failed.append(
+                {
+                    "chapter_number": summary.get("chapter_number"),
+                    "issue_type": issue.get("issue_type"),
+                    "description": issue.get("description"),
+                    "revision_required": bool(issue.get("revision_required")),
+                    "revision_mode": issue.get("revision_mode"),
+                    "opening_revision_brief": issue.get("opening_revision_brief"),
+                    "evidence": issue.get("evidence"),
+                }
+            )
+            issue_type = str(issue.get("issue_type") or "")
+            if "route" in issue_type:
+                route_bridge_failed_count += 1
+            if "character_state" in issue_type:
+                character_state_failed_count += 1
+            if _looks_like_cross_act_transition(summaries[index - 1], summary) and ("route" in issue_type or "boundary" in issue_type):
+                cross_act_bridge_failed_count += 1
+    failed_count = len(failed)
+    return {
+        "chapter_summary_count": len(summaries),
+        "boundary_state_count": with_boundary,
+        "chapter_execution_draft_count": with_execution_draft,
+        "chapter_execution_draft_failed_count": execution_draft_failed,
+        "checked_transition_count": max(len(summaries) - 1, 0),
+        "boundary_injected_count": injected_count,
+        "boundary_failed_count": failed_count,
+        "route_bridge_failed_count": route_bridge_failed_count,
+        "character_state_failed_count": character_state_failed_count,
+        "cross_act_bridge_failed_count": cross_act_bridge_failed_count,
+        "boundary_revision_required_count": revision_required_count,
+        "failed_count": failed_count,
+        "passed": failed_count == 0,
+        "failures": failed[:12],
+    }
+
+
+def _check_boundary_continuity(risks: list[dict[str, Any]], summary: dict[str, Any]) -> None:
+    draft_failed = int(summary.get("chapter_execution_draft_failed_count") or 0)
+    if draft_failed:
+        risks.append(_risk("critical", "chapter_execution_draft", f"章前状态草稿未兑现 {draft_failed} 处。", "先按章前状态草稿重写本章前100-300字，确保时间、地点、人物和即时威胁被兑现。", "chapter_execution_draft", summary))
+    failed = int(summary.get("boundary_failed_count") or summary.get("failed_count") or 0)
+    if failed:
+        revision_required = int(summary.get("boundary_revision_required_count") or 0)
+        risks.append(_risk("warning", "boundary_continuity", f"章节边界承接发现 {failed} 个疑似断裂，其中 {revision_required} 个需要重写开头。", "先按 opening_revision_brief 重写本章前100-300字；换地点时补移动、跳时、撤离、失败或因果桥。", "chapter_boundary", summary))
+    route_failed = int(summary.get("route_bridge_failed_count") or 0)
+    if route_failed:
+        risks.append(_risk("critical", "route_continuity", f"章节路线桥接失败 {route_failed} 处。", "先补起点、终点、移动路径、耗时、同行/分离人物，再进入新地点正文。", "chapter_route", summary))
+    character_failed = int(summary.get("character_state_failed_count") or 0)
+    if character_failed:
+        risks.append(_risk("critical", "character_continuity", f"人物状态未交代 {character_failed} 处。", "开头必须交代上一章人物伤势、追踪、携带物、倒计时或离场原因。", "character_state", summary))
+    cross_act_failed = int(summary.get("cross_act_bridge_failed_count") or 0)
+    if cross_act_failed:
+        risks.append(_risk("critical", "act_continuity", f"跨幕承接断裂 {cross_act_failed} 处。", "新幕第一章必须先消费上一章 boundary_state 与 route_state，不能重启新场景。", "act_boundary", summary))
+
+
+def _looks_like_cross_act_transition(previous: dict[str, Any], current: dict[str, Any]) -> bool:
+    prev = int(previous.get("chapter_number") or 0)
+    curr = int(current.get("chapter_number") or 0)
+    return prev > 0 and curr > 0 and curr == prev + 1 and prev % 5 == 0
 
 
 def _injection_gate_summary(repository: Any, novel_id: str) -> dict[str, Any]:
@@ -517,10 +636,35 @@ def _risk(severity: str, source: str, message: str, suggestion: str, affected_fe
 
 
 def _risk_summary(risks: list[dict[str, Any]]) -> dict[str, int]:
+    continuity_features = {
+        "chapter_boundary",
+        "chapter_route",
+        "character_state",
+        "act_boundary",
+        "chapter_execution_draft",
+        "route_conflict",
+    }
+    style_features = {"narrative_voice", "style_drift", "character_voice", "personality_palette"}
+    continuity = [
+        item
+        for item in risks
+        if str(item.get("affected_feature") or "") in continuity_features
+        or str(item.get("source") or "") in {"boundary_continuity", "route_continuity", "character_continuity", "act_continuity"}
+    ]
+    style = [
+        item
+        for item in risks
+        if str(item.get("affected_feature") or "") in style_features
+        or str(item.get("source") or "") in {"style_drift", "voice_drift", "character_cards"}
+    ]
     return {
         "critical": sum(1 for item in risks if item.get("severity") == "critical"),
         "warning": sum(1 for item in risks if item.get("severity") == "warning"),
         "info": sum(1 for item in risks if item.get("severity") == "info"),
+        "continuity_blocking_count": sum(1 for item in continuity if item.get("severity") == "critical"),
+        "continuity_warning_count": sum(1 for item in continuity if item.get("severity") == "warning"),
+        "style_warning_count": sum(1 for item in style if item.get("severity") == "warning"),
+        "style_needs_review_count": sum(1 for item in style if item.get("severity") == "critical"),
         "total": len(risks),
     }
 
