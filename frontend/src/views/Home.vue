@@ -391,17 +391,21 @@
                       <span>标识：{{ plugin.name }}</span>
                       <span v-if="plugin.version">版本：{{ plugin.version }}</span>
                       <span v-if="plugin.configured_enabled !== null && plugin.configured_enabled !== undefined">平台控制</span>
+                      <span>兼容：{{ pluginCompatibilityLabel(plugin) }}</span>
                     </div>
                   </div>
                 </div>
                 <div class="plugin-item-status">
                   <n-spin v-if="pluginToggleLoading === plugin.name" size="small" />
-                  <n-tag v-else :type="plugin.enabled === false ? 'default' : 'success'" size="small">
-                    {{ plugin.enabled === false ? '已停用' : '已启用' }}
+                  <n-tag v-else :type="pluginStatusTagType(plugin)" size="small">
+                    {{ pluginStatusLabel(plugin) }}
                   </n-tag>
                   <div class="plugin-item-meta">
                     <span>{{ (plugin.frontend_scripts?.length || 0) + (plugin.frontend_styles?.length || 0) }} 个前端资源</span>
                     <span>{{ Array.isArray(plugin.hooks) ? plugin.hooks.length : 0 }} 个 hook</span>
+                  </div>
+                  <div v-if="plugin.disabled_reason" class="plugin-item-warning">
+                    {{ plugin.disabled_reason }}
                   </div>
                 </div>
               </n-space>
@@ -778,6 +782,25 @@ const handleTogglePlugin = async (plugin: PluginManifestRecord, checked: boolean
   } finally {
     pluginToggleLoading.value = null
   }
+}
+
+const pluginCompatibilityLabel = (plugin: PluginManifestRecord): string => {
+  const status = plugin.compatibility?.status
+  if (status === 'compatible') return '已验证'
+  if (status === 'assumed_compatible') return '兼容假定'
+  if (status === 'incompatible') return '不兼容'
+  return '未声明'
+}
+
+const pluginStatusLabel = (plugin: PluginManifestRecord): string => {
+  if (plugin.compatibility?.compatible === false) return '不兼容'
+  return plugin.enabled === false ? '已停用' : '已启用'
+}
+
+const pluginStatusTagType = (plugin: PluginManifestRecord): 'default' | 'success' | 'warning' | 'error' => {
+  if (plugin.compatibility?.compatible === false) return 'error'
+  if (plugin.compatibility?.status === 'assumed_compatible') return 'warning'
+  return plugin.enabled === false ? 'default' : 'success'
 }
 
 

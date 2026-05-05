@@ -14,6 +14,15 @@ export interface PluginManifestRecord {
   capabilities?: Record<string, unknown> | unknown[]
   permissions?: unknown[]
   hooks?: unknown[]
+  compatibility?: {
+    status?: string
+    compatible?: boolean
+    declared?: Record<string, string | null>
+    current?: Record<string, string | null>
+    reasons?: string[]
+    warnings?: string[]
+  } | null
+  disabled_reason?: string | null
   manifest?: Record<string, unknown>
 }
 

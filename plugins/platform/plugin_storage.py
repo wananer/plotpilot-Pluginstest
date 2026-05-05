@@ -10,6 +10,7 @@ from typing import Any, Union, Tuple
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _SAFE_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-.")
 _GLOBAL_NOVEL_ID = "__global__"
+PLUGIN_STORAGE_SCHEMA_VERSION = 1
 
 
 def default_plugin_storage_root() -> Path:
@@ -149,6 +150,76 @@ class PluginStorage:
             )
             conn.commit()
             return cursor.rowcount > 0
+
+    def status(self) -> dict[str, Any]:
+        with self._connect() as conn:
+            state_count = conn.execute("SELECT count(*) FROM plugin_state").fetchone()[0]
+            log_count = conn.execute("SELECT count(*) FROM plugin_log").fetchone()[0]
+            plugin_rows = conn.execute(
+                """
+                SELECT plugin_name, count(*) AS record_count
+                FROM plugin_state
+                GROUP BY plugin_name
+                ORDER BY plugin_name ASC
+                """
+            ).fetchall()
+        return {
+            "schema_version": PLUGIN_STORAGE_SCHEMA_VERSION,
+            "root": str(self.root),
+            "db_path": str(self.db_path),
+            "state_count": int(state_count or 0),
+            "log_count": int(log_count or 0),
+            "plugins": [
+                {"plugin_name": str(row["plugin_name"]), "state_count": int(row["record_count"] or 0)}
+                for row in plugin_rows
+            ],
+        }
+
+    def export_plugin_state(self, plugin_name: str) -> dict[str, Any]:
+        safe_plugin = self._safe_segment(plugin_name)
+        with self._connect() as conn:
+            state_rows = conn.execute(
+                """
+                SELECT novel_id, scope, value_json, created_at, updated_at
+                FROM plugin_state
+                WHERE plugin_name = ?
+                ORDER BY novel_id ASC, scope ASC
+                """,
+                (safe_plugin,),
+            ).fetchall()
+            log_rows = conn.execute(
+                """
+                SELECT novel_id, scope, value_json, created_at
+                FROM plugin_log
+                WHERE plugin_name = ?
+                ORDER BY id ASC
+                """,
+                (safe_plugin,),
+            ).fetchall()
+        return {
+            "plugin_name": safe_plugin,
+            "schema_version": PLUGIN_STORAGE_SCHEMA_VERSION,
+            "exported_at": _utc_now_iso(),
+            "state": [
+                {
+                    "novel_id": row["novel_id"],
+                    "scope": row["scope"],
+                    "value": json.loads(row["value_json"]),
+                    "created_at": row["created_at"],
+                    "updated_at": row["updated_at"],
+                }
+                for row in state_rows
+            ],
+            "logs": [
+                {
+                    "novel_id": row["novel_id"],
+                    "scope": row["scope"],
+                    "value": json.loads(row["value_json"]),
+                    "created_at": row["created_at"],
+                }
+                for row in log_rows
+            ],
+        }
 
     def _ensure_schema(self) -> None:
         with self._connect() as conn:

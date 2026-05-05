@@ -27,6 +27,11 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from application.paths import DATA_DIR
+from plugins.platform.compat import (
+    FRONTEND_RUNTIME_VERSION,
+    PLATFORM_RUNTIME_API_VERSION,
+    build_plugin_compatibility_report,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -181,6 +186,20 @@ def _validate_manifest_contract(manifest: Dict[str, Any], plugin_dir_name: str) 
                 raise HTTPException(status_code=400, detail="manifest.frontend 资源路径必须是非空字符串")
             _validate_frontend_asset_path(item)
 
+    runtime = manifest.get("runtime")
+    if runtime is not None and not isinstance(runtime, dict):
+        raise HTTPException(status_code=400, detail="manifest.runtime 必须是 object")
+
+    for key in ("plugin_api_version", "host_min_version", "host_max_version", "frontend_runtime_version"):
+        value = manifest.get(key)
+        if value is not None and (not isinstance(value, str) or not value.strip()):
+            raise HTTPException(status_code=400, detail=f"manifest.{key} 必须是非空字符串")
+    if isinstance(runtime, dict):
+        for key in ("api_version", "host_min_version", "host_max_version", "frontend_runtime_version"):
+            value = runtime.get(key)
+            if value is not None and (not isinstance(value, str) or not value.strip()):
+                raise HTTPException(status_code=400, detail=f"manifest.runtime.{key} 必须是非空字符串")
+
     for key in ("capabilities", "permissions", "hooks"):
         value = manifest.get(key)
         if value is not None and not isinstance(value, (dict, list)):
@@ -294,7 +313,8 @@ def _build_plugin_manifest_record(plugin_dir: Path) -> Dict[str, Any] | None:
     manifest = _load_manifest(plugin_dir)
     manifest_enabled = _is_enabled(manifest)
     configured_enabled = _configured_plugin_enabled(plugin_dir.name)
-    enabled = configured_enabled if configured_enabled is not None else manifest_enabled
+    compatibility = build_plugin_compatibility_report(manifest, plugin_name=plugin_dir.name)
+    enabled = (configured_enabled if configured_enabled is not None else manifest_enabled) and bool(compatibility["compatible"])
 
     frontend_scripts = _collect_frontend_scripts_for_plugin(plugin_dir, manifest) if enabled else []
     frontend_styles = _collect_frontend_styles_for_plugin(plugin_dir, manifest) if enabled else []
@@ -311,6 +331,8 @@ def _build_plugin_manifest_record(plugin_dir: Path) -> Dict[str, Any] | None:
         "permissions": manifest.get("permissions") or [],
         "hooks": manifest.get("hooks") or [],
         "route_aliases": manifest.get("route_aliases") or [],
+        "compatibility": compatibility,
+        "disabled_reason": "; ".join(compatibility["reasons"]) if not compatibility["compatible"] else None,
         "manifest": manifest,
     }
 
@@ -463,6 +485,10 @@ def load_plugins() -> List[Dict[str, Any]]:
     for plugin_dir in _discover_plugin_dirs():
         plugin_name = plugin_dir.name
         manifest = _load_manifest(plugin_dir)
+        compatibility = build_plugin_compatibility_report(manifest, plugin_name=plugin_name)
+        if not compatibility["compatible"]:
+            logger.warning("⏭️ Plugin %s disabled by compatibility check: %s", plugin_name, "; ".join(compatibility["reasons"]))
+            continue
         if not _effective_plugin_enabled(plugin_name, manifest):
             logger.info("⏭️ Plugin %s disabled by platform control", plugin_name)
             continue
@@ -601,6 +627,8 @@ def create_plugin_manifest_router() -> APIRouter:
                 "manifest_endpoint": "/api/v1/plugins/manifest",
                 "plugins_endpoint": "/api/v1/plugins",
                 "frontend_loader": "/plugin-loader.js",
+                "runtime_api_version": PLATFORM_RUNTIME_API_VERSION,
+                "frontend_runtime_version": FRONTEND_RUNTIME_VERSION,
             },
         }
 
@@ -729,6 +757,8 @@ def create_plugin_manifest_router() -> APIRouter:
                 "manifest_endpoint": "/api/v1/plugins/manifest",
                 "plugins_endpoint": "/api/v1/plugins",
                 "frontend_loader": "/plugin-loader.js",
+                "runtime_api_version": PLATFORM_RUNTIME_API_VERSION,
+                "frontend_runtime_version": FRONTEND_RUNTIME_VERSION,
             },
         }
 

@@ -118,3 +118,21 @@ def test_write_latest_index_points_to_report_paths(tmp_path, monkeypatch):
     assert index["sample_status"] == "passed"
     assert index["json"] == str(output_dir / "release_candidate_report.json")
     assert index["markdown"] == str(output_dir / "release_candidate_report.md")
+
+
+def test_scan_gate_warning_outputs_ignores_status_severity_warning_words(tmp_path, monkeypatch):
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    checked = source_root / "issue.py"
+    checked.write_text(
+        'payload = {"severity": "warning", "message": "allowed severity"}\n',
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(rc_check, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(rc_check, "SEARCH_ROOTS", ("source",))
+
+    result = rc_check.scan_gate_warning_outputs()
+
+    assert result["ok"] is True
+    assert result["offender_count"] == 0

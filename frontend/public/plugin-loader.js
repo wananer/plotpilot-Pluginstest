@@ -382,6 +382,8 @@
         capabilities: item.capabilities || {},
         permissions: Array.isArray(item.permissions) ? item.permissions : [],
         hooks: Array.isArray(item.hooks) ? item.hooks : [],
+        compatibility: item.compatibility || null,
+        disabled_reason: item.disabled_reason || null,
         manifest: item.manifest || {},
       });
     }

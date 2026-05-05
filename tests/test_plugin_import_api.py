@@ -329,3 +329,74 @@ def test_plugin_manifest_exposes_styles_and_capabilities(tmp_path, monkeypatch):
     assert payload["items"][0]["capabilities"] == {"context_injection": True}
     assert payload["items"][0]["permissions"] == ["read_novel", "write_plugin_storage"]
     assert payload["items"][0]["hooks"] == ["before_context_build", "after_commit"]
+
+
+def test_plugin_manifest_reports_version_compatibility(tmp_path, monkeypatch):
+    plugins_root = tmp_path / "plugins"
+    plugin_dir = plugins_root / "compat_plugin"
+    (plugin_dir / "static").mkdir(parents=True)
+    (plugin_dir / "__init__.py").write_text("def init_api(app):\n    return None\n", encoding="utf-8")
+    (plugin_dir / "plugin.json").write_text(
+        json.dumps(
+            {
+                "name": "compat_plugin",
+                "display_name": "Compat Plugin",
+                "enabled": True,
+                "runtime": {
+                    "type": "plotpilot_plugin",
+                    "api_version": "0.2",
+                    "frontend_runtime_version": "0.5.0",
+                },
+                "frontend": {"scripts": ["static/inject.js"]},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (plugin_dir / "static" / "inject.js").write_text("console.log('ok');\n", encoding="utf-8")
+
+    monkeypatch.setattr(plugin_loader, "_PLUGINS_ROOT", plugins_root)
+    client = _make_client()
+
+    payload = client.get("/api/v1/plugins").json()
+    record = payload["items"][0]
+
+    assert record["compatibility"]["compatible"] is True
+    assert record["compatibility"]["status"] in {"compatible", "assumed_compatible"}
+    assert record["compatibility"]["current"]["host_runtime_api_version"] == "0.2"
+    assert record["disabled_reason"] is None
+
+
+def test_plugin_manifest_marks_incompatible_runtime_versions(tmp_path, monkeypatch):
+    plugins_root = tmp_path / "plugins"
+    plugin_dir = plugins_root / "broken_plugin"
+    (plugin_dir / "static").mkdir(parents=True)
+    (plugin_dir / "__init__.py").write_text("def init_api(app):\n    return None\n", encoding="utf-8")
+    (plugin_dir / "plugin.json").write_text(
+        json.dumps(
+            {
+                "name": "broken_plugin",
+                "display_name": "Broken Plugin",
+                "enabled": True,
+                "runtime": {
+                    "type": "plotpilot_plugin",
+                    "api_version": "9.9",
+                    "frontend_runtime_version": "9.9.0",
+                },
+                "frontend": {"scripts": ["static/inject.js"]},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (plugin_dir / "static" / "inject.js").write_text("console.log('broken');\n", encoding="utf-8")
+
+    monkeypatch.setattr(plugin_loader, "_PLUGINS_ROOT", plugins_root)
+    client = _make_client()
+
+    payload = client.get("/api/v1/plugins").json()
+    record = payload["items"][0]
+
+    assert record["enabled"] is False
+    assert record["compatibility"]["compatible"] is False
+    assert record["compatibility"]["status"] == "incompatible"
+    assert record["disabled_reason"]
+    assert payload["frontend_scripts"] == []

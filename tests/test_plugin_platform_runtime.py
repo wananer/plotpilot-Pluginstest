@@ -254,6 +254,24 @@ def test_plugin_host_exposes_readonly_host_database_and_writable_plugin_area(tmp
         raw_host.read_host_rows("DELETE FROM chapters")
 
 
+def test_plugin_storage_status_and_export_include_versioned_snapshot(tmp_path):
+    storage = PluginStorage(root=tmp_path / "plugin_platform")
+    storage.write_json("world_evolution_core", ["novels", "novel-a", "state.json"], {"ok": True})
+    storage.append_jsonl("world_evolution_core", ["novels", "novel-a", "logs.jsonl"], {"event": "saved"})
+
+    status = storage.status()
+    exported = storage.export_plugin_state("world_evolution_core")
+
+    assert status["schema_version"] == 1
+    assert status["state_count"] == 1
+    assert status["log_count"] == 1
+    assert status["plugins"][0]["plugin_name"] == "world_evolution_core"
+    assert exported["schema_version"] == 1
+    assert exported["plugin_name"] == "world_evolution_core"
+    assert exported["state"][0]["value"] == {"ok": True}
+    assert exported["logs"][0]["value"] == {"event": "saved"}
+
+
 def test_job_registry_appends_jsonl_and_builds_dedup_key(tmp_path):
     storage = PluginStorage(root=tmp_path)
     registry = PluginJobRegistry(storage=storage)
